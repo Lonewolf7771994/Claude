@@ -1,97 +1,115 @@
 // @version=6
-// Order Flow Suite — VWAP + Volume Profile (FRVP) + FVG + Delta proxy + Signals
-//
+// Order Flow Suite v2 — VWAP + FRVP + FVG + Delta + Signals
+// ============================================================================
+// VISUAL MAP (what every line/box on your chart means)
+// ----------------------------------------------------------------------------
+//   ORANGE solid line ............ Anchored VWAP
+//   ORANGE dotted lines .......... VWAP ±1σ and ±2σ bands
+//   YELLOW horizontal line ....... POC (Point of Control)
+//   BLUE horizontal lines ........ VAH / VAL (Value Area boundaries)
+//   YELLOW shaded background ..... Value Area (between VAH and VAL)
+//   GREEN  box (solid outline) ... Unmitigated BULLISH FVG = LONG entry zone
+//   RED    box (solid outline) ... Unmitigated BEARISH FVG = SHORT entry zone
+//   GREY   box (faded) ........... Mitigated FVG (informational only)
+//   GREEN  ▲ + dashed lines ...... LONG signal with Entry / TP / SL
+//   RED    ▼ + dashed lines ...... SHORT signal with Entry / TP / SL
+//   TOP-RIGHT TABLE .............. Live readout of current levels
+// ----------------------------------------------------------------------------
 // HONEST SCOPE
-//   Pine has no access to real order flow (DOM / footprint / true bid-ask delta).
-//   "Delta" and "CVD" here are derived from OHLCV using the standard
-//   close-position-in-range estimator. On feeds without real volume
-//   (e.g. some XAUUSD CFD feeds), volume = tick volume.
-//
-// FEATURES
-//   - Anchored VWAP (session / week / month) with ±N stdev bands
-//   - Fair Value Gap detection (3-bar) with mitigation tracking
-//   - Fixed-range Volume Profile over last N bars: POC, VAH, VAL
-//   - Estimated volume delta and CVD
-//   - Confluence-based long/short signals
-//   - ATR-based TP/SL lines drawn from each signal
-//
-// WORKS ON: XAUUSD, all crypto pairs, any symbol Pine can plot.
+//   Pine has NO real order flow. "Delta" / "CVD" here are estimated from
+//   close-position-in-bar — a standard proxy. On feeds without real volume
+//   (some XAUUSD CFD feeds), volume = tick volume.
+// ============================================================================
 
-indicator("Order Flow Suite — VWAP/FVG/FRVP/Delta", shorttitle="OFS", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("Order Flow Suite v2", shorttitle="OFS v2", overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ─── INPUTS ──────────────────────────────────────────────────────────────────
-grpVwap   = "VWAP"
-vwapAnchor = input.string("Session", "Anchor", options=["Session","Week","Month"], group=grpVwap)
-showVwap   = input.bool(true,  "Show VWAP",  group=grpVwap)
-showBands  = input.bool(true,  "Show Bands", group=grpVwap)
-bandMult1  = input.float(1.0,  "Band 1 stdev", step=0.1, group=grpVwap)
-bandMult2  = input.float(2.0,  "Band 2 stdev", step=0.1, group=grpVwap)
+gView   = "Display"
+compact     = input.bool(true,  "Compact mode (hide minor lines)",      group=gView)
+showTable   = input.bool(true,  "Show info table (top-right)",          group=gView)
+extendLines = input.bool(true,  "Extend key levels across chart",       group=gView)
 
-grpFvg    = "Fair Value Gaps"
-showFvg   = input.bool(true, "Show FVGs", group=grpFvg)
-fvgLookback = input.int(200, "Max FVGs tracked", minval=10, maxval=500, group=grpFvg)
-mitigateOnTouch = input.bool(true, "Mitigate on wick touch", group=grpFvg)
+gVwap   = "VWAP"
+showVwap    = input.bool(true,  "VWAP line",                            group=gVwap)
+showBands   = input.bool(true,  "VWAP bands",                           group=gVwap)
+vwapAnchor  = input.string("Session", "Anchor", options=["Session","Week","Month"], group=gVwap)
+bandMult1   = input.float(1.0,  "Band 1 σ", step=0.1,                   group=gVwap)
+bandMult2   = input.float(2.0,  "Band 2 σ", step=0.1,                   group=gVwap)
+colVwap     = input.color(color.orange, "VWAP color",                   group=gVwap)
 
-grpVp     = "Volume Profile (FRVP)"
-showVp    = input.bool(true, "Show Profile", group=grpVp)
-vpBars    = input.int(200, "Lookback bars", minval=20, maxval=2000, group=grpVp)
-vpRows    = input.int(50,  "Rows", minval=10, maxval=200, group=grpVp)
-vaPct     = input.float(70.0, "Value Area %", minval=50, maxval=95, step=1, group=grpVp) / 100.0
-vpRight   = input.int(30,  "Profile width (bars right)", minval=5, maxval=200, group=grpVp)
+gFvg    = "FVG (Entry Zones)"
+showFvg     = input.bool(true,  "Show FVG zones",                       group=gFvg)
+showMitig   = input.bool(false, "Show mitigated FVGs (clutter)",        group=gFvg)
+maxFvg      = input.int(8,      "Max active FVGs shown", minval=1, maxval=30, group=gFvg)
+mitigMode   = input.string("Wick", "Mitigation", options=["Wick","Close"], group=gFvg)
+colBull     = input.color(color.new(#00c853, 70), "Bull FVG fill",      group=gFvg)
+colBear     = input.color(color.new(#d50000, 70), "Bear FVG fill",      group=gFvg)
 
-grpDelta  = "Delta (proxy)"
-showCvd   = input.bool(false, "Plot CVD in separate pane (use add to chart)", group=grpDelta)
-deltaLen  = input.int(20, "Delta SMA length", minval=2, maxval=200, group=grpDelta)
+gVp     = "Volume Profile (FRVP)"
+showVp      = input.bool(true,  "Show profile",                         group=gVp)
+showVpHist  = input.bool(false, "Show histogram bars (right side)",     group=gVp)
+showVaFill  = input.bool(true,  "Shade Value Area",                     group=gVp)
+vpBars      = input.int(300,    "Lookback bars", minval=50, maxval=2000, group=gVp)
+vpRows      = input.int(48,     "Rows", minval=20, maxval=200,          group=gVp)
+vaPct       = input.float(70.0, "Value Area %", minval=50, maxval=95, step=1, group=gVp) / 100.0
+colPoc      = input.color(#ffd600, "POC color",                         group=gVp)
+colVa       = input.color(#2962ff, "VAH/VAL color",                     group=gVp)
 
-grpSig    = "Signals"
-useVwapBias = input.bool(true,  "Require side of VWAP", group=grpSig)
-useFvgConf  = input.bool(true,  "Require recent unmitigated FVG", group=grpSig)
-useVpConf   = input.bool(true,  "Require price near POC/VAH/VAL", group=grpSig)
-useDeltaConf= input.bool(true,  "Require delta confirmation", group=grpSig)
-proximityAtr= input.float(0.5,  "Proximity to profile level (ATR)", step=0.1, group=grpSig)
+gDelta  = "Delta (proxy)"
+deltaLen    = input.int(20, "Delta SMA length", minval=2,               group=gDelta)
 
-grpRisk   = "Risk / Targets"
-atrLen    = input.int(14,  "ATR length", minval=2, group=grpRisk)
-slMult    = input.float(1.5, "SL = ATR ×", step=0.1, group=grpRisk)
-tpMult    = input.float(2.5, "TP = ATR ×", step=0.1, group=grpRisk)
-showRR    = input.bool(true, "Draw TP/SL lines on signal", group=grpRisk)
+gSig    = "Signals"
+useVwapBias = input.bool(true,  "Require side of VWAP",                 group=gSig)
+useFvgConf  = input.bool(true,  "Require unmitigated FVG in direction", group=gSig)
+useVpConf   = input.bool(true,  "Require near POC / VAH / VAL",         group=gSig)
+useDeltaConf= input.bool(true,  "Require delta confirmation",           group=gSig)
+proxAtr     = input.float(0.5,  "Level proximity (×ATR)", step=0.1,     group=gSig)
+cooldown    = input.int(5,      "Min bars between signals", minval=1,   group=gSig)
 
-// ─── ANCHORED VWAP + BANDS ──────────────────────────────────────────────────
-anchorChange = vwapAnchor == "Session" ? ta.change(time("D")) != 0 :
-               vwapAnchor == "Week"    ? ta.change(time("W")) != 0 :
-                                          ta.change(time("M")) != 0
+gRisk   = "Risk / Targets"
+atrLen      = input.int(14,     "ATR length", minval=2,                 group=gRisk)
+slMult      = input.float(1.5,  "SL = ATR ×", step=0.1,                 group=gRisk)
+tpMult      = input.float(2.5,  "TP = ATR ×", step=0.1,                 group=gRisk)
+rrExtend    = input.int(40,     "TP/SL extend bars", minval=10,         group=gRisk)
 
-var float sumPV  = 0.0
-var float sumV   = 0.0
-var float sumPV2 = 0.0
-if anchorChange or bar_index == 0
-    sumPV  := 0.0
-    sumV   := 0.0
-    sumPV2 := 0.0
+// ─── VWAP + BANDS ───────────────────────────────────────────────────────────
+anchorReset = vwapAnchor == "Session" ? ta.change(time("D")) != 0 :
+              vwapAnchor == "Week"    ? ta.change(time("W")) != 0 :
+                                         ta.change(time("M")) != 0
 
-typical = (high + low + close) / 3.0
-v       = nz(volume, 1)
-sumPV  += typical * v
-sumV   += v
-sumPV2 += typical * typical * v
+var float sPV  = 0.0
+var float sV   = 0.0
+var float sPV2 = 0.0
+if anchorReset or bar_index == 0
+    sPV  := 0.0
+    sV   := 0.0
+    sPV2 := 0.0
 
-vwap     = sumV > 0 ? sumPV / sumV : na
-variance = sumV > 0 ? math.max(sumPV2 / sumV - vwap * vwap, 0) : 0
-stdev    = math.sqrt(variance)
+tp_  = (high + low + close) / 3.0
+v_   = nz(volume, 1)
+sPV  += tp_ * v_
+sV   += v_
+sPV2 += tp_ * tp_ * v_
 
-plot(showVwap  ? vwap : na, "VWAP", color=color.new(color.orange, 0), linewidth=2)
-upper1 = vwap + bandMult1 * stdev
-lower1 = vwap - bandMult1 * stdev
-upper2 = vwap + bandMult2 * stdev
-lower2 = vwap - bandMult2 * stdev
-plot(showBands ? upper1 : na, "Upper 1σ", color=color.new(color.teal, 40))
-plot(showBands ? lower1 : na, "Lower 1σ", color=color.new(color.teal, 40))
-plot(showBands ? upper2 : na, "Upper 2σ", color=color.new(color.teal, 70))
-plot(showBands ? lower2 : na, "Lower 2σ", color=color.new(color.teal, 70))
+vwap   = sV > 0 ? sPV / sV : na
+varnce = sV > 0 ? math.max(sPV2 / sV - vwap * vwap, 0) : 0
+sd     = math.sqrt(varnce)
+u1 = vwap + bandMult1 * sd
+l1 = vwap - bandMult1 * sd
+u2 = vwap + bandMult2 * sd
+l2 = vwap - bandMult2 * sd
 
-// ─── FAIR VALUE GAPS ────────────────────────────────────────────────────────
+plot(showVwap                       ? vwap : na, "VWAP",  color=colVwap, linewidth=2)
+plot(showBands and not compact      ? u1   : na, "+1σ",   color=color.new(colVwap, 55), style=plot.style_circles)
+plot(showBands and not compact      ? l1   : na, "-1σ",   color=color.new(colVwap, 55), style=plot.style_circles)
+plot(showBands                      ? u2   : na, "+2σ",   color=color.new(colVwap, 70), style=plot.style_circles)
+plot(showBands                      ? l2   : na, "-2σ",   color=color.new(colVwap, 70), style=plot.style_circles)
+
+// ─── FVG (entry zones) ──────────────────────────────────────────────────────
 type Fvg
     box   bx
+    label lb
     float top
     float bot
     bool  bull
@@ -99,41 +117,72 @@ type Fvg
 
 var array<Fvg> fvgs = array.new<Fvg>()
 
-bullFvg = low > high[2]
+bullFvg = low  > high[2]
 bearFvg = high < low[2]
 
 if showFvg and bullFvg
     top = low
     bot = high[2]
-    bx  = box.new(bar_index - 2, top, bar_index + 5, bot, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85), extend=extend.right)
-    array.push(fvgs, Fvg.new(bx, top, bot, true, false))
+    bx  = box.new(bar_index - 2, top, bar_index, bot,
+         border_color=color.new(#00c853, 0), border_width=1,
+         bgcolor=colBull, extend=extend.right)
+    lb  = label.new(bar_index, (top + bot) / 2.0, "LONG ZONE",
+         style=label.style_label_left, color=color.new(#00c853, 30),
+         textcolor=color.white, size=size.tiny)
+    array.push(fvgs, Fvg.new(bx, lb, top, bot, true, false))
 
 if showFvg and bearFvg
     top = low[2]
     bot = high
-    bx  = box.new(bar_index - 2, top, bar_index + 5, bot, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85), extend=extend.right)
-    array.push(fvgs, Fvg.new(bx, top, bot, false, false))
+    bx  = box.new(bar_index - 2, top, bar_index, bot,
+         border_color=color.new(#d50000, 0), border_width=1,
+         bgcolor=colBear, extend=extend.right)
+    lb  = label.new(bar_index, (top + bot) / 2.0, "SHORT ZONE",
+         style=label.style_label_left, color=color.new(#d50000, 30),
+         textcolor=color.white, size=size.tiny)
+    array.push(fvgs, Fvg.new(bx, lb, top, bot, false, false))
 
-// Trim and mitigate
-if array.size(fvgs) > fvgLookback
-    old = array.shift(fvgs)
-    box.delete(old.bx)
-
+// Mitigate + prune
 if array.size(fvgs) > 0
     for i = array.size(fvgs) - 1 to 0
         f = array.get(fvgs, i)
         if not f.mitigated
-            touched = mitigateOnTouch ?
-                       (f.bull ? low  <= f.top and low  >= f.bot : high >= f.bot and high <= f.top) :
-                       (f.bull ? close < f.bot : close > f.top)
+            touched = mitigMode == "Wick" ?
+                       (f.bull ? low  <= f.top : high >= f.bot) :
+                       (f.bull ? close <  f.bot : close >  f.top)
             if touched
                 f.mitigated := true
-                box.set_bgcolor(f.bx, color.new(color.gray, 90))
-                box.set_border_color(f.bx, color.new(color.gray, 70))
-                box.set_extend(f.bx, extend.none)
-                box.set_right(f.bx, bar_index)
+                if showMitig
+                    box.set_bgcolor(f.bx, color.new(color.gray, 88))
+                    box.set_border_color(f.bx, color.new(color.gray, 70))
+                    box.set_extend(f.bx, extend.none)
+                    box.set_right(f.bx, bar_index)
+                    label.set_text(f.lb, "mitigated")
+                    label.set_color(f.lb, color.new(color.gray, 60))
+                else
+                    box.delete(f.bx)
+                    label.delete(f.lb)
 
-// Most-recent unmitigated FVG queries
+// Keep only N active
+activeCount = 0
+if array.size(fvgs) > 0
+    for i = array.size(fvgs) - 1 to 0
+        f = array.get(fvgs, i)
+        if not f.mitigated
+            activeCount += 1
+            if activeCount > maxFvg
+                box.delete(f.bx)
+                label.delete(f.lb)
+                array.remove(fvgs, i)
+
+// Move active labels to last bar for readability
+if barstate.islast and array.size(fvgs) > 0
+    for i = 0 to array.size(fvgs) - 1
+        f = array.get(fvgs, i)
+        if not f.mitigated
+            label.set_x(f.lb, bar_index + 2)
+            label.set_y(f.lb, (f.top + f.bot) / 2.0)
+
 f_hasBullFvg() =>
     bool found = false
     if array.size(fvgs) > 0
@@ -154,11 +203,18 @@ f_hasBearFvg() =>
                 break
     found
 
-// ─── VOLUME PROFILE (FRVP) ──────────────────────────────────────────────────
-var box   poc_line_box = na
-var line  vah_line     = na
-var line  val_line     = na
+// ─── VOLUME PROFILE (computed ONCE on last bar; lines persisted) ───────────
+var line  pocLn = na
+var line  vahLn = na
+var line  valLn = na
+var label pocLb = na
+var label vahLb = na
+var label valLb = na
+var box   vaFill = na
 var array<box> vpBoxes = array.new<box>()
+var float pocP = na
+var float vahP = na
+var float valP = na
 
 f_clearVpBoxes() =>
     if array.size(vpBoxes) > 0
@@ -166,81 +222,15 @@ f_clearVpBoxes() =>
             box.delete(array.get(vpBoxes, i))
         array.clear(vpBoxes)
 
-if showVp and barstate.islast
+if barstate.islast and showVp
     f_clearVpBoxes()
-    hh = ta.highest(high, vpBars)
-    ll = ta.lowest(low,   vpBars)
-    rng = hh - ll
-    if rng > 0
-        step = rng / vpRows
-        bins = array.new<float>(vpRows, 0.0)
-        for b = 0 to vpBars - 1
-            hi = high[b]
-            lo = low[b]
-            vol = nz(volume[b], 1)
-            barRng = hi - lo
-            if barRng > 0
-                slices = vol / vpRows
-                for r = 0 to vpRows - 1
-                    binLo = ll + r * step
-                    binHi = binLo + step
-                    overlap = math.max(0.0, math.min(hi, binHi) - math.max(lo, binLo))
-                    if overlap > 0
-                        share = overlap / barRng
-                        array.set(bins, r, array.get(bins, r) + vol * share)
-            else
-                r = math.min(vpRows - 1, math.max(0, int((hi - ll) / step)))
-                array.set(bins, r, array.get(bins, r) + vol)
-        // POC
-        pocIdx = 0
-        pocVol = 0.0
-        for r = 0 to vpRows - 1
-            if array.get(bins, r) > pocVol
-                pocVol := array.get(bins, r)
-                pocIdx := r
-        totalVol = array.sum(bins)
-        targetVol = totalVol * vaPct
-        accVol = pocVol
-        lo_idx = pocIdx
-        hi_idx = pocIdx
-        while accVol < targetVol and (lo_idx > 0 or hi_idx < vpRows - 1)
-            upVol = hi_idx < vpRows - 1 ? array.get(bins, hi_idx + 1) : -1.0
-            dnVol = lo_idx > 0          ? array.get(bins, lo_idx - 1) : -1.0
-            if upVol >= dnVol and upVol >= 0
-                hi_idx += 1
-                accVol += upVol
-            else if dnVol >= 0
-                lo_idx -= 1
-                accVol += dnVol
-            else
-                break
-        pocPrice = ll + (pocIdx + 0.5) * step
-        vahPrice = ll + (hi_idx + 1)    * step
-        valPrice = ll + lo_idx          * step
-        // Draw rows
-        maxBinVol = pocVol
-        rightEdge = bar_index + vpRight
-        for r = 0 to vpRows - 1
-            v_r = array.get(bins, r)
-            if v_r > 0
-                width = int(vpRight * (v_r / maxBinVol))
-                inVa = r >= lo_idx and r <= hi_idx
-                col = r == pocIdx ? color.new(color.yellow, 30) : inVa ? color.new(color.blue, 70) : color.new(color.gray, 80)
-                b = box.new(bar_index, ll + (r + 1) * step, bar_index + width, ll + r * step, border_color=na, bgcolor=col)
-                array.push(vpBoxes, b)
-        // POC / VAH / VAL labels
-        label.new(rightEdge, pocPrice, "POC " + str.tostring(pocPrice, format.mintick), style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
-        label.new(rightEdge, vahPrice, "VAH " + str.tostring(vahPrice, format.mintick), style=label.style_label_left, color=color.new(color.blue, 30),   textcolor=color.white, size=size.small)
-        label.new(rightEdge, valPrice, "VAL " + str.tostring(valPrice, format.mintick), style=label.style_label_left, color=color.new(color.blue, 30),   textcolor=color.white, size=size.small)
+    line.delete(pocLn), line.delete(vahLn), line.delete(valLn)
+    label.delete(pocLb), label.delete(vahLb), label.delete(valLb)
+    box.delete(vaFill)
 
-// Persisted POC/VAH/VAL for signal logic (recomputed lightweight every bar)
-f_profileLevels() =>
     hh = ta.highest(high, vpBars)
     ll = ta.lowest(low,   vpBars)
     rng = hh - ll
-    pocPrice = float(na)
-    vahPrice = float(na)
-    valPrice = float(na)
     if rng > 0
         step = rng / vpRows
         bins = array.new<float>(vpRows, 0.0)
@@ -257,97 +247,146 @@ f_profileLevels() =>
                     if overlap > 0
                         share = overlap / barRng
                         array.set(bins, r, array.get(bins, r) + vol * share)
+            else
+                idx = math.min(vpRows - 1, math.max(0, int((hi - ll) / step)))
+                array.set(bins, idx, array.get(bins, idx) + vol)
+
         pocIdx = 0
         pocVol = 0.0
         for r = 0 to vpRows - 1
             if array.get(bins, r) > pocVol
                 pocVol := array.get(bins, r)
                 pocIdx := r
+
         totalVol = array.sum(bins)
-        targetVol = totalVol * vaPct
-        accVol = pocVol
-        lo_idx = pocIdx
-        hi_idx = pocIdx
-        while accVol < targetVol and (lo_idx > 0 or hi_idx < vpRows - 1)
-            upVol = hi_idx < vpRows - 1 ? array.get(bins, hi_idx + 1) : -1.0
-            dnVol = lo_idx > 0          ? array.get(bins, lo_idx - 1) : -1.0
-            if upVol >= dnVol and upVol >= 0
-                hi_idx += 1
-                accVol += upVol
-            else if dnVol >= 0
-                lo_idx -= 1
-                accVol += dnVol
+        target   = totalVol * vaPct
+        acc      = pocVol
+        loI      = pocIdx
+        hiI      = pocIdx
+        while acc < target and (loI > 0 or hiI < vpRows - 1)
+            upV = hiI < vpRows - 1 ? array.get(bins, hiI + 1) : -1.0
+            dnV = loI > 0          ? array.get(bins, loI - 1) : -1.0
+            if upV >= dnV and upV >= 0
+                hiI += 1
+                acc += upV
+            else if dnV >= 0
+                loI -= 1
+                acc += dnV
             else
                 break
-        pocPrice := ll + (pocIdx + 0.5) * step
-        vahPrice := ll + (hi_idx + 1)    * step
-        valPrice := ll + lo_idx          * step
-    [pocPrice, vahPrice, valPrice]
 
-[pocP, vahP, valP] = f_profileLevels()
+        pocP := ll + (pocIdx + 0.5) * step
+        vahP := ll + (hiI + 1)       * step
+        valP := ll +  loI            * step
 
-// ─── DELTA PROXY + CVD ──────────────────────────────────────────────────────
-rng = high - low
-buyFrac  = rng > 0 ? (close - low) / rng : 0.5
-sellFrac = 1.0 - buyFrac
-buyVol   = nz(volume, 1) * buyFrac
-sellVol  = nz(volume, 1) * sellFrac
-delta    = buyVol - sellVol
-deltaSma = ta.sma(delta, deltaLen)
-var float cvd = 0.0
-cvd += delta
+        leftX  = bar_index - vpBars + 1
+        rightX = bar_index + 10
+        xs     = extendLines ? extend.both : extend.none
+
+        // VA shading
+        if showVaFill
+            vaFill := box.new(leftX, vahP, rightX, valP,
+                 border_color=na, bgcolor=color.new(colPoc, 92), extend=extendLines ? extend.right : extend.none)
+
+        pocLn := line.new(leftX, pocP, rightX, pocP, color=colPoc,  width=2, extend=xs)
+        vahLn := line.new(leftX, vahP, rightX, vahP, color=colVa,   width=1, style=line.style_dashed, extend=xs)
+        valLn := line.new(leftX, valP, rightX, valP, color=colVa,   width=1, style=line.style_dashed, extend=xs)
+
+        pocLb := label.new(rightX, pocP, "POC " + str.tostring(pocP, format.mintick),
+             style=label.style_label_left, color=colPoc,                    textcolor=color.black, size=size.small)
+        vahLb := label.new(rightX, vahP, "VAH " + str.tostring(vahP, format.mintick),
+             style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
+        valLb := label.new(rightX, valP, "VAL " + str.tostring(valP, format.mintick),
+             style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
+
+        // Optional histogram
+        if showVpHist
+            maxV = pocVol
+            wMax = 30
+            for r = 0 to vpRows - 1
+                vr = array.get(bins, r)
+                if vr > 0
+                    w   = int(wMax * (vr / maxV))
+                    inVa = r >= loI and r <= hiI
+                    col = r == pocIdx ? color.new(colPoc, 30) : inVa ? color.new(colVa, 75) : color.new(color.gray, 85)
+                    b   = box.new(bar_index + 1, ll + (r + 1) * step, bar_index + 1 + w, ll + r * step, border_color=na, bgcolor=col)
+                    array.push(vpBoxes, b)
+
+// ─── DELTA + CVD (proxy) ────────────────────────────────────────────────────
+rng_  = high - low
+buyF  = rng_ > 0 ? (close - low) / rng_ : 0.5
+sellF = 1.0 - buyF
+delta = nz(volume, 1) * (buyF - sellF)
+dSma  = ta.sma(delta, deltaLen)
 
 // ─── ATR ────────────────────────────────────────────────────────────────────
 atr = ta.atr(atrLen)
 
 // ─── SIGNAL CONFLUENCE ─────────────────────────────────────────────────────
-nearLevel(level) => not na(level) and not na(atr) and math.abs(close - level) <= proximityAtr * atr
-nearAnyVpUp   = nearLevel(valP) or nearLevel(pocP)
-nearAnyVpDown = nearLevel(vahP) or nearLevel(pocP)
+near(level) => not na(level) and not na(atr) and math.abs(close - level) <= proxAtr * atr
+nearLong  = near(valP) or near(pocP)
+nearShort = near(vahP) or near(pocP)
 
-vwapBiasLong  = useVwapBias  ? close > vwap : true
-vwapBiasShort = useVwapBias  ? close < vwap : true
-fvgLong       = useFvgConf   ? f_hasBullFvg() : true
-fvgShort      = useFvgConf   ? f_hasBearFvg() : true
-vpLong        = useVpConf    ? nearAnyVpUp    : true
-vpShort       = useVpConf    ? nearAnyVpDown  : true
-deltaLong     = useDeltaConf ? deltaSma > 0   : true
-deltaShort    = useDeltaConf ? deltaSma < 0   : true
+biasL  = useVwapBias  ? close > vwap : true
+biasS  = useVwapBias  ? close < vwap : true
+fvgL   = useFvgConf   ? f_hasBullFvg() : true
+fvgS   = useFvgConf   ? f_hasBearFvg() : true
+vpL    = useVpConf    ? nearLong  : true
+vpS    = useVpConf    ? nearShort : true
+dL     = useDeltaConf ? dSma > 0  : true
+dS     = useDeltaConf ? dSma < 0  : true
 
-bullTrigger = close > open and close > high[1]
-bearTrigger = close < open and close < low[1]
+trigL = close > open and close > high[1]
+trigS = close < open and close < low[1]
+longSig  = trigL and biasL and fvgL and vpL and dL
+shortSig = trigS and biasS and fvgS and vpS and dS
 
-longSig  = bullTrigger and vwapBiasLong  and fvgLong  and vpLong  and deltaLong
-shortSig = bearTrigger and vwapBiasShort and fvgShort and vpShort and deltaShort
-
-// Prevent overlapping back-to-back signals
-var int lastSigBar = -1000
-minBarsBetween = 3
-longOk  = longSig  and bar_index - lastSigBar >= minBarsBetween
-shortOk = shortSig and bar_index - lastSigBar >= minBarsBetween
+var int lastSig = -1000
+longOk  = longSig  and bar_index - lastSig >= cooldown
+shortOk = shortSig and bar_index - lastSig >= cooldown
 if longOk or shortOk
-    lastSigBar := bar_index
+    lastSig := bar_index
 
-plotshape(longOk,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="LONG")
-plotshape(shortOk, title="Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),   size=size.small, text="SHORT")
+plotshape(longOk,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=#00c853, size=size.normal, text="LONG",  textcolor=color.white)
+plotshape(shortOk, title="Short", style=shape.triangledown, location=location.abovebar, color=#d50000, size=size.normal, text="SHORT", textcolor=color.white)
 
 alertcondition(longOk,  title="Long signal",  message="OFS LONG {{ticker}} @ {{close}}")
 alertcondition(shortOk, title="Short signal", message="OFS SHORT {{ticker}} @ {{close}}")
 
-// ─── TP / SL LINES ──────────────────────────────────────────────────────────
-if showRR and (longOk or shortOk)
+// ─── TP / SL ZONES (drawn as persistent lines + labels) ────────────────────
+if longOk or shortOk
     entry = close
     sl    = longOk ? entry - slMult * atr : entry + slMult * atr
     tp    = longOk ? entry + tpMult * atr : entry - tpMult * atr
-    col_e = color.new(color.white,  0)
-    col_t = color.new(color.green, 20)
-    col_s = color.new(color.red,   20)
-    line.new(bar_index, entry, bar_index + 20, entry, color=col_e, width=1, style=line.style_dashed)
-    line.new(bar_index, tp,    bar_index + 20, tp,    color=col_t, width=2)
-    line.new(bar_index, sl,    bar_index + 20, sl,    color=col_s, width=2)
-    label.new(bar_index + 20, entry, "Entry " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(color.gray, 30), textcolor=color.white, size=size.small)
-    label.new(bar_index + 20, tp,    "TP "    + str.tostring(tp,    format.mintick), style=label.style_label_left, color=col_t,                    textcolor=color.white, size=size.small)
-    label.new(bar_index + 20, sl,    "SL "    + str.tostring(sl,    format.mintick), style=label.style_label_left, color=col_s,                    textcolor=color.white, size=size.small)
+    eCol  = color.new(color.white, 0)
+    tCol  = color.new(#00c853, 0)
+    sCol  = color.new(#d50000, 0)
+    line.new(bar_index, entry, bar_index + rrExtend, entry, color=eCol, width=1, style=line.style_dashed)
+    line.new(bar_index, tp,    bar_index + rrExtend, tp,    color=tCol, width=2)
+    line.new(bar_index, sl,    bar_index + rrExtend, sl,    color=sCol, width=2)
+    label.new(bar_index + rrExtend, entry, "Entry "+ str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+    label.new(bar_index + rrExtend, tp,    "TP "   + str.tostring(tp,    format.mintick), style=label.style_label_left, color=tCol,                     textcolor=color.white, size=size.small)
+    label.new(bar_index + rrExtend, sl,    "SL "   + str.tostring(sl,    format.mintick), style=label.style_label_left, color=sCol,                     textcolor=color.white, size=size.small)
 
-// ─── OPTIONAL: CVD plot (use Add Indicator to chart on separate pane) ──────
-plot(showCvd ? cvd : na, "CVD (proxy)", color=color.new(color.purple, 0), display=display.data_window)
+// ─── INFO TABLE ─────────────────────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 9, frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
+if showTable and barstate.islast
+    table.cell(t, 0, 0, "Order Flow Suite", text_color=color.white, bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(t, 1, 0, syminfo.ticker,    text_color=color.white, bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(t, 0, 1, "Price",  text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(close, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 2, "VWAP",   text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 2, na(vwap) ? "—" : str.tostring(vwap, format.mintick), text_color=colVwap, text_size=size.small)
+    table.cell(t, 0, 3, "POC",    text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 3, na(pocP) ? "—" : str.tostring(pocP, format.mintick), text_color=colPoc, text_size=size.small)
+    table.cell(t, 0, 4, "VAH",    text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 4, na(vahP) ? "—" : str.tostring(vahP, format.mintick), text_color=colVa, text_size=size.small)
+    table.cell(t, 0, 5, "VAL",    text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 5, na(valP) ? "—" : str.tostring(valP, format.mintick), text_color=colVa, text_size=size.small)
+    table.cell(t, 0, 6, "Delta",  text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(dSma, "#.##"), text_color=dSma >= 0 ? #00c853 : #d50000, text_size=size.small)
+    table.cell(t, 0, 7, "ATR",    text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(atr,  format.mintick), text_color=color.white, text_size=size.small)
+    bias = na(vwap) ? "—" : close > vwap ? "LONG bias" : "SHORT bias"
+    table.cell(t, 0, 8, "Bias",   text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 8, bias, text_color=close > vwap ? #00c853 : #d50000, text_size=size.small)
