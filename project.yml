@@ -1,0 +1,42 @@
+name: SignalFlow
+options:
+  bundleIdPrefix: app.signalflow
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+targets:
+  SignalFlow:
+    type: application
+    platform: iOS
+    sources:
+      - SignalFlow
+    info:
+      path: SignalFlow/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: SignalFlow
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - fetch
+          - remote-notification
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+          NSExceptionDomains:
+            binance.com:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: false
+              NSExceptionRequiresForwardSecrecy: false
+            yahoo.com:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: false
+              NSExceptionRequiresForwardSecrecy: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.signalflow.SignalFlow
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        ENABLE_PREVIEWS: YES
