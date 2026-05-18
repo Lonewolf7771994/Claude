@@ -451,11 +451,11 @@ if longOk or shortOk
 
 // Auto-invalidate the displayed trade when price hits TP or SL
 if not na(tEntryLn)
-    e = line.get_y1(tEntryLn)
-    s = line.get_y1(tSlLn)
-    t = line.get_y1(tTpLn)
-    isLong = t > e
-    hit = isLong ? (high >= t or low <= s) : (low <= t or high >= s)
+    eY = line.get_y1(tEntryLn)
+    sY = line.get_y1(tSlLn)
+    tY = line.get_y1(tTpLn)
+    isLong = tY > eY
+    hit = isLong ? (high >= tY or low <= sY) : (low <= tY or high >= sY)
     if hit
         line.delete(tEntryLn)
         line.delete(tTpLn)
