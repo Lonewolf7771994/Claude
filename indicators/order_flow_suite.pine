@@ -31,14 +31,14 @@ colVwap     = input.color(color.orange, "VWAP color", group=gVwap)
 gFvg    = "FVG (Entry Zones)"
 showFvg     = input.bool(true,  "Show FVG zones", group=gFvg)
 showMitig   = input.bool(false, "Show mitigated FVGs", group=gFvg)
-maxFvg      = input.int(8, "Max active FVGs shown", minval=1, maxval=30, group=gFvg)
+maxFvg      = input.int(3, "Max active FVGs shown", minval=1, maxval=30, group=gFvg)
 mitigMode   = input.string("Close", "Mitigation", options=["Wick","Close"], group=gFvg)
 colBull     = input.color(color.new(#00c853, 70), "Bull FVG fill", group=gFvg)
 colBear     = input.color(color.new(#d50000, 70), "Bear FVG fill", group=gFvg)
 
 gVp     = "Volume Profile (FRVP)"
 showVp      = input.bool(true, "Show profile", group=gVp)
-vpMode      = input.string("Fixed Range", "Profile mode", options=["Fixed Range","Rolling lookback","Visible range"], group=gVp)
+vpMode      = input.string("Rolling lookback", "Profile mode", options=["Fixed Range","Rolling lookback","Visible range"], group=gVp)
 vpStart     = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Fixed range START", group=gVp)
 vpEnd       = input.time(timestamp("01 Jan 2027 00:00 +0000"), "Fixed range END", group=gVp)
 vpBars      = input.int(300, "Rolling lookback bars", minval=50, maxval=5000, group=gVp)
@@ -207,15 +207,12 @@ f_clearVpBoxes() =>
 f_resolveRange() =>
     int sbar = 0
     int ebar = bar_index
+    msPerBar = timeframe.in_seconds() * 1000
     if vpMode == "Fixed Range"
-        i = 0
-        while i < bar_index and time[i] >= vpStart
-            i += 1
-        sbar := bar_index - i + 1
-        j = 0
-        while j < bar_index and time[j] > vpEnd
-            j += 1
-        ebar := bar_index - j
+        backStart = msPerBar > 0 ? int((time - vpStart) / msPerBar) : 0
+        backEnd   = msPerBar > 0 ? int((time - vpEnd)   / msPerBar) : 0
+        sbar := math.max(0, bar_index - math.max(0, backStart))
+        ebar := math.min(bar_index, bar_index - math.max(0, backEnd))
         if ebar < sbar
             ebar := sbar
     else if vpMode == "Rolling lookback"
@@ -224,14 +221,10 @@ f_resolveRange() =>
     else
         lvt = chart.left_visible_bar_time
         rvt = chart.right_visible_bar_time
-        i = 0
-        while i < bar_index and time[i] >= lvt
-            i += 1
-        sbar := bar_index - i + 1
-        j = 0
-        while j < bar_index and time[j] > rvt
-            j += 1
-        ebar := bar_index - j
+        backStart = msPerBar > 0 ? int((time - lvt) / msPerBar) : 0
+        backEnd   = msPerBar > 0 ? int((time - rvt) / msPerBar) : 0
+        sbar := math.max(0, bar_index - math.max(0, backStart))
+        ebar := math.min(bar_index, bar_index - math.max(0, backEnd))
         if ebar < sbar
             ebar := sbar
     [sbar, ebar]
@@ -427,8 +420,21 @@ plotshape(shortOk, title="Short", style=shape.triangledown, location=location.ab
 alertcondition(longOk,  title="Long signal",  message="OFS LONG {{ticker}} @ {{close}}")
 alertcondition(shortOk, title="Short signal", message="OFS SHORT {{ticker}} @ {{close}}")
 
-// TP / SL
+// TP / SL — only the most recent trade is shown
+var line  tEntryLn = na
+var line  tTpLn    = na
+var line  tSlLn    = na
+var label tEntryLb = na
+var label tTpLb    = na
+var label tSlLb    = na
+
 if longOk or shortOk
+    line.delete(tEntryLn)
+    line.delete(tTpLn)
+    line.delete(tSlLn)
+    label.delete(tEntryLb)
+    label.delete(tTpLb)
+    label.delete(tSlLb)
     entry = close
     sl    = longOk ? entry - slMult * atr : entry + slMult * atr
     tp    = longOk ? entry + tpMult * atr : entry - tpMult * atr
@@ -436,12 +442,33 @@ if longOk or shortOk
     tCol  = color.new(#00c853, 0)
     sCol  = color.new(#d50000, 0)
     rExt  = math.min(rrExtend, 400)
-    line.new(bar_index, entry, bar_index + rExt, entry, color=eCol, width=1, style=line.style_dashed)
-    line.new(bar_index, tp,    bar_index + rExt, tp,    color=tCol, width=2)
-    line.new(bar_index, sl,    bar_index + rExt, sl,    color=sCol, width=2)
-    label.new(bar_index + rExt, entry, "Entry " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
-    label.new(bar_index + rExt, tp,    "TP "    + str.tostring(tp,    format.mintick), style=label.style_label_left, color=tCol, textcolor=color.white, size=size.small)
-    label.new(bar_index + rExt, sl,    "SL "    + str.tostring(sl,    format.mintick), style=label.style_label_left, color=sCol, textcolor=color.white, size=size.small)
+    tEntryLn := line.new(bar_index, entry, bar_index + rExt, entry, color=eCol, width=1, style=line.style_dashed)
+    tTpLn    := line.new(bar_index, tp,    bar_index + rExt, tp,    color=tCol, width=2)
+    tSlLn    := line.new(bar_index, sl,    bar_index + rExt, sl,    color=sCol, width=2)
+    tEntryLb := label.new(bar_index + rExt, entry, "Entry " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+    tTpLb    := label.new(bar_index + rExt, tp,    "TP "    + str.tostring(tp,    format.mintick), style=label.style_label_left, color=tCol, textcolor=color.white, size=size.small)
+    tSlLb    := label.new(bar_index + rExt, sl,    "SL "    + str.tostring(sl,    format.mintick), style=label.style_label_left, color=sCol, textcolor=color.white, size=size.small)
+
+// Auto-invalidate the displayed trade when price hits TP or SL
+if not na(tEntryLn)
+    e = line.get_y1(tEntryLn)
+    s = line.get_y1(tSlLn)
+    t = line.get_y1(tTpLn)
+    isLong = t > e
+    hit = isLong ? (high >= t or low <= s) : (low <= t or high >= s)
+    if hit
+        line.delete(tEntryLn)
+        line.delete(tTpLn)
+        line.delete(tSlLn)
+        label.delete(tEntryLb)
+        label.delete(tTpLb)
+        label.delete(tSlLb)
+        tEntryLn := na
+        tTpLn    := na
+        tSlLn    := na
+        tEntryLb := na
+        tTpLb    := na
+        tSlLb    := na
 
 // INFO TABLE
 var table t = table.new(position.top_right, 2, 9, frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
