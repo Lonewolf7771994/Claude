@@ -403,11 +403,12 @@ if barstate.islast and showVp
             valLb := label.new(labelX, valP, "VAL " + str.tostring(valP, format.mintick),
                  style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
 
-            // Histogram
+            // Histogram (capped so we never draw >500 bars into the future)
             if showVpHist
                 maxV = pocVol
-                wMax = math.max(20, int(nBars * 0.15))
-                anchorBar = vpHistSide == "Right" ? math.max(rightX + 1, bar_index + 1) : leftX - 1
+                wMax = math.min(80, math.max(20, int(nBars * 0.15)))
+                rightAnchor = math.min(math.max(rightX + 1, bar_index + 1), bar_index + 400 - wMax)
+                anchorBar = vpHistSide == "Right" ? rightAnchor : leftX - 1
                 for r = 0 to vpRows - 1
                     vr = array.get(bins, r)
                     if vr > 0
