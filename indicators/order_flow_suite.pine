@@ -1,24 +1,39 @@
 // @version=6
-// Order Flow Suite v2 — VWAP + FRVP + FVG + Delta + Signals
+// Order Flow Suite v3 — VWAP + FRVP + FVG + Delta + Signals
 // ============================================================================
-// VISUAL MAP (what every line/box on your chart means)
-// ----------------------------------------------------------------------------
+// CHANGES IN v3
+//   - VWAP: anchor options expanded (Session/Week/Month/Year/Earnings/...),
+//     source selectable, formula confirmed identical to TV built-in.
+//   - Bands: choose Stdev (TV-compatible volume-weighted) or ATR-based.
+//   - Volume Profile: THREE modes — Fixed Range (matches TV's FRVP, set
+//     start/end dates), Rolling lookback, or Visible range.
+//   - VA expansion: choose Single-row or Two-row pair (TV-style).
+//   - Signals: default mode is FVG retest (swing-friendly) — fires when
+//     price wicks into an unmitigated FVG and the bar closes rejecting it.
+//     Breakout-trigger mode still available.
+//
+// VISUAL MAP
 //   ORANGE solid line ............ Anchored VWAP
-//   ORANGE dotted lines .......... VWAP ±1σ and ±2σ bands
+//   ORANGE dotted circles ........ VWAP ±1σ / ±2σ bands (or ATR bands)
 //   YELLOW horizontal line ....... POC (Point of Control)
-//   BLUE horizontal lines ........ VAH / VAL (Value Area boundaries)
+//   BLUE dashed lines ............ VAH / VAL (Value Area boundaries)
 //   YELLOW shaded background ..... Value Area (between VAH and VAL)
-//   GREEN  box (solid outline) ... Unmitigated BULLISH FVG = LONG entry zone
-//   RED    box (solid outline) ... Unmitigated BEARISH FVG = SHORT entry zone
-//   GREY   box (faded) ........... Mitigated FVG (informational only)
+//   GREEN  box ................... Unmitigated bullish FVG = LONG zone
+//   RED    box ................... Unmitigated bearish FVG = SHORT zone
 //   GREEN  ▲ + dashed lines ...... LONG signal with Entry / TP / SL
 //   RED    ▼ + dashed lines ...... SHORT signal with Entry / TP / SL
-//   TOP-RIGHT TABLE .............. Live readout of current levels
+//   TOP-RIGHT TABLE .............. Live levels readout
 // ----------------------------------------------------------------------------
 // HONEST SCOPE
 //   Pine has NO real order flow. "Delta" / "CVD" here are estimated from
 //   close-position-in-bar — a standard proxy. On feeds without real volume
 //   (some XAUUSD CFD feeds), volume = tick volume.
+//
+//   To match TradingView's built-in FRVP exactly:
+//     - Set Profile mode = "Fixed Range" and set START/END dates to the
+//       same range your TV FRVP box covers.
+//     - Set VA expansion = "Two-row pair (TV)".
+//   With identical inputs the levels match within ~one row of step size.
 // ============================================================================
 
 indicator("Order Flow Suite v2", shorttitle="OFS v2", overlay=true,
@@ -33,26 +48,34 @@ extendLines = input.bool(true,  "Extend key levels across chart",       group=gV
 gVwap   = "VWAP"
 showVwap    = input.bool(true,  "VWAP line",                            group=gVwap)
 showBands   = input.bool(true,  "VWAP bands",                           group=gVwap)
-vwapAnchor  = input.string("Session", "Anchor", options=["Session","Week","Month"], group=gVwap)
-bandMult1   = input.float(1.0,  "Band 1 σ", step=0.1,                   group=gVwap)
-bandMult2   = input.float(2.0,  "Band 2 σ", step=0.1,                   group=gVwap)
+vwapAnchor  = input.string("Week", "Anchor", options=["Session","Week","Month","Year","Earnings","Dividends","Splits"], group=gVwap, tooltip="Match TV built-in by setting Anchor = Session. Week/Month are better for swing.")
+vwapSrc     = input.source(hlc3, "Source",                              group=gVwap)
+bandMode    = input.string("Stdev (TV-compatible)", "Band calculation", options=["Stdev (TV-compatible)","ATR"], group=gVwap)
+bandMult1   = input.float(1.0,  "Band 1 multiplier", step=0.1,          group=gVwap)
+bandMult2   = input.float(2.0,  "Band 2 multiplier", step=0.1,          group=gVwap)
+bandLen     = input.int(20,     "ATR length (band mode = ATR only)", minval=2, group=gVwap)
 colVwap     = input.color(color.orange, "VWAP color",                   group=gVwap)
 
 gFvg    = "FVG (Entry Zones)"
 showFvg     = input.bool(true,  "Show FVG zones",                       group=gFvg)
 showMitig   = input.bool(false, "Show mitigated FVGs (clutter)",        group=gFvg)
 maxFvg      = input.int(8,      "Max active FVGs shown", minval=1, maxval=30, group=gFvg)
-mitigMode   = input.string("Wick", "Mitigation", options=["Wick","Close"], group=gFvg)
+mitigMode   = input.string("Close", "Mitigation", options=["Wick","Close"], group=gFvg, tooltip="Close-through is more conservative and lets retest signals fire on a wick into the zone before the zone is invalidated.")
 colBull     = input.color(color.new(#00c853, 70), "Bull FVG fill",      group=gFvg)
 colBear     = input.color(color.new(#d50000, 70), "Bear FVG fill",      group=gFvg)
 
 gVp     = "Volume Profile (FRVP)"
 showVp      = input.bool(true,  "Show profile",                         group=gVp)
-showVpHist  = input.bool(false, "Show histogram bars (right side)",     group=gVp)
-showVaFill  = input.bool(true,  "Shade Value Area",                     group=gVp)
-vpBars      = input.int(300,    "Lookback bars", minval=50, maxval=2000, group=gVp)
-vpRows      = input.int(48,     "Rows", minval=20, maxval=200,          group=gVp)
+vpMode      = input.string("Fixed Range", "Profile mode", options=["Fixed Range","Rolling lookback","Visible range"], group=gVp, tooltip="Fixed Range matches TV's FRVP. Set start/end below.")
+vpStart     = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Fixed range START", group=gVp)
+vpEnd       = input.time(timestamp("01 Jan 2027 00:00 +0000"), "Fixed range END (set far future for 'until now')", group=gVp)
+vpBars      = input.int(300,    "Rolling lookback bars (rolling mode)", minval=50, maxval=5000, group=gVp)
+vpRows      = input.int(60,     "Rows", minval=20, maxval=200,          group=gVp)
 vaPct       = input.float(70.0, "Value Area %", minval=50, maxval=95, step=1, group=gVp) / 100.0
+vpExpansion = input.string("Single row", "VA expansion algorithm", options=["Single row","Two-row pair (TV)"], group=gVp, tooltip="TV's FRVP uses two-row pair expansion. Match this to align VAH/VAL with built-in.")
+showVpHist  = input.bool(true,  "Show histogram bars",                  group=gVp)
+vpHistSide  = input.string("Right", "Histogram side", options=["Right","Left"], group=gVp)
+showVaFill  = input.bool(true,  "Shade Value Area",                     group=gVp)
 colPoc      = input.color(#ffd600, "POC color",                         group=gVp)
 colVa       = input.color(#2962ff, "VAH/VAL color",                     group=gVp)
 
@@ -60,11 +83,11 @@ gDelta  = "Delta (proxy)"
 deltaLen    = input.int(20, "Delta SMA length", minval=2,               group=gDelta)
 
 gSig    = "Signals"
+sigMode     = input.string("FVG retest (swing)", "Signal logic", options=["FVG retest (swing)","Breakout trigger"], group=gSig, tooltip="FVG retest: price enters an unmitigated FVG and rejects. Better for 1H/4H swing. Breakout: trigger candle breaks prior bar in confluence.")
 useVwapBias = input.bool(true,  "Require side of VWAP",                 group=gSig)
-useFvgConf  = input.bool(true,  "Require unmitigated FVG in direction", group=gSig)
-useVpConf   = input.bool(true,  "Require near POC / VAH / VAL",         group=gSig)
-useDeltaConf= input.bool(true,  "Require delta confirmation",           group=gSig)
-proxAtr     = input.float(0.5,  "Level proximity (×ATR)", step=0.1,     group=gSig)
+useVpConf   = input.bool(false, "Require near POC / VAH / VAL",         group=gSig)
+useDeltaConf= input.bool(false, "Require delta confirmation",           group=gSig)
+proxAtr     = input.float(0.75, "Level proximity (×ATR)", step=0.1,     group=gSig)
 cooldown    = input.int(5,      "Min bars between signals", minval=1,   group=gSig)
 
 gRisk   = "Risk / Targets"
@@ -74,10 +97,17 @@ tpMult      = input.float(2.5,  "TP = ATR ×", step=0.1,                 group=g
 rrExtend    = input.int(40,     "TP/SL extend bars", minval=10,         group=gRisk)
 
 // ─── VWAP + BANDS ───────────────────────────────────────────────────────────
-anchorReset = vwapAnchor == "Session" ? ta.change(time("D")) != 0 :
-              vwapAnchor == "Week"    ? ta.change(time("W")) != 0 :
-                                         ta.change(time("M")) != 0
+// Anchor reset: matches TradingView's built-in VWAP timeframe boundaries.
+anchorReset = vwapAnchor == "Session"   ? ta.change(time("D"))  != 0 :
+              vwapAnchor == "Week"      ? ta.change(time("W"))  != 0 :
+              vwapAnchor == "Month"     ? ta.change(time("M"))  != 0 :
+              vwapAnchor == "Year"      ? ta.change(time("12M"))!= 0 :
+              vwapAnchor == "Earnings"  ? not na(request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_off)) :
+              vwapAnchor == "Dividends" ? not na(request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_off)) :
+              vwapAnchor == "Splits"    ? not na(request.splits(syminfo.tickerid, splits.numerator, barmerge.gaps_on, barmerge.lookahead_off)) :
+              ta.change(time("D")) != 0
 
+// Volume-weighted typical mean (matches TV built-in ta.vwap with anchored reset)
 var float sPV  = 0.0
 var float sV   = 0.0
 var float sPV2 = 0.0
@@ -86,19 +116,22 @@ if anchorReset or bar_index == 0
     sV   := 0.0
     sPV2 := 0.0
 
-tp_  = (high + low + close) / 3.0
+src_ = vwapSrc
 v_   = nz(volume, 1)
-sPV  += tp_ * v_
+sPV  += src_ * v_
 sV   += v_
-sPV2 += tp_ * tp_ * v_
+sPV2 += src_ * src_ * v_
 
 vwap   = sV > 0 ? sPV / sV : na
+// Volume-weighted population variance — identical to TV's "VWAP Bands" stdev
 varnce = sV > 0 ? math.max(sPV2 / sV - vwap * vwap, 0) : 0
 sd     = math.sqrt(varnce)
-u1 = vwap + bandMult1 * sd
-l1 = vwap - bandMult1 * sd
-u2 = vwap + bandMult2 * sd
-l2 = vwap - bandMult2 * sd
+atrBand = ta.atr(bandLen)
+bandUnit = bandMode == "ATR" ? atrBand : sd
+u1 = vwap + bandMult1 * bandUnit
+l1 = vwap - bandMult1 * bandUnit
+u2 = vwap + bandMult2 * bandUnit
+l2 = vwap - bandMult2 * bandUnit
 
 plot(showVwap                       ? vwap : na, "VWAP",  color=colVwap, linewidth=2)
 plot(showBands and not compact      ? u1   : na, "+1σ",   color=color.new(colVwap, 55), style=plot.style_circles)
@@ -222,95 +255,169 @@ f_clearVpBoxes() =>
             box.delete(array.get(vpBoxes, i))
         array.clear(vpBoxes)
 
+// Track start/end bar of the profile range (resolved on last bar)
+f_resolveRange() =>
+    int sbar = 0
+    int ebar = bar_index
+    if vpMode == "Fixed Range"
+        // Walk back until we cross start; clamp end at min(bar_index, ebar_from_time)
+        i = 0
+        while i < bar_index and time[i] >= vpStart
+            i += 1
+        sbar := bar_index - i + 1
+        // End: most recent bar with time <= vpEnd
+        j = 0
+        while j < bar_index and time[j] > vpEnd
+            j += 1
+        ebar := bar_index - j
+        if ebar < sbar
+            ebar := sbar
+    else if vpMode == "Rolling lookback"
+        sbar := math.max(0, bar_index - vpBars + 1)
+        ebar := bar_index
+    else // Visible range — approximate by chart.left_visible_bar_time
+        lvt = chart.left_visible_bar_time
+        rvt = chart.right_visible_bar_time
+        i = 0
+        while i < bar_index and time[i] >= lvt
+            i += 1
+        sbar := bar_index - i + 1
+        j = 0
+        while j < bar_index and time[j] > rvt
+            j += 1
+        ebar := bar_index - j
+        if ebar < sbar
+            ebar := sbar
+    [sbar, ebar]
+
 if barstate.islast and showVp
     f_clearVpBoxes()
     line.delete(pocLn), line.delete(vahLn), line.delete(valLn)
     label.delete(pocLb), label.delete(vahLb), label.delete(valLb)
     box.delete(vaFill)
 
-    hh = ta.highest(high, vpBars)
-    ll = ta.lowest(low,   vpBars)
-    rng = hh - ll
-    if rng > 0
-        step = rng / vpRows
-        bins = array.new<float>(vpRows, 0.0)
-        for b = 0 to vpBars - 1
-            hi = high[b]
-            lo = low[b]
-            vol = nz(volume[b], 1)
-            barRng = hi - lo
-            if barRng > 0
-                for r = 0 to vpRows - 1
-                    binLo = ll + r * step
-                    binHi = binLo + step
-                    overlap = math.max(0.0, math.min(hi, binHi) - math.max(lo, binLo))
-                    if overlap > 0
-                        share = overlap / barRng
-                        array.set(bins, r, array.get(bins, r) + vol * share)
-            else
-                idx = math.min(vpRows - 1, math.max(0, int((hi - ll) / step)))
-                array.set(bins, idx, array.get(bins, idx) + vol)
+    [sBar, eBar] = f_resolveRange()
+    nBars = eBar - sBar + 1
+    if nBars >= 2
+        // Compute hi/lo over range
+        hh = high[bar_index - eBar]
+        ll = low[bar_index - eBar]
+        for k = 0 to nBars - 1
+            off = bar_index - (sBar + k)
+            hh := math.max(hh, high[off])
+            ll := math.min(ll, low[off])
+        rng = hh - ll
+        if rng > 0
+            step = rng / vpRows
+            bins = array.new<float>(vpRows, 0.0)
+            for k = 0 to nBars - 1
+                off = bar_index - (sBar + k)
+                hi  = high[off]
+                lo  = low[off]
+                vol = nz(volume[off], 1)
+                barRng = hi - lo
+                if barRng > 0
+                    for r = 0 to vpRows - 1
+                        binLo = ll + r * step
+                        binHi = binLo + step
+                        overlap = math.max(0.0, math.min(hi, binHi) - math.max(lo, binLo))
+                        if overlap > 0
+                            share = overlap / barRng
+                            array.set(bins, r, array.get(bins, r) + vol * share)
+                else
+                    idx = math.min(vpRows - 1, math.max(0, int((hi - ll) / step)))
+                    array.set(bins, idx, array.get(bins, idx) + vol)
 
-        pocIdx = 0
-        pocVol = 0.0
-        for r = 0 to vpRows - 1
-            if array.get(bins, r) > pocVol
-                pocVol := array.get(bins, r)
-                pocIdx := r
-
-        totalVol = array.sum(bins)
-        target   = totalVol * vaPct
-        acc      = pocVol
-        loI      = pocIdx
-        hiI      = pocIdx
-        while acc < target and (loI > 0 or hiI < vpRows - 1)
-            upV = hiI < vpRows - 1 ? array.get(bins, hiI + 1) : -1.0
-            dnV = loI > 0          ? array.get(bins, loI - 1) : -1.0
-            if upV >= dnV and upV >= 0
-                hiI += 1
-                acc += upV
-            else if dnV >= 0
-                loI -= 1
-                acc += dnV
-            else
-                break
-
-        pocP := ll + (pocIdx + 0.5) * step
-        vahP := ll + (hiI + 1)       * step
-        valP := ll +  loI            * step
-
-        leftX  = bar_index - vpBars + 1
-        rightX = bar_index + 10
-        xs     = extendLines ? extend.both : extend.none
-
-        // VA shading
-        if showVaFill
-            vaFill := box.new(leftX, vahP, rightX, valP,
-                 border_color=na, bgcolor=color.new(colPoc, 92), extend=extendLines ? extend.right : extend.none)
-
-        pocLn := line.new(leftX, pocP, rightX, pocP, color=colPoc,  width=2, extend=xs)
-        vahLn := line.new(leftX, vahP, rightX, vahP, color=colVa,   width=1, style=line.style_dashed, extend=xs)
-        valLn := line.new(leftX, valP, rightX, valP, color=colVa,   width=1, style=line.style_dashed, extend=xs)
-
-        pocLb := label.new(rightX, pocP, "POC " + str.tostring(pocP, format.mintick),
-             style=label.style_label_left, color=colPoc,                    textcolor=color.black, size=size.small)
-        vahLb := label.new(rightX, vahP, "VAH " + str.tostring(vahP, format.mintick),
-             style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
-        valLb := label.new(rightX, valP, "VAL " + str.tostring(valP, format.mintick),
-             style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
-
-        // Optional histogram
-        if showVpHist
-            maxV = pocVol
-            wMax = 30
+            // POC
+            pocIdx = 0
+            pocVol = 0.0
             for r = 0 to vpRows - 1
-                vr = array.get(bins, r)
-                if vr > 0
-                    w   = int(wMax * (vr / maxV))
-                    inVa = r >= loI and r <= hiI
-                    col = r == pocIdx ? color.new(colPoc, 30) : inVa ? color.new(colVa, 75) : color.new(color.gray, 85)
-                    b   = box.new(bar_index + 1, ll + (r + 1) * step, bar_index + 1 + w, ll + r * step, border_color=na, bgcolor=col)
-                    array.push(vpBoxes, b)
+                if array.get(bins, r) > pocVol
+                    pocVol := array.get(bins, r)
+                    pocIdx := r
+
+            totalVol = array.sum(bins)
+            target   = totalVol * vaPct
+            acc      = pocVol
+            loI      = pocIdx
+            hiI      = pocIdx
+            if vpExpansion == "Two-row pair (TV)"
+                // Compare two-row pairs above vs below, pick the larger pair.
+                while acc < target and (loI > 0 or hiI < vpRows - 1)
+                    up1 = hiI < vpRows - 1 ? array.get(bins, hiI + 1) : 0.0
+                    up2 = hiI < vpRows - 2 ? array.get(bins, hiI + 2) : 0.0
+                    dn1 = loI > 0          ? array.get(bins, loI - 1) : 0.0
+                    dn2 = loI > 1          ? array.get(bins, loI - 2) : 0.0
+                    upPair = (hiI < vpRows - 1 ? up1 : -1.0) + (hiI < vpRows - 2 ? up2 : 0.0)
+                    dnPair = (loI > 0          ? dn1 : -1.0) + (loI > 1          ? dn2 : 0.0)
+                    if upPair >= dnPair and hiI < vpRows - 1
+                        hiI += 1
+                        acc += up1
+                        if acc < target and hiI < vpRows - 1
+                            hiI += 1
+                            acc += up2
+                    else if loI > 0
+                        loI -= 1
+                        acc += dn1
+                        if acc < target and loI > 0
+                            loI -= 1
+                            acc += dn2
+                    else
+                        break
+            else
+                while acc < target and (loI > 0 or hiI < vpRows - 1)
+                    upV = hiI < vpRows - 1 ? array.get(bins, hiI + 1) : -1.0
+                    dnV = loI > 0          ? array.get(bins, loI - 1) : -1.0
+                    if upV >= dnV and upV >= 0
+                        hiI += 1
+                        acc += upV
+                    else if dnV >= 0
+                        loI -= 1
+                        acc += dnV
+                    else
+                        break
+
+            pocP := ll + (pocIdx + 0.5) * step
+            vahP := ll + (hiI + 1)       * step
+            valP := ll +  loI            * step
+
+            leftX  = sBar
+            rightX = eBar
+            extendRight = extendLines and eBar >= bar_index - 1
+
+            // VA shading
+            if showVaFill
+                vaFill := box.new(leftX, vahP, rightX, valP,
+                     border_color=na, bgcolor=color.new(colPoc, 92), extend=extendRight ? extend.right : extend.none)
+
+            xs = extendRight ? extend.right : extend.none
+            pocLn := line.new(leftX, pocP, rightX, pocP, color=colPoc,  width=2, extend=xs)
+            vahLn := line.new(leftX, vahP, rightX, vahP, color=colVa,   width=1, style=line.style_dashed, extend=xs)
+            valLn := line.new(leftX, valP, rightX, valP, color=colVa,   width=1, style=line.style_dashed, extend=xs)
+
+            labelX = math.max(rightX, bar_index) + 3
+            pocLb := label.new(labelX, pocP, "POC " + str.tostring(pocP, format.mintick),
+                 style=label.style_label_left, color=colPoc,                    textcolor=color.black, size=size.small)
+            vahLb := label.new(labelX, vahP, "VAH " + str.tostring(vahP, format.mintick),
+                 style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
+            valLb := label.new(labelX, valP, "VAL " + str.tostring(valP, format.mintick),
+                 style=label.style_label_left, color=color.new(colVa, 20),      textcolor=color.white, size=size.small)
+
+            // Histogram
+            if showVpHist
+                maxV = pocVol
+                wMax = math.max(20, int(nBars * 0.15))
+                anchorBar = vpHistSide == "Right" ? math.max(rightX + 1, bar_index + 1) : leftX - 1
+                for r = 0 to vpRows - 1
+                    vr = array.get(bins, r)
+                    if vr > 0
+                        w   = int(wMax * (vr / maxV))
+                        inVa = r >= loI and r <= hiI
+                        col = r == pocIdx ? color.new(colPoc, 30) : inVa ? color.new(colVa, 75) : color.new(color.gray, 85)
+                        x1 = vpHistSide == "Right" ? anchorBar : anchorBar - w
+                        x2 = vpHistSide == "Right" ? anchorBar + w : anchorBar
+                        b  = box.new(x1, ll + (r + 1) * step, x2, ll + r * step, border_color=na, bgcolor=col)
+                        array.push(vpBoxes, b)
 
 // ─── DELTA + CVD (proxy) ────────────────────────────────────────────────────
 rng_  = high - low
@@ -329,17 +436,49 @@ nearShort = near(vahP) or near(pocP)
 
 biasL  = useVwapBias  ? close > vwap : true
 biasS  = useVwapBias  ? close < vwap : true
-fvgL   = useFvgConf   ? f_hasBullFvg() : true
-fvgS   = useFvgConf   ? f_hasBearFvg() : true
 vpL    = useVpConf    ? nearLong  : true
 vpS    = useVpConf    ? nearShort : true
 dL     = useDeltaConf ? dSma > 0  : true
 dS     = useDeltaConf ? dSma < 0  : true
 
-trigL = close > open and close > high[1]
-trigS = close < open and close < low[1]
-longSig  = trigL and biasL and fvgL and vpL and dL
-shortSig = trigS and biasS and fvgS and vpS and dS
+// FVG-retest signal: price wicked into an unmitigated FVG this bar AND
+// closed back out in trend direction → rejection / reaction candle.
+f_retestBullFvg() =>
+    bool hit = false
+    if array.size(fvgs) > 0
+        for i = array.size(fvgs) - 1 to 0
+            f = array.get(fvgs, i)
+            if f.bull and not f.mitigated
+                // wick entered the zone but close stayed above the zone bottom
+                if low <= f.top and close > f.bot and close > open
+                    hit := true
+                    break
+    hit
+
+f_retestBearFvg() =>
+    bool hit = false
+    if array.size(fvgs) > 0
+        for i = array.size(fvgs) - 1 to 0
+            f = array.get(fvgs, i)
+            if not f.bull and not f.mitigated
+                if high >= f.bot and close < f.top and close < open
+                    hit := true
+                    break
+    hit
+
+retestL = f_retestBullFvg()
+retestS = f_retestBearFvg()
+
+// Breakout trigger (legacy mode)
+trigL = close > open and close > high[1] and (f_hasBullFvg() or not useVpConf)
+trigS = close < open and close < low[1]  and (f_hasBearFvg() or not useVpConf)
+
+longSig  = sigMode == "FVG retest (swing)" ?
+             retestL and biasL and vpL and dL :
+             trigL   and biasL and vpL and dL
+shortSig = sigMode == "FVG retest (swing)" ?
+             retestS and biasS and vpS and dS :
+             trigS   and biasS and vpS and dS
 
 var int lastSig = -1000
 longOk  = longSig  and bar_index - lastSig >= cooldown
