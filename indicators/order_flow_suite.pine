@@ -1,15 +1,46 @@
 // @version=6
-// Order Flow Suite v3.2 — VWAP + FRVP + FVG + Delta + Signals
+// Order Flow Suite v4 — Real-Delta + Structure + FRVP + FVG
+// ============================================================================
+// REAL CALCULATIONS
+//
+// VWAP (anchored, TV-compatible):
+//   vwap  = SUM(hlc3*vol) / SUM(vol),  stdev = sqrt(SUM(hlc3^2*vol)/SUM(vol) - vwap^2)
+//
+// VOLUME PROFILE (FRVP):
+//   Each bar splits its volume across the price bins it intersects in
+//   proportion to (overlap_height / bar_range_height).
+//   POC = bin with max volume. VA = expand from POC (single-row or TV
+//   two-row pair mode) until sum >= 70% of total.
+//
+// DELTA (order-flow proxy):
+//   LTF (real):  for every 1m bar inside the current chart bar, sign its
+//                volume by LTF close vs open and sum. This is the standard
+//                approximation used by paid OF indicators.
+//   Proxy:       volume * (2 * close_position_in_range - 1)
+//
+// TREND: HTF EMA (default 50 on 4H) + market-structure BOS from pivot H/L.
+//
+// SL (Structure):
+//   long:  min(triggering FVG bottom, last pivot swing low, entry - ATR*slMult) - buf
+//   short: mirror
+//   The ATR floor prevents SL from being tighter than ATR distance.
+//
+// TP (Next level):
+//   long:  nearest of {VAH, POC, VAL, swing high, opposite bear-FVG bottom} above entry
+//   short: mirror
+//
 // VISUAL MAP
-//   Orange line  = VWAP, dotted = bands
-//   Yellow line  = POC,  Blue dashed = VAH/VAL, shaded box = Value Area
-//   Green box    = bull FVG (LONG zone),  Red box = bear FVG (SHORT zone)
-//   Triangles    = signals, with Entry/TP/SL dashed lines
-//   Top-right    = live levels table
-// NOTE: Pine has no real order flow. Delta is a close-position proxy.
-//       Match TV FRVP: Profile mode="Fixed Range" + VA expansion="Two-row pair (TV)".
+//   Orange line = VWAP, dotted = bands
+//   Yellow line = POC,  Blue dashed = VAH/VAL, shaded box = Value Area
+//   Green box   = bull FVG (LONG zone), Red box = bear FVG (SHORT zone)
+//   Triangles   = signals; Entry/TP/SL drawn only for the CURRENT trade
+//   Top-right   = live levels + trend readout
+//
+// HONEST SCOPE: Pine has no DOM/footprint/bid-ask. LTF aggregation is the
+// closest possible to real delta. XAU on CFD feeds carries tick volume only.
+// ============================================================================
 
-indicator("Order Flow Suite v3.2", shorttitle="OFS v3.2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("Order Flow Suite v4", shorttitle="OFS v4", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // INPUTS
 gView   = "Display"
@@ -51,8 +82,17 @@ showVaFill  = input.bool(true, "Shade Value Area", group=gVp)
 colPoc      = input.color(#ffd600, "POC color", group=gVp)
 colVa       = input.color(#2962ff, "VAH/VAL color", group=gVp)
 
-gDelta  = "Delta (proxy)"
+gDelta  = "Order Flow (Delta)"
+deltaMode   = input.string("LTF (real)", "Delta source", options=["LTF (real)","Close-position (proxy)"], group=gDelta, tooltip="LTF (real): aggregates 1-minute bars inside current bar; sums +volume when LTF close>open, -volume otherwise. This is the closest Pine gets to true delta. Proxy: estimates from close position in candle range.")
+ltfTF       = input.timeframe("1", "LTF timeframe (for real delta)", group=gDelta)
 deltaLen    = input.int(20, "Delta SMA length", minval=2, group=gDelta)
+
+gTrend  = "Trend Filter (HTF)"
+useTrendFilter = input.bool(true, "Filter signals by HTF trend", group=gTrend, tooltip="Only allow longs when above HTF EMA and bullish structure; shorts when below and bearish.")
+trendTF     = input.timeframe("240", "HTF for trend EMA (e.g. 240=4H)", group=gTrend)
+trendLen    = input.int(50, "HTF EMA length", minval=5, group=gTrend)
+useStructure= input.bool(true, "Also require market-structure direction (BOS)", group=gTrend)
+pivotLen    = input.int(5, "Pivot lookback for swings", minval=2, group=gTrend)
 
 gSig    = "Signals"
 sigMode     = input.string("FVG retest (swing)", "Signal logic", options=["FVG retest (swing)","Breakout trigger"], group=gSig)
@@ -359,12 +399,47 @@ if barstate.islast and showVp
                         b  = box.new(x1, ll + (r + 1) * step, x2, ll + r * step, border_color=na, bgcolor=col)
                         array.push(vpBoxes, b)
 
-// DELTA
-rng_  = high - low
-buyF  = rng_ > 0 ? (close - low) / rng_ : 0.5
-sellF = 1.0 - buyF
-delta = nz(volume, 1) * (buyF - sellF)
-dSma  = ta.sma(delta, deltaLen)
+// DELTA — real (LTF aggregation) or proxy
+// REAL: pull each 1m bar inside the current chart bar; assign its volume as
+//       +buy if its close>open, -sell if close<open; sum to get bar delta.
+//       This is the standard order-flow approximation used by paid indicators.
+// PROXY: close-position-in-range (cheap but coarse).
+float delta = na
+if deltaMode == "LTF (real)"
+    ltfSignedVol = request.security_lower_tf(syminfo.tickerid, ltfTF, (close > open ? 1.0 : close < open ? -1.0 : 0.0) * nz(volume, 0))
+    delta := array.size(ltfSignedVol) > 0 ? array.sum(ltfSignedVol) : 0.0
+else
+    rng_  = high - low
+    buyF  = rng_ > 0 ? (close - low) / rng_ : 0.5
+    sellF = 1.0 - buyF
+    delta := nz(volume, 1) * (buyF - sellF)
+dSma = ta.sma(delta, deltaLen)
+var float cvd = 0.0
+cvd += delta
+
+// HTF TREND + MARKET STRUCTURE
+htfEma = request.security(syminfo.tickerid, trendTF, ta.ema(close, trendLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfBullEma = not na(htfEma) and close > htfEma
+htfBearEma = not na(htfEma) and close < htfEma
+
+// Pivot-based market structure (BOS)
+phigh = ta.pivothigh(high, pivotLen, pivotLen)
+plow  = ta.pivotlow(low,  pivotLen, pivotLen)
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   structureBias = 0   // +1 bull, -1 bear, 0 unknown
+if not na(phigh)
+    lastSwingHigh := phigh
+if not na(plow)
+    lastSwingLow  := plow
+// Break of structure
+if not na(lastSwingHigh) and close > lastSwingHigh
+    structureBias := 1
+if not na(lastSwingLow) and close < lastSwingLow
+    structureBias := -1
+
+trendL = useTrendFilter ? (htfBullEma and (not useStructure or structureBias >= 0)) : true
+trendS = useTrendFilter ? (htfBearEma and (not useStructure or structureBias <= 0)) : true
 
 // ATR
 atr = ta.atr(atrLen)
@@ -410,8 +485,8 @@ trigL = close > open and close > high[1] and (f_hasBullFvg() or not useVpConf)
 trigS = close < open and close < low[1] and (f_hasBearFvg() or not useVpConf)
 
 isRetest = sigMode == "FVG retest (swing)"
-longSig  = isRetest ? (retestL and biasL and vpL and dL) : (trigL and biasL and vpL and dL)
-shortSig = isRetest ? (retestS and biasS and vpS and dS) : (trigS and biasS and vpS and dS)
+longSig  = isRetest ? (retestL and biasL and vpL and dL and trendL) : (trigL and biasL and vpL and dL and trendL)
+shortSig = isRetest ? (retestS and biasS and vpS and dS and trendS) : (trigS and biasS and vpS and dS and trendS)
 
 var int lastSig = -1000
 longOk  = longSig  and bar_index - lastSig >= cooldown
@@ -502,17 +577,28 @@ if longOk or shortOk
     buf   = slBufferAtr * atr
 
     // ---- SL ----
+    // Structure SL: anchor beyond the lower-of {triggering FVG bottom, last
+    // pivot swing low, ATR floor}. This sits past the level that actually
+    // invalidates the setup, not at an arbitrary ATR distance.
     float sl = na
     if slLogic == "Structure"
         if longOk
             fvgFloor = f_trigFvgBot(true)
-            swingLo  = ta.lowest(low, swingLen)
-            base = na(fvgFloor) ? swingLo : math.min(fvgFloor, swingLo)
+            swingPivot = na(lastSwingLow) ? ta.lowest(low, swingLen) : lastSwingLow
+            atrFloor   = entry - slMult * atr
+            base = swingPivot
+            if not na(fvgFloor)
+                base := math.min(base, fvgFloor)
+            base := math.min(base, atrFloor)
             sl := base - buf
         else
             fvgCeil = f_trigFvgTop(false)
-            swingHi = ta.highest(high, swingLen)
-            base = na(fvgCeil) ? swingHi : math.max(fvgCeil, swingHi)
+            swingPivot = na(lastSwingHigh) ? ta.highest(high, swingLen) : lastSwingHigh
+            atrCeil    = entry + slMult * atr
+            base = swingPivot
+            if not na(fvgCeil)
+                base := math.max(base, fvgCeil)
+            base := math.max(base, atrCeil)
             sl := base + buf
     else
         sl := longOk ? entry - slMult * atr : entry + slMult * atr
@@ -563,10 +649,10 @@ if not na(tEntryLn)
         tSlLb    := na
 
 // INFO TABLE
-var table t = table.new(position.top_right, 2, 9, frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
+var table t = table.new(position.top_right, 2, 11, frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
 if showTable and barstate.islast
-    table.cell(t, 0, 0, "Order Flow Suite", text_color=color.white, bgcolor=color.new(color.black, 30), text_size=size.small)
-    table.cell(t, 1, 0, syminfo.ticker,     text_color=color.white, bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(t, 0, 0, "Order Flow Suite v4", text_color=color.white, bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(t, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.new(color.black, 30), text_size=size.small)
     table.cell(t, 0, 1, "Price",  text_color=color.silver, text_size=size.small)
     table.cell(t, 1, 1, str.tostring(close, format.mintick), text_color=color.white, text_size=size.small)
     table.cell(t, 0, 2, "VWAP",   text_color=color.silver, text_size=size.small)
@@ -579,8 +665,13 @@ if showTable and barstate.islast
     table.cell(t, 1, 5, na(valP) ? "-" : str.tostring(valP, format.mintick), text_color=colVa, text_size=size.small)
     table.cell(t, 0, 6, "Delta",  text_color=color.silver, text_size=size.small)
     table.cell(t, 1, 6, str.tostring(dSma, "#.##"), text_color=dSma >= 0 ? #00c853 : #d50000, text_size=size.small)
-    table.cell(t, 0, 7, "ATR",    text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 7, str.tostring(atr, format.mintick), text_color=color.white, text_size=size.small)
-    bias = na(vwap) ? "-" : close > vwap ? "LONG bias" : "SHORT bias"
-    table.cell(t, 0, 8, "Bias",   text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 8, bias, text_color=close > vwap ? #00c853 : #d50000, text_size=size.small)
+    table.cell(t, 0, 7, "CVD",    text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(cvd, "#"), text_color=cvd >= 0 ? #00c853 : #d50000, text_size=size.small)
+    table.cell(t, 0, 8, "HTF EMA", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 8, na(htfEma) ? "-" : str.tostring(htfEma, format.mintick), text_color=htfBullEma ? #00c853 : htfBearEma ? #d50000 : color.gray, text_size=size.small)
+    structureTxt = structureBias > 0 ? "BULL (BOS up)" : structureBias < 0 ? "BEAR (BOS dn)" : "neutral"
+    table.cell(t, 0, 9, "Structure", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 9, structureTxt, text_color=structureBias > 0 ? #00c853 : structureBias < 0 ? #d50000 : color.gray, text_size=size.small)
+    bias = na(vwap) ? "-" : (htfBullEma and structureBias >= 0) ? "LONG OK" : (htfBearEma and structureBias <= 0) ? "SHORT OK" : "—"
+    table.cell(t, 0, 10, "Trade bias", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 10, bias, text_color=bias == "LONG OK" ? #00c853 : bias == "SHORT OK" ? #d50000 : color.gray, text_size=size.small)
