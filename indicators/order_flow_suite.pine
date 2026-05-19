@@ -506,17 +506,27 @@ if longOk or shortOk
 
     // TP1 = 1R (fixed). TP2 = next structural level beyond TP1. TP3 = next beyond TP2, or 3R fallback.
     if tIsLong
-        tTp1 := tEntry + 1.0 * rDist
-        n2   = f_nextAbove(tTp1)
-        tTp2 := not na(n2) ? n2 : tEntry + 2.0 * rDist
-        n3   = f_nextAbove(tTp2)
-        tTp3 := not na(n3) ? n3 : tEntry + 3.0 * rDist
+        // TP1 = nearest structure above entry (not above 1R) — usually much closer
+        tp1Cand = f_nextAbove(tEntry)
+        tTp1 := not na(tp1Cand) and tp1Cand > tEntry ? tp1Cand : tEntry + 1.0 * rDist
+        // Ensure TP1 is at least 0.3R away (avoid tag-and-stop on tiny moves)
+        if tTp1 - tEntry < 0.3 * rDist
+            tTp1 := tEntry + 0.3 * rDist
+        // TP2 = next structure beyond TP1, else 1.5R
+        tp2Cand = f_nextAbove(tTp1)
+        tTp2 := not na(tp2Cand) ? tp2Cand : tEntry + 1.5 * rDist
+        // TP3 = next beyond TP2, else 2.5R
+        tp3Cand = f_nextAbove(tTp2)
+        tTp3 := not na(tp3Cand) ? tp3Cand : tEntry + 2.5 * rDist
     else
-        tTp1 := tEntry - 1.0 * rDist
-        n2   = f_nextBelow(tTp1)
-        tTp2 := not na(n2) ? n2 : tEntry - 2.0 * rDist
-        n3   = f_nextBelow(tTp2)
-        tTp3 := not na(n3) ? n3 : tEntry - 3.0 * rDist
+        tp1Cand = f_nextBelow(tEntry)
+        tTp1 := not na(tp1Cand) and tp1Cand < tEntry ? tp1Cand : tEntry - 1.0 * rDist
+        if tEntry - tTp1 < 0.3 * rDist
+            tTp1 := tEntry - 0.3 * rDist
+        tp2Cand = f_nextBelow(tTp1)
+        tTp2 := not na(tp2Cand) ? tp2Cand : tEntry - 1.5 * rDist
+        tp3Cand = f_nextBelow(tTp2)
+        tTp3 := not na(tp3Cand) ? tp3Cand : tEntry - 2.5 * rDist
 
     // Draw lines
     eCol = color.new(color.white, 0)
@@ -530,7 +540,8 @@ if longOk or shortOk
     tTp3Ln   := line.new(bar_index, tTp3,   bar_index + rExt, tTp3,   color=tCol, width=2)
     tEntryLb := label.new(bar_index + rExt, tEntry, "Entry " + str.tostring(tEntry, format.mintick),                   style=label.style_label_left, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
     tSlLb    := label.new(bar_index + rExt, tSl,    "SL "    + str.tostring(tSl,    format.mintick) + " (" + sigTag(tIsLong) + ")", style=label.style_label_left, color=sCol, textcolor=color.white, size=size.small)
-    tTp1Lb   := label.new(bar_index + rExt, tTp1,   "TP1 "   + str.tostring(tTp1,   format.mintick) + " (1R)",        style=label.style_label_left, color=color.new(tCol, 50), textcolor=color.white, size=size.small)
+    rR1 = rDist > 0 ? math.abs(tTp1 - tEntry) / rDist : 0
+    tTp1Lb   := label.new(bar_index + rExt, tTp1,   "TP1 "   + str.tostring(tTp1,   format.mintick) + " (" + str.tostring(rR1, "#.#") + "R)", style=label.style_label_left, color=color.new(tCol, 50), textcolor=color.white, size=size.small)
     tTp2Lb   := label.new(bar_index + rExt, tTp2,   "TP2 "   + str.tostring(tTp2,   format.mintick),                   style=label.style_label_left, color=color.new(tCol, 25), textcolor=color.white, size=size.small)
     tTp3Lb   := label.new(bar_index + rExt, tTp3,   "TP3 "   + str.tostring(tTp3,   format.mintick),                   style=label.style_label_left, color=tCol, textcolor=color.white, size=size.small)
 
