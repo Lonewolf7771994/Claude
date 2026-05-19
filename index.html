@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#0a84ff" />
+<title>Sip — Daily Hydration</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 4c-9 14-16 22-16 32a16 16 0 0032 0c0-10-7-18-16-32z' fill='%230a84ff'/%3E%3C/svg%3E" />
+<style>
+  :root {
+    --bg: #f2f2f7;
+    --card: #ffffff;
+    --label: #1c1c1e;
+    --label-2: #3c3c43;
+    --label-3: #8e8e93;
+    --separator: rgba(60,60,67,.12);
+    --blue: #0a84ff;
+    --blue-soft: #5ac8fa;
+    --teal: #30b0c7;
+    --green: #34c759;
+    --red: #ff453a;
+    --fill: #e5e5ea;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --radius: 18px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000;
+      --card: #1c1c1e;
+      --label: #fff;
+      --label-2: rgba(235,235,245,.78);
+      --label-3: rgba(235,235,245,.46);
+      --separator: rgba(84,84,88,.34);
+      --fill: #2c2c2e;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #d1d1d6;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+    color: var(--label);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  @media (prefers-color-scheme: dark) { html, body { background: #0b0b0d; } }
+
+  /* iPhone shell */
+  .device {
+    width: 390px;
+    height: 844px;
+    background: var(--bg);
+    border-radius: 56px;
+    box-shadow:
+      0 0 0 12px #111,
+      0 0 0 14px #2c2c2e,
+      0 40px 80px rgba(0,0,0,.35);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  .notch {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 120px; height: 34px; background: #111; border-radius: 20px; z-index: 30;
+  }
+  .status {
+    position: relative; z-index: 20;
+    padding: 18px 28px 8px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 15px; font-weight: 600; letter-spacing: .2px;
+    color: var(--label);
+  }
+  .status .icons { display: flex; gap: 6px; align-items: center; }
+  .status svg { display: block; }
+
+  /* Header */
+  .header {
+    padding: 8px 22px 4px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .greeting .h1 { font-size: 28px; font-weight: 700; letter-spacing: -.3px; }
+  .greeting .sub { font-size: 13px; color: var(--label-3); margin-top: 2px; }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--blue), var(--teal));
+    color: #fff; display: grid; place-items: center;
+    font-weight: 600; font-size: 14px;
+    box-shadow: var(--shadow);
+  }
+
+  /* Scroll body */
+  .scroll {
+    flex: 1; overflow-y: auto; padding: 8px 16px 110px;
+  }
+  .scroll::-webkit-scrollbar { display: none; }
+
+  /* Ring card */
+  .ring-card {
+    background: var(--card); border-radius: 24px;
+    padding: 22px 18px 18px;
+    box-shadow: var(--shadow);
+    margin-top: 12px;
+    position: relative;
+  }
+  .ring-wrap {
+    display: grid; place-items: center;
+    position: relative;
+    height: 240px;
+  }
+  .ring { width: 220px; height: 220px; transform: rotate(-90deg); }
+  .ring .track { stroke: var(--fill); }
+  .ring .progress {
+    stroke: url(#g);
+    stroke-linecap: round;
+    transition: stroke-dashoffset .8s cubic-bezier(.2,.8,.2,1);
+    filter: drop-shadow(0 4px 10px rgba(10,132,255,.25));
+  }
+  .ring-center {
+    position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+  }
+  .ring-center .ml { font-size: 44px; font-weight: 700; letter-spacing: -1px; }
+  .ring-center .goal { font-size: 13px; color: var(--label-3); margin-top: 2px; }
+  .ring-center .pct { margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--blue); }
+
+  /* Quick add */
+  .qa-row {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    margin-top: 14px;
+  }
+  .qa {
+    background: var(--fill); border: 0; border-radius: 16px;
+    padding: 14px 6px 10px; display: flex; flex-direction: column;
+    align-items: center; gap: 4px; cursor: pointer;
+    color: var(--label); font: inherit;
+    transition: transform .12s ease, background .2s ease;
+  }
+  .qa:active { transform: scale(.94); background: #d8d8de; }
+  @media (prefers-color-scheme: dark) { .qa:active { background: #3a3a3c; } }
+  .qa .glyph {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--blue-soft), var(--blue));
+    display: grid; place-items: center; color: #fff;
+  }
+  .qa .amt { font-size: 13px; font-weight: 600; }
+  .qa .lbl { font-size: 11px; color: var(--label-3); }
+
+  .qa-custom .glyph { background: linear-gradient(135deg, #ff9f0a, #ff453a); }
+
+  /* Section */
+  .section-title {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 22px 6px 8px;
+  }
+  .section-title h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.2px; }
+  .section-title a { color: var(--blue); font-size: 14px; text-decoration: none; font-weight: 500; }
+
+  /* Stat grid */
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat {
+    background: var(--card); border-radius: var(--radius);
+    padding: 14px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .stat .row { display: flex; align-items: center; gap: 8px; color: var(--label-3); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+  .stat .row .dot { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
+  .stat .big { font-size: 22px; font-weight: 700; letter-spacing: -.3px; }
+  .stat .tiny { font-size: 12px; color: var(--label-3); }
+
+  /* Week chart */
+  .week {
+    background: var(--card); border-radius: var(--radius);
+    padding: 14px 14px 8px; box-shadow: var(--shadow);
+  }
+  .week .bars { display: grid; grid-template-columns: repeat(7, 1fr); align-items: end; gap: 8px; height: 120px; padding: 8px 4px 0; }
+  .bar {
+    background: linear-gradient(180deg, var(--blue), var(--blue-soft));
+    border-radius: 6px; width: 100%;
+    transition: height .6s cubic-bezier(.2,.8,.2,1);
+    position: relative;
+  }
+  .bar.today { background: linear-gradient(180deg, #ffd60a, #ff9f0a); }
+  .bar.under { background: linear-gradient(180deg, #aeaeb2, #c7c7cc); }
+  .week .labels { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; padding: 6px 4px 4px; }
+  .week .labels span { text-align: center; font-size: 11px; color: var(--label-3); font-weight: 600; }
+
+  /* Reminders card */
+  .list {
+    background: var(--card); border-radius: var(--radius);
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .row-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 0.5px solid var(--separator);
+  }
+  .row-item:last-child { border-bottom: 0; }
+  .row-item .ico {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--blue-soft), var(--blue));
+    color: #fff; display: grid; place-items: center;
+  }
+  .row-item .text { flex: 1; }
+  .row-item .title { font-size: 15px; font-weight: 500; }
+  .row-item .meta { font-size: 12px; color: var(--label-3); margin-top: 1px; }
+  .toggle {
+    width: 50px; height: 30px; border-radius: 16px; background: var(--fill);
+    position: relative; cursor: pointer; transition: background .2s ease;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 26px; height: 26px; border-radius: 50%; background: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,.2); transition: left .2s ease;
+  }
+  .toggle.on { background: var(--green); }
+  .toggle.on::after { left: 22px; }
+
+  /* Floating undo toast */
+  .toast {
+    position: absolute; left: 50%; bottom: 100px;
+    transform: translateX(-50%) translateY(80px);
+    background: rgba(28,28,30,.92); color: #fff;
+    padding: 10px 16px; border-radius: 100px;
+    font-size: 14px; font-weight: 500;
+    display: flex; align-items: center; gap: 10px;
+    backdrop-filter: blur(20px);
+    opacity: 0; pointer-events: none;
+    transition: transform .3s cubic-bezier(.2,.8,.2,1), opacity .25s ease;
+    z-index: 25;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
+  .toast button {
+    background: transparent; border: 0; color: var(--blue-soft);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+
+  /* Tab bar */
+  .tabbar {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: rgba(242,242,247,.82);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-top: 0.5px solid var(--separator);
+    padding: 8px 12px 28px;
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    z-index: 20;
+  }
+  @media (prefers-color-scheme: dark) { .tabbar { background: rgba(28,28,30,.78); } }
+  .tab {
+    border: 0; background: transparent; padding: 6px 0;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    color: var(--label-3); font: inherit; font-size: 10px; font-weight: 500;
+    cursor: pointer;
+  }
+  .tab svg { width: 24px; height: 24px; }
+  .tab.active { color: var(--blue); }
+
+  .home-indicator {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    width: 134px; height: 5px; border-radius: 3px; background: #1c1c1e;
+    z-index: 30;
+  }
+  @media (prefers-color-scheme: dark) { .home-indicator { background: #fff; opacity: .9; } }
+
+  @keyframes pop {
+    0% { transform: scale(.6); opacity: 0; }
+    60% { transform: scale(1.15); opacity: 1; }
+    100% { transform: scale(1); }
+  }
+  .pop { animation: pop .35s cubic-bezier(.2,.8,.2,1); }
+</style>
+</head>
+<body>
+  <div class="device" role="application" aria-label="Sip hydration app">
+    <div class="notch"></div>
+
+    <!-- Status bar -->
+    <div class="status">
+      <span id="clock">9:41</span>
+      <span class="icons" aria-hidden="true">
+        <svg width="18" height="11" viewBox="0 0 18 11" fill="currentColor"><path d="M1 8c0-.6.4-1 1-1h1c.6 0 1 .4 1 1v2c0 .6-.4 1-1 1H2c-.6 0-1-.4-1-1V8zm5-2c0-.6.4-1 1-1h1c.6 0 1 .4 1 1v4c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V6zm5-3c0-.6.4-1 1-1h1c.6 0 1 .4 1 1v7c0 .6-.4 1-1 1h-1c-.6 0-1-.4-1-1V3zm5-2c0-.6.4-1 1-1V11c-.6 0-1-.4-1-1V1z"/></svg>
+        <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 2.5a8.5 8.5 0 015.7 2.2.6.6 0 00.8 0l1-1a.6.6 0 000-.9 11 11 0 00-15 0 .6.6 0 000 .9l1 1a.6.6 0 00.8 0A8.5 8.5 0 018 2.5zm0 3a5.5 5.5 0 013.6 1.4.6.6 0 00.8 0l1-1a.6.6 0 000-.9 8 8 0 00-10.8 0 .6.6 0 000 .9l1 1a.6.6 0 00.8 0A5.5 5.5 0 018 5.5zm0 3a2.5 2.5 0 011.5.5l-1.1 1.1a.6.6 0 01-.8 0L6.5 9a2.5 2.5 0 011.5-.5z"/></svg>
+        <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x="0.5" y="0.5" width="21" height="11" rx="3" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="18" height="8" rx="1.5" fill="currentColor"/><rect x="22.5" y="4" width="1.5" height="4" rx=".5" fill="currentColor" opacity=".4"/></svg>
+      </span>
+    </div>
+
+    <!-- Header -->
+    <div class="header">
+      <div class="greeting">
+        <div class="h1" id="hello">Good morning</div>
+        <div class="sub" id="date">Tuesday, May 19</div>
+      </div>
+      <div class="avatar" aria-label="Profile">AK</div>
+    </div>
+
+    <!-- Body -->
+    <div class="scroll">
+      <!-- Ring -->
+      <div class="ring-card">
+        <div class="ring-wrap">
+          <svg class="ring" viewBox="0 0 220 220">
+            <defs>
+              <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#5ac8fa"/>
+                <stop offset="1" stop-color="#0a84ff"/>
+              </linearGradient>
+            </defs>
+            <circle class="track" cx="110" cy="110" r="96" stroke-width="18" fill="none"/>
+            <circle class="progress" id="ring" cx="110" cy="110" r="96" stroke-width="18" fill="none"
+              stroke-dasharray="603.18" stroke-dashoffset="603.18"/>
+          </svg>
+          <div class="ring-center">
+            <div>
+              <div class="ml"><span id="ml">0</span><span style="font-size:18px;color:var(--label-3);font-weight:600"> / 2000 ml</span></div>
+              <div class="goal">Daily goal · stay hydrated</div>
+              <div class="pct" id="pct">0%</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="qa-row">
+          <button class="qa" data-amt="200" aria-label="Add 200 ml glass">
+            <span class="glyph">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 3h10l-1 18a2 2 0 01-2 2h-4a2 2 0 01-2-2L7 3zm2 3l.4 8h5.2L15 6H9z"/></svg>
+            </span>
+            <span class="amt">200 ml</span>
+            <span class="lbl">Glass</span>
+          </button>
+          <button class="qa" data-amt="350" aria-label="Add 350 ml bottle">
+            <span class="glyph">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M9 2h6v2l1 2v3a3 3 0 01-1 2v9a2 2 0 01-2 2h-2a2 2 0 01-2-2v-9a3 3 0 01-1-2V6l1-2V2z"/></svg>
+            </span>
+            <span class="amt">350 ml</span>
+            <span class="lbl">Bottle</span>
+          </button>
+          <button class="qa" data-amt="500" aria-label="Add 500 ml large">
+            <span class="glyph">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h12l-1 16a2 2 0 01-2 2H9a2 2 0 01-2-2L6 4zm2.2 3l.3 5h7l.3-5H8.2z"/></svg>
+            </span>
+            <span class="amt">500 ml</span>
+            <span class="lbl">Large</span>
+          </button>
+          <button class="qa qa-custom" id="custom" aria-label="Custom amount">
+            <span class="glyph">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z"/></svg>
+            </span>
+            <span class="amt">Custom</span>
+            <span class="lbl">Coffee, tea…</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- This week -->
+      <div class="section-title"><h2>This week</h2><a href="#">See all</a></div>
+      <div class="week">
+        <div class="bars" id="bars"></div>
+        <div class="labels">
+          <span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="section-title"><h2>Today</h2></div>
+      <div class="stats">
+        <div class="stat">
+          <div class="row"><span class="dot" style="background:linear-gradient(135deg,#ff9f0a,#ff453a)">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l3 6 6 .9-4.5 4.3 1 6.3L12 16.8 6.5 19.5l1-6.3L3 8.9 9 8z"/></svg>
+          </span>Streak</div>
+          <div class="big" id="streak">7 days</div>
+          <div class="tiny">Keep it going — best yet</div>
+        </div>
+        <div class="stat">
+          <div class="row"><span class="dot" style="background:linear-gradient(135deg,#34c759,#30b0c7)">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M3 12l4 4L21 4l-2-2-12 12-2-2z"/></svg>
+          </span>Avg / day</div>
+          <div class="big">1,820 ml</div>
+          <div class="tiny">+8% vs last week</div>
+        </div>
+      </div>
+
+      <!-- Reminders -->
+      <div class="section-title"><h2>Reminders</h2><a href="#">Edit</a></div>
+      <div class="list" id="reminders">
+        <div class="row-item">
+          <div class="ico">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M12 2a8 8 0 00-8 8c0 5 4 9 8 12 4-3 8-7 8-12a8 8 0 00-8-8zm0 6v4l3 2"/></svg>
+          </div>
+          <div class="text">
+            <div class="title">Morning kickstart</div>
+            <div class="meta">Every day · 8:00</div>
+          </div>
+          <div class="toggle on" role="switch" aria-checked="true"></div>
+        </div>
+        <div class="row-item">
+          <div class="ico" style="background:linear-gradient(135deg,#ffd60a,#ff9f0a)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.5 4.5l2 2M17.5 17.5l2 2M4.5 19.5l2-2M17.5 6.5l2-2" stroke="#fff" stroke-width="2"/></svg>
+          </div>
+          <div class="text">
+            <div class="title">Midday top‑up</div>
+            <div class="meta">Weekdays · 13:00</div>
+          </div>
+          <div class="toggle on" role="switch" aria-checked="true"></div>
+        </div>
+        <div class="row-item">
+          <div class="ico" style="background:linear-gradient(135deg,#5e5ce6,#0a84ff)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M21 12.8A9 9 0 1111.2 3 7 7 0 0021 12.8z"/></svg>
+          </div>
+          <div class="text">
+            <div class="title">Evening wind‑down</div>
+            <div class="meta">Every day · 20:30</div>
+          </div>
+          <div class="toggle" role="switch" aria-checked="false"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast">
+      <span id="toast-text">+200 ml logged</span>
+      <button id="undo">Undo</button>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="tabbar">
+      <button class="tab active">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3c-4 6-7 10-7 14a7 7 0 0014 0c0-4-3-8-7-14z"/></svg>
+        Today
+      </button>
+      <button class="tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg>
+        Trends
+      </button>
+      <button class="tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>
+        History
+      </button>
+      <button class="tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
+        Settings
+      </button>
+    </div>
+
+    <div class="home-indicator"></div>
+  </div>
+
+<script>
+  const GOAL = 2000;
+  const ringEl = document.getElementById('ring');
+  const mlEl = document.getElementById('ml');
+  const pctEl = document.getElementById('pct');
+  const toast = document.getElementById('toast');
+  const toastText = document.getElementById('toast-text');
+  const C = 2 * Math.PI * 96;
+  ringEl.setAttribute('stroke-dasharray', C.toFixed(2));
+
+  let total = 600;
+  let lastAdd = 0;
+  let toastTimer;
+
+  function render() {
+    mlEl.textContent = total.toLocaleString();
+    const pct = Math.min(1, total / GOAL);
+    ringEl.setAttribute('stroke-dashoffset', (C * (1 - pct)).toFixed(2));
+    pctEl.textContent = Math.round(pct * 100) + '%';
+    pctEl.style.color = pct >= 1 ? 'var(--green)' : 'var(--blue)';
+    const ring = document.querySelector('.ring-center');
+    ring.classList.remove('pop'); void ring.offsetWidth; ring.classList.add('pop');
+  }
+
+  function showToast(text) {
+    toastText.textContent = text;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2400);
+  }
+
+  document.querySelectorAll('.qa[data-amt]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const amt = parseInt(btn.dataset.amt, 10);
+      total += amt; lastAdd = amt;
+      render();
+      showToast(`+${amt} ml logged`);
+      if (navigator.vibrate) navigator.vibrate(8);
+    });
+  });
+  document.getElementById('custom').addEventListener('click', () => {
+    const v = prompt('How many ml?', '250');
+    const amt = parseInt(v, 10);
+    if (!isNaN(amt) && amt > 0) {
+      total += amt; lastAdd = amt; render(); showToast(`+${amt} ml logged`);
+    }
+  });
+  document.getElementById('undo').addEventListener('click', () => {
+    if (lastAdd > 0) { total = Math.max(0, total - lastAdd); lastAdd = 0; render(); }
+    toast.classList.remove('show');
+  });
+
+  // Week bars
+  const week = [1800, 2100, 1650, 1950, 2200, 1400, 600];
+  const bars = document.getElementById('bars');
+  week.forEach((v, i) => {
+    const b = document.createElement('div');
+    b.className = 'bar' + (i === 6 ? ' today' : (v < 1500 ? ' under' : ''));
+    bars.appendChild(b);
+    requestAnimationFrame(() => {
+      b.style.height = Math.min(100, (v / 2400) * 100) + '%';
+    });
+  });
+
+  // Toggles
+  document.querySelectorAll('.toggle').forEach(t => {
+    t.addEventListener('click', () => {
+      t.classList.toggle('on');
+      t.setAttribute('aria-checked', t.classList.contains('on'));
+    });
+  });
+
+  // Tabs
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+    });
+  });
+
+  // Greeting + clock
+  const h = new Date().getHours();
+  document.getElementById('hello').textContent =
+    h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+  const fmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  document.getElementById('date').textContent = fmt.format(new Date());
+  function tick() {
+    const d = new Date();
+    document.getElementById('clock').textContent =
+      d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  tick(); setInterval(tick, 30000);
+
+  render();
+</script>
+</body>
+</html>
