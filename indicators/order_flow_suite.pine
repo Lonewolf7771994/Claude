@@ -63,10 +63,15 @@ proxAtr     = input.float(0.75, "Level proximity (ATR x)", step=0.1, group=gSig)
 cooldown    = input.int(5, "Min bars between signals", minval=1, group=gSig)
 
 gRisk   = "Risk / Targets"
-atrLen      = input.int(14, "ATR length", minval=2, group=gRisk)
-slMult      = input.float(1.5, "SL = ATR x", step=0.1, group=gRisk)
-tpMult      = input.float(2.5, "TP = ATR x", step=0.1, group=gRisk)
-rrExtend    = input.int(40, "TP/SL extend bars", minval=10, maxval=400, group=gRisk)
+slLogic     = input.string("Structure", "SL logic", options=["Structure","ATR"], group=gRisk, tooltip="Structure: SL just beyond triggering FVG or recent swing. ATR: fixed ATR multiple.")
+tpLogic     = input.string("Next level", "TP logic", options=["Next level","R-multiple","ATR"], group=gRisk, tooltip="Next level: nearest POC/VAH/VAL/opposite-FVG/swing in trade direction. R-multiple: TP = entry + R × SL distance.")
+rMult       = input.float(2.0,  "R multiplier (for R-mode)", step=0.1, group=gRisk)
+slBufferAtr = input.float(0.15, "SL buffer (×ATR) beyond structure", step=0.05, group=gRisk)
+swingLen    = input.int(10,     "Swing lookback (bars)", minval=3, group=gRisk)
+atrLen      = input.int(14,     "ATR length", minval=2, group=gRisk)
+slMult      = input.float(1.5,  "SL = ATR × (ATR mode only)", step=0.1, group=gRisk)
+tpMult      = input.float(2.5,  "TP = ATR × (ATR mode only)", step=0.1, group=gRisk)
+rrExtend    = input.int(40,     "TP/SL extend bars", minval=10, maxval=400, group=gRisk)
 
 // VWAP + BANDS
 anchorReset = vwapAnchor == "Session" ? ta.change(time("D")) != 0 : vwapAnchor == "Week" ? ta.change(time("W")) != 0 : vwapAnchor == "Month" ? ta.change(time("M")) != 0 : ta.change(time("12M")) != 0
@@ -428,6 +433,64 @@ var label tEntryLb = na
 var label tTpLb    = na
 var label tSlLb    = na
 
+// Helpers: get triggering FVG bounds (most recent unmitigated in direction)
+f_trigFvgBot(bull) =>
+    float v = na
+    if array.size(fvgs) > 0
+        for i = array.size(fvgs) - 1 to 0
+            f = array.get(fvgs, i)
+            if f.bull == bull and not f.mitigated
+                v := f.bot
+                break
+    v
+
+f_trigFvgTop(bull) =>
+    float v = na
+    if array.size(fvgs) > 0
+        for i = array.size(fvgs) - 1 to 0
+            f = array.get(fvgs, i)
+            if f.bull == bull and not f.mitigated
+                v := f.top
+                break
+    v
+
+// Next structural target above/below current price (excluding entry zone itself)
+f_nextLevelAbove(px) =>
+    float best = na
+    if not na(vahP) and vahP > px
+        best := na(best) ? vahP : math.min(best, vahP)
+    if not na(pocP) and pocP > px
+        best := na(best) ? pocP : math.min(best, pocP)
+    if not na(valP) and valP > px
+        best := na(best) ? valP : math.min(best, valP)
+    sh = ta.highest(high, swingLen)
+    if not na(sh) and sh > px
+        best := na(best) ? sh : math.min(best, sh)
+    if array.size(fvgs) > 0
+        for i = 0 to array.size(fvgs) - 1
+            f = array.get(fvgs, i)
+            if not f.bull and not f.mitigated and f.bot > px
+                best := na(best) ? f.bot : math.min(best, f.bot)
+    best
+
+f_nextLevelBelow(px) =>
+    float best = na
+    if not na(valP) and valP < px
+        best := na(best) ? valP : math.max(best, valP)
+    if not na(pocP) and pocP < px
+        best := na(best) ? pocP : math.max(best, pocP)
+    if not na(vahP) and vahP < px
+        best := na(best) ? vahP : math.max(best, vahP)
+    sl_ = ta.lowest(low, swingLen)
+    if not na(sl_) and sl_ < px
+        best := na(best) ? sl_ : math.max(best, sl_)
+    if array.size(fvgs) > 0
+        for i = 0 to array.size(fvgs) - 1
+            f = array.get(fvgs, i)
+            if f.bull and not f.mitigated and f.top < px
+                best := na(best) ? f.top : math.max(best, f.top)
+    best
+
 if longOk or shortOk
     line.delete(tEntryLn)
     line.delete(tTpLn)
@@ -436,8 +499,37 @@ if longOk or shortOk
     label.delete(tTpLb)
     label.delete(tSlLb)
     entry = close
-    sl    = longOk ? entry - slMult * atr : entry + slMult * atr
-    tp    = longOk ? entry + tpMult * atr : entry - tpMult * atr
+    buf   = slBufferAtr * atr
+
+    // ---- SL ----
+    float sl = na
+    if slLogic == "Structure"
+        if longOk
+            fvgFloor = f_trigFvgBot(true)
+            swingLo  = ta.lowest(low, swingLen)
+            base = na(fvgFloor) ? swingLo : math.min(fvgFloor, swingLo)
+            sl := base - buf
+        else
+            fvgCeil = f_trigFvgTop(false)
+            swingHi = ta.highest(high, swingLen)
+            base = na(fvgCeil) ? swingHi : math.max(fvgCeil, swingHi)
+            sl := base + buf
+    else
+        sl := longOk ? entry - slMult * atr : entry + slMult * atr
+
+    // ---- TP ----
+    float tp = na
+    if tpLogic == "Next level"
+        tp := longOk ? f_nextLevelAbove(entry) : f_nextLevelBelow(entry)
+        if na(tp)
+            // fallback to R-multiple
+            rDist = math.abs(entry - sl)
+            tp := longOk ? entry + rMult * rDist : entry - rMult * rDist
+    else if tpLogic == "R-multiple"
+        rDist = math.abs(entry - sl)
+        tp := longOk ? entry + rMult * rDist : entry - rMult * rDist
+    else
+        tp := longOk ? entry + tpMult * atr : entry - tpMult * atr
     eCol  = color.new(color.white, 0)
     tCol  = color.new(#00c853, 0)
     sCol  = color.new(#d50000, 0)
