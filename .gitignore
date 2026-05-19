@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Xcode
+**/xcuserdata/
+**/*.xcuserstate
+**/DerivedData/
+build/
+*.xcarchive
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Python
+__pycache__/
+*.pyc
+.venv/
