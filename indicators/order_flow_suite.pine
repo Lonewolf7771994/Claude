@@ -444,6 +444,10 @@ trendS = useTrendFilter ? (htfBearEma and (not useStructure or structureBias <= 
 // ATR
 atr = ta.atr(atrLen)
 
+// Pre-compute series functions at global scope (Pine consistency requirement)
+globalSwingHi = ta.highest(high, swingLen)
+globalSwingLo = ta.lowest(low,  swingLen)
+
 // SIGNALS
 near(level) => not na(level) and not na(atr) and math.abs(close - level) <= proxAtr * atr
 nearLong  = near(valP) or near(pocP)
@@ -530,7 +534,7 @@ f_trigFvgTop(bull) =>
     v
 
 // Next structural target above/below current price (excluding entry zone itself)
-f_nextLevelAbove(px) =>
+f_nextLevelAbove(px, sh) =>
     float best = na
     if not na(vahP) and vahP > px
         best := na(best) ? vahP : math.min(best, vahP)
@@ -538,7 +542,6 @@ f_nextLevelAbove(px) =>
         best := na(best) ? pocP : math.min(best, pocP)
     if not na(valP) and valP > px
         best := na(best) ? valP : math.min(best, valP)
-    sh = ta.highest(high, swingLen)
     if not na(sh) and sh > px
         best := na(best) ? sh : math.min(best, sh)
     if array.size(fvgs) > 0
@@ -548,7 +551,7 @@ f_nextLevelAbove(px) =>
                 best := na(best) ? f.bot : math.min(best, f.bot)
     best
 
-f_nextLevelBelow(px) =>
+f_nextLevelBelow(px, sl_) =>
     float best = na
     if not na(valP) and valP < px
         best := na(best) ? valP : math.max(best, valP)
@@ -556,7 +559,6 @@ f_nextLevelBelow(px) =>
         best := na(best) ? pocP : math.max(best, pocP)
     if not na(vahP) and vahP < px
         best := na(best) ? vahP : math.max(best, vahP)
-    sl_ = ta.lowest(low, swingLen)
     if not na(sl_) and sl_ < px
         best := na(best) ? sl_ : math.max(best, sl_)
     if array.size(fvgs) > 0
@@ -565,6 +567,10 @@ f_nextLevelBelow(px) =>
             if f.bull and not f.mitigated and f.top < px
                 best := na(best) ? f.top : math.max(best, f.top)
     best
+
+// Pre-evaluate next-level at global scope for consistency
+nextAbove = f_nextLevelAbove(close, globalSwingHi)
+nextBelow = f_nextLevelBelow(close, globalSwingLo)
 
 if longOk or shortOk
     line.delete(tEntryLn)
@@ -584,7 +590,7 @@ if longOk or shortOk
     if slLogic == "Structure"
         if longOk
             fvgFloor = f_trigFvgBot(true)
-            swingPivot = na(lastSwingLow) ? ta.lowest(low, swingLen) : lastSwingLow
+            swingPivot = na(lastSwingLow) ? globalSwingLo : lastSwingLow
             atrFloor   = entry - slMult * atr
             base = swingPivot
             if not na(fvgFloor)
@@ -593,7 +599,7 @@ if longOk or shortOk
             sl := base - buf
         else
             fvgCeil = f_trigFvgTop(false)
-            swingPivot = na(lastSwingHigh) ? ta.highest(high, swingLen) : lastSwingHigh
+            swingPivot = na(lastSwingHigh) ? globalSwingHi : lastSwingHigh
             atrCeil    = entry + slMult * atr
             base = swingPivot
             if not na(fvgCeil)
@@ -606,7 +612,7 @@ if longOk or shortOk
     // ---- TP ----
     float tp = na
     if tpLogic == "Next level"
-        tp := longOk ? f_nextLevelAbove(entry) : f_nextLevelBelow(entry)
+        tp := longOk ? nextAbove : nextBelow
         if na(tp)
             // fallback to R-multiple
             rDist = math.abs(entry - sl)
