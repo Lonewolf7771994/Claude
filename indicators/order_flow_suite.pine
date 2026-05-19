@@ -560,6 +560,10 @@ if not na(tEntryLn)
     slHit = tIsLong ? low  <= tSl  : high >= tSl
     tp3Hit = tIsLong ? high >= tTp3 : low  <= tTp3
     if slHit or tp3Hit
+        exitPx = tp3Hit ? tTp3 : tSl
+        exitTxt = tp3Hit ? "TP3 ✓" : tBeMoved ? "BE" : "SL"
+        exitCol = tp3Hit ? color.new(#00c853, 0) : tBeMoved ? color.new(color.gray, 20) : color.new(#d50000, 0)
+        label.new(bar_index, exitPx, exitTxt, style=tIsLong ? label.style_label_down : label.style_label_up, color=exitCol, textcolor=color.white, size=size.small)
         f_clearTrade()
         tEntryLn := na
         tSlLn    := na
@@ -571,6 +575,8 @@ if not na(tEntryLn)
         tTp1Lb   := na
         tTp2Lb   := na
         tTp3Lb   := na
+        // Reset cooldown so a fresh signal can fire on the very next qualifying bar
+        lastSig := -10000
 
 // ── INFO TABLE ──────────────────────────────────────────────────────────────
 var table t = table.new(position.top_right, 2, 11, frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
