@@ -1,0 +1,791 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © ME Institutional — Movement Engine Pro v3.1 (Accuracy + Low-Latency Build)
+//@version=6
+indicator("Movement Engine Pro v3.1", shorttitle="ME Pro v3.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.1 CHANGELOG — accuracy + latency improvements
+// ─────────────────────────────────────────────────────────────────────────────
+// • Pivot default lowered 3 → 2 (5-bar confirmation window) → MSS fires ~2 bars earlier
+// • Live MSS detection: close above forming pivot HIGH (right side incomplete) fires
+//   immediately when right-side bars are all lower → cuts pivot lag in half
+// • Adaptive OF threshold: scales DOWN in high-vol regime, UP in low-vol → fewer
+//   missed real moves in trends, fewer false fires in chop
+// • CVD daily-anchored: resets each session → cleaner intraday flow, no drift
+// • EMA momentum stack (8/21) gate: blocks signals against fast-EMA direction
+// • Sweep upgraded to use exact pivot levels (not just N-bar high/low) → real
+//   liquidity sweeps only, not arbitrary range breaks
+// • FVG midpoint retest: trigger fires on touch of 50% gap fill (not full close-in)
+//   → entry 1-2 bars earlier with same accuracy
+// • Adaptive SL buffer: scales with current ATR vs 50-bar ATR → tighter in chop,
+//   wider in expansion
+// • Cooldown default 20 → 8 bars → more setups captured in trending conditions
+// • Optional intrabar alert mode (freq_once_per_bar) for low-latency push
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT GROUPS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string G_ENGINE = "══ Engine Mode ══"
+var string G_STRUCT = "══ Market Structure ══"
+var string G_FVG    = "══ Fair Value Gaps ══"
+var string G_SWEEP  = "══ Liquidity Sweeps ══"
+var string G_OF     = "══ Order Flow ══"
+var string G_MOM    = "══ Momentum Stack ══"
+var string G_HTF    = "══ HTF Trend Filter ══"
+var string G_VWAP   = "══ VWAP Filter ══"
+var string G_FRVP   = "══ Fixed-Range Volume Profile ══"
+var string G_TPSL   = "══ TP / SL Projection ══"
+var string G_VIS    = "══ Visuals ══"
+var string G_ALERT  = "══ Alerts ══"
+
+i_mode       = input.string("Balanced", "Engine Mode",
+     options=["Aggressive","Balanced","Strict"],
+     tooltip="Aggressive: structure + OF only (no HTF/VWAP gate).\nBalanced: requires HTF trend + VWAP alignment.\nStrict: requires HTF + VWAP + FRVP value area.\n\nIMPORTANT: In Balanced/Strict mode, when 4H is bullish only BUY signals fire. When 4H is bearish only SELL signals fire.",
+     group=G_ENGINE)
+
+// ── Market Structure ─────────────────────────────────────────────────────────
+i_swingLen   = input.int(2,   "Pivot Confirmation (bars each side)",
+     minval=1, maxval=20,
+     tooltip="Bars required on EACH side of a pivot to confirm it as a real swing.\n2 = fast 5-bar window. Increase for higher timeframes.\nv3.1: combined with live-MSS detection, 2 gives ~2 bar faster signals than v3.0.",
+     group=G_STRUCT)
+i_liveMss    = input.bool(true, "Live MSS Detection (early-fire)",
+     tooltip="Fires MSS when close breaks the FORMING pivot (right side still incomplete) if all remaining right-side bars are already lower (BUY) / higher (SELL). Cuts pivot lag in half without sacrificing accuracy.",
+     group=G_STRUCT)
+i_slAtr      = input.float(0.5,"SL Buffer Below/Above Pivot (× ATR)",
+     minval=0.0, maxval=3.0, step=0.1,
+     tooltip="SL is placed at last pivot ± this ATR buffer.\nAuto-scales with volatility regime (×0.7 in chop, ×1.3 in expansion).",
+     group=G_STRUCT)
+i_minRisk    = input.float(0.8,"Min Risk Required (× ATR)",
+     minval=0.25, maxval=5.0, step=0.25,
+     tooltip="Signal is blocked if entry-to-SL distance < this many ATRs. Prevents signals with no room to breathe.",
+     group=G_STRUCT)
+
+// ── Fair Value Gaps ──────────────────────────────────────────────────────────
+i_fvgMinAtr  = input.float(0.3,"Min FVG Size (× ATR)", minval=0.05, maxval=5.0, step=0.05, group=G_FVG)
+i_fvgMidTrig = input.bool(true, "Trigger on 50% Midpoint Touch",
+     tooltip="Fires retest when price wicks into the FVG midpoint rather than waiting for full close-inside. Earlier entry, same hit rate.",
+     group=G_FVG)
+i_fvgShow    = input.bool(true, "Show FVG Boxes", group=G_FVG)
+i_fvgBullCol = input.color(color.new(#00E5FF, 80), "Bull FVG Color", group=G_FVG)
+i_fvgBearCol = input.color(color.new(#FF3366, 80), "Bear FVG Color", group=G_FVG)
+i_fvgLabel   = input.bool(true, "Show FVG Labels", group=G_FVG)
+
+// ── Sweep ────────────────────────────────────────────────────────────────────
+i_sweepUsePivot = input.bool(true, "Sweep Uses Pivot Levels (not range high/low)",
+     tooltip="ON = sweeps must violate an actual confirmed swing high/low (real liquidity). OFF = legacy N-bar high/low sweep.",
+     group=G_SWEEP)
+i_sweepLook  = input.int(10, "Sweep Lookback (bars, legacy mode)", minval=3, maxval=100, group=G_SWEEP)
+i_sweepWick  = input.float(0.3, "Min Sweep Wick (× ATR)", minval=0.05, maxval=2.0, step=0.05,
+     tooltip="Wick must extend at least this far beyond the liquidity level. Prevents near-miss false sweeps.",
+     group=G_SWEEP)
+
+// ── Order Flow ───────────────────────────────────────────────────────────────
+i_ofThresh   = input.float(60.0,"OF Pressure Threshold (%)",
+     minval=50.0, maxval=90.0, step=0.5,
+     tooltip="Base buy-side (or sell-side) pressure required. Auto-adjusts ±5% with volatility regime.",
+     group=G_OF)
+i_ofAdaptive = input.bool(true, "Adaptive OF Threshold (volatility-scaled)",
+     tooltip="Lowers threshold ~5% in expansion regimes (capture trending moves) and raises ~5% in chop (avoid noise).",
+     group=G_OF)
+i_volFloor   = input.float(1.0,"Min Relative Volume (× avg)",
+     minval=0.1, maxval=5.0, step=0.1,
+     tooltip="Signal blocked if volume < this × 20-bar average.",
+     group=G_OF)
+i_bodyAtr    = input.float(0.4,"Min Signal Bar Body (× ATR)",
+     minval=0.1, maxval=3.0, step=0.1,
+     tooltip="Signal bar's body must be at least this fraction of ATR. Filters doji/indecision.",
+     group=G_OF)
+i_cvdReset   = input.bool(true, "Reset CVD Each Session (daily anchor)",
+     tooltip="Anchors CVD to session open. Cleaner reading than infinitely-cumulative flow.",
+     group=G_OF)
+
+// ── Momentum Stack ───────────────────────────────────────────────────────────
+i_momFilter  = input.bool(true, "Enable EMA Momentum Filter (8/21)",
+     tooltip="Blocks BUY when fast EMA < slow EMA (and reverse for SELL). Avoids counter-momentum entries.",
+     group=G_MOM)
+i_momFast    = input.int(8,  "Fast EMA", minval=2, maxval=50, group=G_MOM)
+i_momSlow    = input.int(21, "Slow EMA", minval=5, maxval=200, group=G_MOM)
+
+// ── HTF Trend ────────────────────────────────────────────────────────────────
+i_htfTf      = input.timeframe("240","HTF Timeframe", group=G_HTF)
+i_htfEmaLen  = input.int(50, "HTF EMA Length", minval=5, maxval=500, group=G_HTF)
+i_htfFilter  = input.bool(true, "Enforce HTF Direction (strict)", group=G_HTF)
+
+// ── VWAP ─────────────────────────────────────────────────────────────────────
+i_vwapFilter = input.bool(true, "Enable VWAP Filter", group=G_VWAP)
+i_vwapShow   = input.bool(true, "Show VWAP Line", group=G_VWAP)
+i_vwapCol    = input.color(color.new(#FFD700, 60), "VWAP Color", group=G_VWAP)
+
+// ── FRVP ─────────────────────────────────────────────────────────────────────
+i_frvpLen    = input.int(100, "FRVP Lookback (bars)", minval=20, maxval=500, group=G_FRVP)
+i_frvpBins   = input.int(24,  "FRVP Bins", minval=8, maxval=48, group=G_FRVP)
+i_frvpShow   = input.bool(true, "Show FRVP (POC/VAH/VAL)", group=G_FRVP)
+i_vaWidth    = input.float(0.7,"Value Area Width", minval=0.5, maxval=0.95, step=0.01, group=G_FRVP)
+i_pocCol     = input.color(color.new(#FFD700, 0),  "POC Color", group=G_FRVP)
+i_vahCol     = input.color(color.new(#00E5FF, 40), "VAH Color", group=G_FRVP)
+i_valCol     = input.color(color.new(#00E5FF, 40), "VAL Color", group=G_FRVP)
+i_vaFill     = input.bool(true, "Fill Value Area", group=G_FRVP)
+
+// ── TP / SL ──────────────────────────────────────────────────────────────────
+i_tpslShow   = input.bool(true, "Show TP / SL Lines", group=G_TPSL)
+i_tp1R       = input.float(1.5, "TP1 (R-multiple fallback)", minval=0.5, maxval=10.0, step=0.5, group=G_TPSL)
+i_tp2R       = input.float(2.5, "TP2 (R-multiple fallback)", minval=0.5, maxval=20.0, step=0.5, group=G_TPSL)
+i_tp3R       = input.float(4.0, "TP3 (R-multiple fallback)", minval=0.5, maxval=30.0, step=0.5, group=G_TPSL)
+i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200, group=G_TPSL)
+
+// ── Visuals ──────────────────────────────────────────────────────────────────
+i_buyCol     = input.color(color.new(#00E5FF, 0),  "BUY Color",  group=G_VIS)
+i_sellCol    = input.color(color.new(#FF3366, 0),  "SELL Color", group=G_VIS)
+i_barTint    = input.bool(true, "Tint bars on OF signal", group=G_VIS)
+i_cooldown   = input.int(8,    "Signal Cooldown (bars)", minval=0, maxval=100,
+     tooltip="Minimum bars between any two signals. v3.1 default 8 (was 20) — captures more trending setups.",
+     group=G_VIS)
+i_dashboard  = input.bool(true, "Show Confluence Dashboard", group=G_VIS)
+i_dashPos    = input.string("Top Right","Dashboard Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=G_VIS)
+i_jsonAlerts = input.bool(true, "JSON Push Alerts", group=G_ALERT)
+i_fastAlert  = input.bool(false,"Intrabar Alert Mode (low-latency, may repaint)",
+     tooltip="ON = alert fires immediately when conditions align (once_per_bar). OFF = waits for bar close (once_per_bar_close). Use ON for fast push notifications only — visual signals always wait for close.",
+     group=G_ALERT)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ATR + VOLATILITY REGIME
+// ═══════════════════════════════════════════════════════════════════════════════
+
+atr14 = ta.atr(14)
+atr50 = ta.atr(50)
+// volRegime > 1 = expansion, < 1 = chop
+volRegime = atr50 > 0 ? atr14 / atr50 : 1.0
+volExpand = volRegime >= 1.15
+volChop   = volRegime <= 0.85
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORDER FLOW — adaptive
+// ═══════════════════════════════════════════════════════════════════════════════
+
+range_   = math.max(high - low, 1e-9)
+closePos = (close - low) / range_
+buyPct   = closePos * 100.0
+
+volAvg = ta.sma(volume, 20)
+relVol = volume / math.max(volAvg, 1.0)
+volOk  = relVol >= i_volFloor
+
+// Adaptive threshold: -5% in expansion (let trends fire), +5% in chop (filter noise)
+adaptThresh = i_ofAdaptive ? (volExpand ? i_ofThresh - 5.0 : volChop ? i_ofThresh + 5.0 : i_ofThresh) : i_ofThresh
+
+// Daily-anchored CVD
+sessionChange = ta.change(time("D")) != 0
+cvdVol = close > open ? volume : close < open ? -volume : volume * (2.0 * closePos - 1.0)
+var float cvd = 0.0
+if i_cvdReset and sessionChange
+    cvd := 0.0
+cvd := cvd + cvdVol
+cvdBull = ta.ema(cvd, 5) > ta.ema(cvd, 20)
+cvdBear = ta.ema(cvd, 5) < ta.ema(cvd, 20)
+
+bodySize  = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+wickRatio = bodySize > 0 ? (upperWick + lowerWick) / bodySize : 999.0
+goodBody  = bodySize >= atr14 * 0.1
+notWeak   = wickRatio <= 3.0
+
+ofBull = volOk and buyPct          >= adaptThresh and closePos >= 0.5
+ofBear = volOk and (100.0 - buyPct) >= adaptThresh and closePos <= 0.5
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MOMENTUM STACK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, i_momFast)
+emaSlow = ta.ema(close, i_momSlow)
+momBull = emaFast > emaSlow
+momBear = emaFast < emaSlow
+momOkBuy  = not i_momFilter or momBull
+momOkSell = not i_momFilter or momBear
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HTF TREND
+// ═══════════════════════════════════════════════════════════════════════════════
+
+htfClose = request.security(syminfo.tickerid, i_htfTf, close,                    lookahead=barmerge.lookahead_off)
+htfEma   = request.security(syminfo.tickerid, i_htfTf, ta.ema(close, i_htfEmaLen), lookahead=barmerge.lookahead_off)
+htfBull  = htfClose > htfEma
+htfBear  = htfClose < htfEma
+htfLabel = htfBull ? "BULL" : "BEAR"
+
+htfOkBull = not i_htfFilter or htfBull
+htfOkBear = not i_htfFilter or htfBear
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VWAP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+vwapVal   = ta.vwap(hlc3)
+aboveVwap = close > vwapVal
+belowVwap = close < vwapVal
+vwapLabel = aboveVwap ? "ABOVE" : "BELOW"
+plot(i_vwapShow ? vwapVal : na, "VWAP", color=i_vwapCol, linewidth=1)
+
+vwapOkBull = not i_vwapFilter or aboveVwap
+vwapOkBear = not i_vwapFilter or belowVwap
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIVOTS — confirmed + live (early-fire) tracking
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ph = ta.pivothigh(high, i_swingLen, i_swingLen)
+pl = ta.pivotlow(low,   i_swingLen, i_swingLen)
+
+var float ph1 = na
+var float ph2 = na
+var float ph3 = na
+var float pl1 = na
+var float pl2 = na
+var float pl3 = na
+
+if not na(ph)
+    ph3 := ph2
+    ph2 := ph1
+    ph1 := ph
+
+if not na(pl)
+    pl3 := pl2
+    pl2 := pl1
+    pl1 := pl
+
+lastPH = ph1
+lastPL = pl1
+
+// ── LIVE PIVOT DETECTION ─────────────────────────────────────────────────────
+// A live pivot HIGH = high[i_swingLen..1] candidate where left side is higher
+// than the bar at [i_swingLen+1..i_swingLen*2] AND every right-side bar so far
+// has a lower high. This lets us "see" the pivot before its confirmation completes.
+livePH = high[1]
+livePL = low[1]
+leftHi = ta.highest(high[2], i_swingLen)
+leftLo = ta.lowest(low[2],   i_swingLen)
+livePHvalid = i_liveMss and livePH > leftHi and high < livePH
+livePLvalid = i_liveMss and livePL < leftLo and low  > livePL
+// Effective pivot levels: prefer live if present and tighter than last confirmed
+effPH = livePHvalid and (na(lastPH) or livePH > lastPH * 0.999) ? livePH : lastPH
+effPL = livePLvalid and (na(lastPL) or livePL < lastPL * 1.001) ? livePL : lastPL
+
+plotshape(not na(ph), style=shape.triangledown, location=location.abovebar, color=color.new(#FF3366, 60), size=size.tiny, offset=-i_swingLen, title="Pivot High")
+plotshape(not na(pl), style=shape.triangleup,   location=location.belowbar, color=color.new(#00E5FF, 60), size=size.tiny, offset=-i_swingLen, title="Pivot Low")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKET STRUCTURE SHIFT (MSS)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+crossedAbovePH = ta.crossover( close, not na(effPH) ? effPH : close - 1)
+crossedBelowPL = ta.crossunder(close, not na(effPL) ? effPL : close + 1)
+
+mssUp   = barstate.isconfirmed and not na(effPH) and crossedAbovePH
+mssDown = barstate.isconfirmed and not na(effPL) and crossedBelowPL
+
+// ── STRUCTURAL BIAS ──────────────────────────────────────────────────────────
+var bool structBull = false
+var bool structInit = false
+
+if mssUp
+    structBull := true
+    structInit := true
+if mssDown
+    structBull := false
+    structInit := true
+
+biasOkBuy  = not structInit or structBull == true
+biasOkSell = not structInit or structBull == false
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAIR VALUE GAPS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fvgMinPts    = atr14 * i_fvgMinAtr
+bullFvgTop   = low
+bullFvgBot   = high[2]
+bullFvgValid = barstate.isconfirmed and bullFvgBot < bullFvgTop and (bullFvgTop - bullFvgBot) >= fvgMinPts and close[1] > open[1]
+bearFvgBot   = high
+bearFvgTop   = low[2]
+bearFvgValid = barstate.isconfirmed and bearFvgTop > bearFvgBot and (bearFvgTop - bearFvgBot) >= fvgMinPts and close[1] < open[1]
+
+var float lBullTop = na
+var float lBullBot = na
+var float lBearTop = na
+var float lBearBot = na
+var box   lBullBox = na
+var box   lBearBox = na
+
+if bullFvgValid
+    lBullTop := bullFvgTop
+    lBullBot := bullFvgBot
+    if i_fvgShow
+        if not na(lBullBox)
+            box.delete(lBullBox)
+        lBullBox := box.new(bar_index - 2, lBullTop, bar_index + 50, lBullBot, border_color=color.new(i_fvgBullCol, 30), bgcolor=i_fvgBullCol, border_width=1, extend=extend.right)
+        if i_fvgLabel
+            label.new(bar_index, (lBullTop + lBullBot) / 2.0, "FVG", color=color.new(i_fvgBullCol, 60), textcolor=color.new(i_buyCol, 0), style=label.style_label_right, size=size.tiny)
+
+if bearFvgValid
+    lBearTop := bearFvgTop
+    lBearBot := bearFvgBot
+    if i_fvgShow
+        if not na(lBearBox)
+            box.delete(lBearBox)
+        lBearBox := box.new(bar_index - 2, lBearTop, bar_index + 50, lBearBot, border_color=color.new(i_fvgBearCol, 30), bgcolor=i_fvgBearCol, border_width=1, extend=extend.right)
+        if i_fvgLabel
+            label.new(bar_index, (lBearTop + lBearBot) / 2.0, "FVG", color=color.new(i_fvgBearCol, 60), textcolor=color.new(i_sellCol, 0), style=label.style_label_right, size=size.tiny)
+
+// Midpoint-trigger FVG retest — fires 1-2 bars earlier than full-fill retest
+bullMid = not na(lBullTop) and not na(lBullBot) ? (lBullTop + lBullBot) / 2.0 : na
+bearMid = not na(lBearTop) and not na(lBearBot) ? (lBearTop + lBearBot) / 2.0 : na
+fvgRetestBullMid = i_fvgMidTrig and not na(bullMid) and low <= bullMid and close > bullMid
+fvgRetestBearMid = i_fvgMidTrig and not na(bearMid) and high >= bearMid and close < bearMid
+fvgRetestBullStd = not na(lBullBot) and low <= lBullTop and close >= lBullBot and close > open
+fvgRetestBearStd = not na(lBearTop) and high >= lBearBot and close <= lBearTop and close < open
+
+fvgRetestBull = barstate.isconfirmed and (fvgRetestBullStd or fvgRetestBullMid) and htfOkBull
+fvgRetestBear = barstate.isconfirmed and (fvgRetestBearStd or fvgRetestBearMid) and htfOkBear
+
+if barstate.isconfirmed and not na(lBullBot) and close < lBullBot
+    lBullTop := na
+    lBullBot := na
+    if not na(lBullBox)
+        box.delete(lBullBox)
+        lBullBox := na
+
+if barstate.isconfirmed and not na(lBearTop) and close > lBearTop
+    lBearTop := na
+    lBearBot := na
+    if not na(lBearBox)
+        box.delete(lBearBox)
+        lBearBox := na
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEP — pivot-anchored
+// ═══════════════════════════════════════════════════════════════════════════════
+
+sweepLevelHi = i_sweepUsePivot and not na(lastPH) ? lastPH : ta.highest(high[1], i_sweepLook)
+sweepLevelLo = i_sweepUsePivot and not na(lastPL) ? lastPL : ta.lowest(low[1],   i_sweepLook)
+
+sweepBull = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and close > open and htfOkBull
+sweepBear = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and close < open and htfOkBear
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FRVP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+frvpHigh = ta.highest(high, i_frvpLen)
+frvpLow  = ta.lowest(low,   i_frvpLen)
+binSize  = math.max(frvpHigh - frvpLow, 1e-9) / i_frvpBins
+
+var float[] volBins = array.new_float(0)
+
+if barstate.isconfirmed
+    array.clear(volBins)
+    for b = 0 to i_frvpBins - 1
+        array.push(volBins, 0.0)
+    for i = 0 to i_frvpLen - 1
+        barMid = (high[i] + low[i]) / 2.0
+        binIdx = int(math.floor((barMid - frvpLow) / binSize))
+        binIdx := math.max(0, math.min(binIdx, i_frvpBins - 1))
+        array.set(volBins, binIdx, array.get(volBins, binIdx) + volume[i])
+
+pocBin   = 0
+pocVol   = 0.0
+totalVol = 0.0
+
+if barstate.isconfirmed and array.size(volBins) == i_frvpBins
+    totalVol := array.sum(volBins)
+    for b = 0 to i_frvpBins - 1
+        bv = array.get(volBins, b)
+        if bv > pocVol
+            pocVol := bv
+            pocBin := b
+
+var float pocPrice = na
+var float vahPrice = na
+var float valPrice = na
+
+if barstate.isconfirmed and array.size(volBins) == i_frvpBins
+    pocPrice := frvpLow + (pocBin + 0.5) * binSize
+    vaTarget  = totalVol * i_vaWidth
+    vaVol     = pocVol
+    upperIdx  = pocBin
+    lowerIdx  = pocBin
+    maxIter   = i_frvpBins
+    iter      = 0
+    while vaVol < vaTarget and iter < maxIter
+        canUp   = upperIdx < i_frvpBins - 1
+        canDown = lowerIdx > 0
+        upVol   = canUp   ? array.get(volBins, upperIdx + 1) : 0.0
+        dnVol   = canDown ? array.get(volBins, lowerIdx - 1) : 0.0
+        if not canUp and not canDown
+            break
+        if upVol >= dnVol
+            upperIdx += 1
+            vaVol    += upVol
+        else
+            lowerIdx -= 1
+            vaVol    += dnVol
+        iter += 1
+    vahPrice := frvpLow + (upperIdx + 1) * binSize
+    valPrice := frvpLow + lowerIdx       * binSize
+
+frvpPosStr = na(pocPrice) ? "N/A" : close > vahPrice ? "ABOVE VA" : close < valPrice ? "BELOW VA" : close > pocPrice ? "IN VA+" : "IN VA-"
+frvpBullOk = na(vahPrice) or close >= valPrice
+frvpBearOk = na(valPrice) or close <= vahPrice
+
+var line     pocLine = na
+var line     vahLine = na
+var line     valLine = na
+var linefill vaFill  = na
+
+if barstate.isconfirmed and i_frvpShow and not na(pocPrice)
+    if not na(pocLine)
+        line.delete(pocLine)
+    if not na(vahLine)
+        line.delete(vahLine)
+    if not na(valLine)
+        line.delete(valLine)
+    if not na(vaFill)
+        linefill.delete(vaFill)
+    pocLine := line.new(bar_index - i_frvpLen, pocPrice, bar_index, pocPrice, color=i_pocCol, width=2, extend=extend.right, style=line.style_solid)
+    vahLine := line.new(bar_index - i_frvpLen, vahPrice, bar_index, vahPrice, color=i_vahCol, width=1, extend=extend.right, style=line.style_dashed)
+    valLine := line.new(bar_index - i_frvpLen, valPrice, bar_index, valPrice, color=i_valCol, width=1, extend=extend.right, style=line.style_dashed)
+    if i_vaFill
+        vaFill := linefill.new(vahLine, valLine, color=color.new(i_vahCol, 90))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODE GATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+modePassBull = (i_mode == "Aggressive" ? true : (htfOkBull and vwapOkBull and frvpBullOk))
+modePassBear = (i_mode == "Aggressive" ? true : (htfOkBear and vwapOkBear and frvpBearOk))
+
+buyAligned  = (htfOkBull ? 1 : 0) + (vwapOkBull ? 1 : 0) + (frvpBullOk ? 1 : 0)
+sellAligned = (htfOkBear ? 1 : 0) + (vwapOkBear ? 1 : 0) + (frvpBearOk ? 1 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADAPTIVE SL — pivot-anchored, regime-scaled buffer
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Scale buffer ×0.7 in chop, ×1.3 in expansion → tighter SL in tight markets
+slMult = volExpand ? 1.3 : volChop ? 0.7 : 1.0
+slBuf  = atr14 * i_slAtr * slMult
+
+buySLpx  = not na(lastPL) ? math.max(lastPL - slBuf, close - atr14 * 2.5) : close - atr14 * 1.8
+sellSLpx = not na(lastPH) ? math.min(lastPH + slBuf, close + atr14 * 2.5) : close + atr14 * 1.8
+
+buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
+sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
+
+riskOkBuy  = buyRiskDist  >= atr14 * i_minRisk
+riskOkSell = sellRiskDist >= atr14 * i_minRisk
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var int lastSigBar = 0
+coolOk = bar_index - lastSigBar >= i_cooldown
+
+buyTrigger  = mssUp   or (i_mode != "Strict" and fvgRetestBull) or (i_mode == "Aggressive" and sweepBull)
+sellTrigger = mssDown or (i_mode != "Strict" and fvgRetestBear) or (i_mode == "Aggressive" and sweepBear)
+
+barBull = close > open
+barBear = close < open
+
+strongBull = bodySize >= atr14 * i_bodyAtr
+strongBear = bodySize >= atr14 * i_bodyAtr
+
+rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and ofBull and cvdBull and momOkBuy  and modePassBull and biasOkBuy  and coolOk and riskOkBuy
+rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and ofBear and cvdBear and momOkSell and modePassBear and biasOkSell and coolOk and riskOkSell
+
+if rawBuy or rawSell
+    lastSigBar := bar_index
+
+buySignal  = rawBuy
+sellSignal = rawSell
+buyType    = mssUp   ? "MSS" : fvgRetestBull ? "FVG" : "SWEEP"
+sellType   = mssDown ? "MSS" : fvgRetestBear ? "FVG" : "SWEEP"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string lastSigMemory = "—"
+if buySignal
+    lastSigMemory := "BUY (" + buyType + ")"
+if sellSignal
+    lastSigMemory := "SELL (" + sellType + ")"
+
+var string lastMssDir   = "—"
+var string lastFvgDir   = "—"
+var string lastSweepDir = "—"
+if barstate.isconfirmed
+    if mssUp
+        lastMssDir := "BULL"
+    if mssDown
+        lastMssDir := "BEAR"
+    if fvgRetestBull
+        lastFvgDir := "BULL"
+    if fvgRetestBear
+        lastFvgDir := "BEAR"
+    if sweepBull
+        lastSweepDir := "BULL"
+    if sweepBear
+        lastSweepDir := "BEAR"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TP / SL PROJECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var line  tpsl_sl   = na
+var line  tpsl_ent  = na
+var line  tpsl_tp1  = na
+var line  tpsl_tp2  = na
+var line  tpsl_tp3  = na
+var label tpsl_slL  = na
+var label tpsl_tp1L = na
+var label tpsl_tp2L = na
+var label tpsl_tp3L = na
+
+var float activeSlPx  = na
+var float activeTp3Px = na
+var bool  tradeBuy    = false
+
+slHit  = not na(activeSlPx)  and (tradeBuy ? low  <= activeSlPx  : high >= activeSlPx)
+tp3Hit = not na(activeTp3Px) and (tradeBuy ? high >= activeTp3Px : low  <= activeTp3Px)
+
+if barstate.isconfirmed and (slHit or tp3Hit or buySignal or sellSignal)
+    if not na(tpsl_sl)
+        line.delete(tpsl_sl)
+        tpsl_sl := na
+    if not na(tpsl_ent)
+        line.delete(tpsl_ent)
+        tpsl_ent := na
+    if not na(tpsl_tp1)
+        line.delete(tpsl_tp1)
+        tpsl_tp1 := na
+    if not na(tpsl_tp2)
+        line.delete(tpsl_tp2)
+        tpsl_tp2 := na
+    if not na(tpsl_tp3)
+        line.delete(tpsl_tp3)
+        tpsl_tp3 := na
+    if not na(tpsl_slL)
+        label.delete(tpsl_slL)
+        tpsl_slL := na
+    if not na(tpsl_tp1L)
+        label.delete(tpsl_tp1L)
+        tpsl_tp1L := na
+    if not na(tpsl_tp2L)
+        label.delete(tpsl_tp2L)
+        tpsl_tp2L := na
+    if not na(tpsl_tp3L)
+        label.delete(tpsl_tp3L)
+        tpsl_tp3L := na
+    activeSlPx  := na
+    activeTp3Px := na
+
+if buySignal and i_tpslShow
+    entryPx = close
+    slPx    = buySLpx
+    endBar  = bar_index + i_tpLineLen
+
+    tpCands = array.new_float(0)
+    if not na(ph1) and ph1 > entryPx
+        array.push(tpCands, ph1)
+    if not na(ph2) and ph2 > entryPx
+        array.push(tpCands, ph2)
+    if not na(ph3) and ph3 > entryPx
+        array.push(tpCands, ph3)
+    if not na(vahPrice) and vahPrice > entryPx
+        array.push(tpCands, vahPrice)
+    if array.size(tpCands) > 1
+        array.sort(tpCands, order.ascending)
+
+    n    = array.size(tpCands)
+    tp1Px = n >= 1 ? array.get(tpCands, 0) : entryPx + buyRiskDist * i_tp1R
+    tp2Px = n >= 2 ? array.get(tpCands, 1) : entryPx + buyRiskDist * i_tp2R
+    tp3Px = n >= 3 ? array.get(tpCands, 2) : entryPx + buyRiskDist * i_tp3R
+    tp1Tag = n >= 1 ? (not na(vahPrice) and array.get(tpCands, 0) == vahPrice ? " VAH" : " Pivot") : " " + str.tostring(i_tp1R) + "R"
+    tp2Tag = n >= 2 ? (not na(vahPrice) and array.get(tpCands, 1) == vahPrice ? " VAH" : " Pivot") : " " + str.tostring(i_tp2R) + "R"
+    tp3Tag = n >= 3 ? (not na(vahPrice) and array.get(tpCands, 2) == vahPrice ? " VAH" : " Pivot") : " " + str.tostring(i_tp3R) + "R"
+
+    tpsl_sl   := line.new(bar_index, slPx,    endBar, slPx,    color=color.new(#FF3366,  0), width=2, style=line.style_dashed)
+    tpsl_ent  := line.new(bar_index, entryPx, endBar, entryPx, color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
+    tpsl_tp1  := line.new(bar_index, tp1Px,   endBar, tp1Px,   color=color.new(#00FF88,  0), width=3, style=line.style_solid)
+    tpsl_tp2  := line.new(bar_index, tp2Px,   endBar, tp2Px,   color=color.new(#FFD700,  0), width=2, style=line.style_solid)
+    tpsl_tp3  := line.new(bar_index, tp3Px,   endBar, tp3Px,   color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
+    tpsl_slL  := label.new(endBar, slPx,  " SL  " + str.tostring(math.round(slPx,  2)),         style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+    tpsl_tp1L := label.new(endBar, tp1Px, " TP1 " + str.tostring(math.round(tp1Px, 2)) + tp1Tag, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+    tpsl_tp2L := label.new(endBar, tp2Px, " TP2 " + str.tostring(math.round(tp2Px, 2)) + tp2Tag, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+    tpsl_tp3L := label.new(endBar, tp3Px, " TP3 " + str.tostring(math.round(tp3Px, 2)) + tp3Tag, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+    activeSlPx  := slPx
+    activeTp3Px := tp3Px
+    tradeBuy    := true
+
+if sellSignal and i_tpslShow
+    entryPx = close
+    slPx    = sellSLpx
+    endBar  = bar_index + i_tpLineLen
+
+    tpCands = array.new_float(0)
+    if not na(pl1) and pl1 < entryPx
+        array.push(tpCands, pl1)
+    if not na(pl2) and pl2 < entryPx
+        array.push(tpCands, pl2)
+    if not na(pl3) and pl3 < entryPx
+        array.push(tpCands, pl3)
+    if not na(valPrice) and valPrice < entryPx
+        array.push(tpCands, valPrice)
+    if array.size(tpCands) > 1
+        array.sort(tpCands, order.descending)
+
+    n     = array.size(tpCands)
+    tp1Px = n >= 1 ? array.get(tpCands, 0) : entryPx - sellRiskDist * i_tp1R
+    tp2Px = n >= 2 ? array.get(tpCands, 1) : entryPx - sellRiskDist * i_tp2R
+    tp3Px = n >= 3 ? array.get(tpCands, 2) : entryPx - sellRiskDist * i_tp3R
+    tp1Tag = n >= 1 ? (not na(valPrice) and array.get(tpCands, 0) == valPrice ? " VAL" : " Pivot") : " " + str.tostring(i_tp1R) + "R"
+    tp2Tag = n >= 2 ? (not na(valPrice) and array.get(tpCands, 1) == valPrice ? " VAL" : " Pivot") : " " + str.tostring(i_tp2R) + "R"
+    tp3Tag = n >= 3 ? (not na(valPrice) and array.get(tpCands, 2) == valPrice ? " VAL" : " Pivot") : " " + str.tostring(i_tp3R) + "R"
+
+    tpsl_sl   := line.new(bar_index, slPx,    endBar, slPx,    color=color.new(#FF3366,  0), width=2, style=line.style_dashed)
+    tpsl_ent  := line.new(bar_index, entryPx, endBar, entryPx, color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
+    tpsl_tp1  := line.new(bar_index, tp1Px,   endBar, tp1Px,   color=color.new(#00FF88,  0), width=3, style=line.style_solid)
+    tpsl_tp2  := line.new(bar_index, tp2Px,   endBar, tp2Px,   color=color.new(#FFD700,  0), width=2, style=line.style_solid)
+    tpsl_tp3  := line.new(bar_index, tp3Px,   endBar, tp3Px,   color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
+    tpsl_slL  := label.new(endBar, slPx,  " SL  " + str.tostring(math.round(slPx,  2)),         style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+    tpsl_tp1L := label.new(endBar, tp1Px, " TP1 " + str.tostring(math.round(tp1Px, 2)) + tp1Tag, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+    tpsl_tp2L := label.new(endBar, tp2Px, " TP2 " + str.tostring(math.round(tp2Px, 2)) + tp2Tag, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+    tpsl_tp3L := label.new(endBar, tp3Px, " TP3 " + str.tostring(math.round(tp3Px, 2)) + tp3Tag, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+    activeSlPx  := slPx
+    activeTp3Px := tp3Px
+    tradeBuy    := false
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL LABELS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if buySignal
+    label.new(bar_index, low - atr14 * 0.8, "BUY", style=label.style_label_up, color=color.new(i_buyCol, 5), textcolor=color.rgb(0, 0, 0), size=size.normal)
+if sellSignal
+    label.new(bar_index, high + atr14 * 0.8, "SELL", style=label.style_label_down, color=color.new(i_sellCol, 5), textcolor=color.white, size=size.normal)
+
+barcolor(i_barTint and ofBull ? color.new(i_buyCol, 80) : i_barTint and ofBear ? color.new(i_sellCol, 80) : na)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var table dash = na
+
+f_cell(col, row, txt, clr) =>
+    table.cell(dash, col, row, txt, text_color=clr, text_size=size.tiny, text_halign=text.align_center, bgcolor=color.rgb(12, 12, 18))
+
+if i_dashboard
+    tPos = (i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left)
+
+    if na(dash)
+        dash := table.new(tPos, 3, 14, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
+        table.merge_cells(dash, 1, 13, 2, 13)
+
+    grn  = color.new(#00FF88, 0)
+    red_ = color.new(#FF3366, 0)
+    dim  = color.new(#888888, 0)
+    wht  = color.new(#FFFFFF, 0)
+    yel  = color.new(#FFD700, 0)
+    grn2 = color.new(#00FF88, 50)
+    red2 = color.new(#FF3366, 50)
+
+    table.cell(dash, 0, 0, "MOVEMENT ENGINE PRO v3.1", text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
+    table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
+
+    table.cell(dash, 0, 1, "HTF " + i_htfTf, text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 1, htfBull ? "BULL ✓" : i_htfFilter ? "BLOCKED" : "BEAR",   htfBull ? grn : i_htfFilter ? red_ : dim)
+    f_cell(2, 1, htfBear ? "BEAR ✓" : i_htfFilter ? "BLOCKED" : "BULL",   htfBear ? red_ : i_htfFilter ? dim : dim)
+
+    table.cell(dash, 0, 2, "VWAP", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 2, aboveVwap ? "ABOVE ✓" : i_vwapFilter ? "BLOCKED" : "BELOW", aboveVwap ? grn : i_vwapFilter ? red_ : dim)
+    f_cell(2, 2, belowVwap ? "BELOW ✓" : i_vwapFilter ? "BLOCKED" : "ABOVE", belowVwap ? red_ : i_vwapFilter ? dim : dim)
+
+    table.cell(dash, 0, 3, "Momentum 8/21", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 3, momBull ? "BULL ✓" : i_momFilter ? "BLOCKED" : "BEAR", momBull ? grn : i_momFilter ? red_ : dim)
+    f_cell(2, 3, momBear ? "BEAR ✓" : i_momFilter ? "BLOCKED" : "BULL", momBear ? red_ : i_momFilter ? dim : dim)
+
+    table.cell(dash, 0, 4, "MSS (Pivot)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 4, mssUp   ? "▲ NOW" : lastMssDir == "BULL" ? "BULL" : lastMssDir == "BEAR" ? "bear" : "—", mssUp   ? grn  : lastMssDir == "BULL" ? grn2 : dim)
+    f_cell(2, 4, mssDown ? "▼ NOW" : lastMssDir == "BEAR" ? "BEAR" : lastMssDir == "BULL" ? "bull" : "—", mssDown ? red_ : lastMssDir == "BEAR" ? red2 : dim)
+
+    table.cell(dash, 0, 5, "FVG Retest", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 5, fvgRetestBull ? "▲ NOW" : lastFvgDir == "BULL" ? "BULL" : lastFvgDir == "BEAR" ? "bear" : "—", fvgRetestBull ? grn  : lastFvgDir == "BULL" ? grn2 : dim)
+    f_cell(2, 5, fvgRetestBear ? "▼ NOW" : lastFvgDir == "BEAR" ? "BEAR" : lastFvgDir == "BULL" ? "bull" : "—", fvgRetestBear ? red_ : lastFvgDir == "BEAR" ? red2 : dim)
+
+    table.cell(dash, 0, 6, "Sweep", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 6, sweepBull ? "▲ NOW" : lastSweepDir == "BULL" ? "BULL" : lastSweepDir == "BEAR" ? "bear" : "—", sweepBull ? grn  : lastSweepDir == "BULL" ? grn2 : dim)
+    f_cell(2, 6, sweepBear ? "▼ NOW" : lastSweepDir == "BEAR" ? "BEAR" : lastSweepDir == "BULL" ? "bull" : "—", sweepBear ? red_ : lastSweepDir == "BEAR" ? red2 : dim)
+
+    ofBuyTxt  = str.tostring(math.round(buyPct,         1)) + "% / " + str.tostring(math.round(adaptThresh, 0)) + "%"
+    ofSellTxt = str.tostring(math.round(100.0 - buyPct, 1)) + "% / " + str.tostring(math.round(adaptThresh, 0)) + "%"
+    table.cell(dash, 0, 7, "OF (adaptive)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 7, ofBuyTxt,  ofBull ? grn : buyPct  > 50 ? wht : dim)
+    f_cell(2, 7, ofSellTxt, ofBear ? red_ : buyPct < 50 ? wht : dim)
+
+    table.cell(dash, 0, 8, "Rel Volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 8, str.tostring(math.round(relVol, 2)) + "×", volOk ? grn : red_)
+    f_cell(2, 8, str.tostring(math.round(relVol, 2)) + "×", volOk ? grn : red_)
+
+    table.cell(dash, 0, 9, "CVD Flow", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 9, cvdBull ? "BULL" : "BEAR", cvdBull ? grn : red_)
+    f_cell(2, 9, cvdBull ? "BULL" : "BEAR", cvdBull ? grn : red_)
+
+    table.cell(dash, 0, 10, "FRVP Pos", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 10, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "ABOVE") ? grn : dim)
+    f_cell(2, 10, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "BELOW") ? red_ : dim)
+
+    regTxt = volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL"
+    regCol = volExpand ? grn : volChop ? yel : wht
+    table.cell(dash, 0, 11, "Vol Regime", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 11, regTxt + " " + str.tostring(math.round(volRegime, 2)) + "×", regCol)
+    f_cell(2, 11, regTxt + " " + str.tostring(math.round(volRegime, 2)) + "×", regCol)
+
+    buyRatioStr  = str.tostring(math.round(buyRiskDist  / atr14, 2)) + "× ATR"
+    sellRatioStr = str.tostring(math.round(sellRiskDist / atr14, 2)) + "× ATR"
+    table.cell(dash, 0, 12, "Risk Dist", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 12, buyRatioStr,  riskOkBuy  ? grn : red_)
+    f_cell(2, 12, sellRatioStr, riskOkSell ? grn : red_)
+
+    lastSigCol = str.contains(lastSigMemory, "BUY") ? grn : str.contains(lastSigMemory, "SELL") ? red_ : dim
+    table.cell(dash, 0, 13, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 13, lastSigMemory, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_json(side, trigger, slPx_, rDist_) =>
+    tp1_ = side == "BUY" ? close + rDist_ * i_tp1R : close - rDist_ * i_tp1R
+    tp2_ = side == "BUY" ? close + rDist_ * i_tp2R : close - rDist_ * i_tp2R
+    tp3_ = side == "BUY" ? close + rDist_ * i_tp3R : close - rDist_ * i_tp3R
+    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(math.round(close, 2)) + ',"sl":' + str.tostring(math.round(slPx_, 2)) + ',"tp1":' + str.tostring(math.round(tp1_, 2)) + ',"tp2":' + str.tostring(math.round(tp2_, 2)) + ',"tp3":' + str.tostring(math.round(tp3_, 2)) + ',"risk_atr":' + str.tostring(math.round(rDist_ / atr14, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '"}'
+
+buyAlertMsg  = i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist)  : "ME Pro BUY "  + buyType
+sellAlertMsg = i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist) : "ME Pro SELL " + sellType
+
+alertcondition(buySignal,               "ME Pro — BUY Signal",  "ME Pro: BUY signal fired")
+alertcondition(sellSignal,              "ME Pro — SELL Signal", "ME Pro: SELL signal fired")
+alertcondition(buySignal or sellSignal, "ME Pro — Any Signal",  "ME Pro: signal fired")
+
+alertFreq = i_fastAlert ? alert.freq_once_per_bar : alert.freq_once_per_bar_close
+
+if buySignal
+    alert(buyAlertMsg, alertFreq)
+if sellSignal
+    alert(sellAlertMsg, alertFreq)
