@@ -1,7 +1,31 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.4.1 (Zero-Error Pass)
+// © ME Institutional — Movement Engine Pro v3.5 (Scalp Mode)
 //@version=6
-indicator("Movement Engine Pro v3.4.1", shorttitle="ME Pro v3.4.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5", shorttitle="ME Pro v3.5", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5 CHANGELOG — SCALP MODE (new 4th engine mode; other modes unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Scalp" trades structure + order flow in BOTH directions with the lag
+// stripped out. Still 100% bar-close confirmed — it does NOT repaint.
+// Selecting Scalp clamps settings toward the fast preset (a user input that
+// is already faster/looser than the preset is kept as-is):
+//
+//   • Pivots confirm with 2 bars per side (vs 3) — structure seen 1 bar sooner
+//   • Momentum: current-bar EMA 8>21 only — no 2-bar persistence, no slope
+//   • CVD gate uses faster EMAs 3/10 (vs 5/20)
+//   • HTF 4H gate fully bypassed (in the mode gate AND inside the FVG/Sweep
+//     trigger construction, where it was silently baked in for all modes)
+//   • Structural HTF-locked bias bypassed — scalps take both directions
+//   • Mode gate reduced to the VWAP overextension guard only (never chase)
+//   • Sweep AND FVG triggers both enabled
+//   • OF floors softened: threshold ≤57%, delta ≤0.15, rel-vol ≤1.0×,
+//     body ≤0.3 ATR
+//   • RSI band widened: BUY 35-80, SELL 20-65
+//   • Cooldown ≤5 bars (post-SL doubling still applies)
+//   • Risk window tightened to 0.5-2.0 ATR (scalp stops are close)
+//   • TP fallbacks tightened to 1R / 1.5R / 2R (structure targets still first)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.4.1 CHANGELOG — zero-error pass (compile + runtime + trade-logic fixes)
@@ -89,8 +113,8 @@ var string G_VIS    = "══ Visuals ══"
 var string G_ALERT  = "══ Alerts ══"
 
 i_mode       = input.string("Balanced", "Engine Mode",
-     options=["Aggressive","Balanced","Strict"],
-     tooltip="Aggressive: structure + OF only (no HTF/VWAP gate).\nBalanced: requires HTF trend + VWAP alignment.\nStrict: requires HTF + VWAP + FRVP value area.",
+     options=["Scalp","Aggressive","Balanced","Strict"],
+     tooltip="Scalp: fastest non-repainting preset — 2-bar pivots, 1-bar momentum, fast CVD, no HTF/bias gate, both directions, cooldown 5, tight 0.5-2 ATR risk window (v3.5).\nAggressive: structure + OF only (no HTF/VWAP gate).\nBalanced: requires HTF trend + VWAP alignment.\nStrict: requires HTF + VWAP + FRVP value area.",
      group=G_ENGINE)
 
 // ── Market Structure ─────────────────────────────────────────────────────────
@@ -249,6 +273,31 @@ i_dashPos    = input.string("Top Right","Dashboard Position",
 i_jsonAlerts = input.bool(true, "JSON Push Alerts", group=G_ALERT)
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SCALP MODE — EFFECTIVE (MODE-ADJUSTED) SETTINGS (v3.5)
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalp clamps each setting TOWARD the fast preset via min/max, so a user
+// input that is already faster/looser than the preset is respected. All other
+// modes pass the raw inputs through unchanged.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+isScalp       = i_mode == "Scalp"
+effSwingLen   = isScalp ? 2 : i_swingLen
+effVolFloor   = isScalp ? math.min(i_volFloor,   1.0)  : i_volFloor
+effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
+effOfThresh   = isScalp ? math.min(i_ofThresh,   57.0) : i_ofThresh
+effBodyAtr    = isScalp ? math.min(i_bodyAtr,    0.3)  : i_bodyAtr
+effCooldown   = isScalp ? math.min(i_cooldown,   5)    : i_cooldown
+effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
+effMaxRisk    = isScalp ? math.min(i_maxRisk,    2.0)  : i_maxRisk
+effTp1R       = isScalp ? math.min(i_tp1R,       1.0)  : i_tp1R
+effTp2R       = isScalp ? math.min(i_tp2R,       1.5)  : i_tp2R
+effTp3R       = isScalp ? math.min(i_tp3R,       2.0)  : i_tp3R
+effRsiBuyLo   = isScalp ? math.min(i_rsiBuyLo,  35)    : i_rsiBuyLo
+effRsiBuyHi   = isScalp ? math.max(i_rsiBuyHi,  80)    : i_rsiBuyHi
+effRsiSellLo  = isScalp ? math.min(i_rsiSellLo, 20)    : i_rsiSellLo
+effRsiSellHi  = isScalp ? math.max(i_rsiSellHi, 65)    : i_rsiSellHi
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ATR + VOLATILITY REGIME
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -270,16 +319,16 @@ buyPct   = closePos * 100.0
 
 volAvg = ta.sma(volume, 20)
 relVol = volume / math.max(volAvg, 1.0)
-volOk  = relVol >= i_volFloor
+volOk  = relVol >= effVolFloor
 
 // Net delta ratio: estimated up-vol vs down-vol from bar shape.
 // A near-doji closing mid-bar has delta ≈ 0 regardless of raw volume.
 netDelta      = volume * (2.0 * closePos - 1.0)
 deltaRatio    = volume > 0 ? netDelta / volume : 0.0
-deltaBullOk   = deltaRatio >=  i_deltaFloor
-deltaBearOk   = deltaRatio <= -i_deltaFloor
+deltaBullOk   = deltaRatio >=  effDeltaFloor
+deltaBearOk   = deltaRatio <= -effDeltaFloor
 
-adaptThresh = i_ofAdaptive ? (volChop ? i_ofThresh + 5.0 : i_ofThresh) : i_ofThresh
+adaptThresh = i_ofAdaptive ? (volChop ? effOfThresh + 5.0 : effOfThresh) : effOfThresh
 
 // v3.3: doji contributes zero to CVD (was volume*(2*closePos-1) which drifted EMAs)
 sessionChange = ta.change(time("D")) != 0
@@ -288,8 +337,14 @@ var float cvd = 0.0
 if i_cvdReset and sessionChange
     cvd := 0.0
 cvd := cvd + cvdVol
-cvdBull = ta.ema(cvd, 5) > ta.ema(cvd, 20)
-cvdBear = ta.ema(cvd, 5) < ta.ema(cvd, 20)
+// v3.5: Scalp uses faster CVD EMAs (3/10). All four EMAs are computed
+// unconditionally so their series stay consistent; the mode only selects.
+cvdEmaF  = ta.ema(cvd, 5)
+cvdEmaS  = ta.ema(cvd, 20)
+cvdEmaF2 = ta.ema(cvd, 3)
+cvdEmaS2 = ta.ema(cvd, 10)
+cvdBull  = isScalp ? cvdEmaF2 > cvdEmaS2 : cvdEmaF > cvdEmaS
+cvdBear  = isScalp ? cvdEmaF2 < cvdEmaS2 : cvdEmaF < cvdEmaS
 
 bodySize  = math.abs(close - open)
 upperWick = high - math.max(close, open)
@@ -318,8 +373,13 @@ emaSlopeBear = emaSlow < emaSlow[3]
 momBull = momBull2 and (not i_emaSlope or emaSlopeBull)
 momBear = momBear2 and (not i_emaSlope or emaSlopeBear)
 
-momOkBuy  = not i_momFilter or momBull
-momOkSell = not i_momFilter or momBear
+// v3.5: Scalp requires only the current-bar EMA relation — no 2-bar
+// persistence, no slope. Momentum confirms direction, not maturity.
+momBullEff = isScalp ? momBullNow : momBull
+momBearEff = isScalp ? momBearNow : momBear
+
+momOkBuy  = not i_momFilter or momBullEff
+momOkSell = not i_momFilter or momBearEff
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HTF TREND
@@ -333,6 +393,12 @@ htfLabel = htfBull ? "BULL" : "BEAR"
 
 htfOkBull = not i_htfFilter or htfBull
 htfOkBear = not i_htfFilter or htfBear
+
+// v3.5: Scalp bypasses the HTF gate everywhere — including inside the
+// FVG-retest and Sweep trigger construction, where it was baked in for all
+// modes and quietly delayed even "Aggressive" entries.
+trigHtfBull = isScalp or htfOkBull
+trigHtfBear = isScalp or htfOkBear
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VWAP + overextension guard (v3.3)
@@ -355,15 +421,16 @@ vwapOkBear = (not i_vwapFilter or belowVwap) and notExtended
 // ═══════════════════════════════════════════════════════════════════════════════
 
 rsi     = ta.rsi(close, i_rsiLen)
-rsiOkBuy  = not i_rsiFilter or (rsi >= i_rsiBuyLo  and rsi <= i_rsiBuyHi)
-rsiOkSell = not i_rsiFilter or (rsi >= i_rsiSellLo and rsi <= i_rsiSellHi)
+rsiOkBuy  = not i_rsiFilter or (rsi >= effRsiBuyLo  and rsi <= effRsiBuyHi)
+rsiOkSell = not i_rsiFilter or (rsi >= effRsiSellLo and rsi <= effRsiSellHi)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PIVOTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-ph = ta.pivothigh(high, i_swingLen, i_swingLen)
-pl = ta.pivotlow(low,   i_swingLen, i_swingLen)
+// v3.5: Scalp confirms pivots with 2 bars per side (structure seen 1 bar sooner)
+ph = ta.pivothigh(high, effSwingLen, effSwingLen)
+pl = ta.pivotlow(low,   effSwingLen, effSwingLen)
 
 var float ph1 = na
 var float ph2 = na
@@ -385,8 +452,8 @@ if not na(pl)
 lastPH = ph1
 lastPL = pl1
 
-plotshape(not na(ph), style=shape.triangledown, location=location.abovebar, color=color.new(#FF3366, 60), size=size.tiny, offset=-i_swingLen, title="Pivot High")
-plotshape(not na(pl), style=shape.triangleup,   location=location.belowbar, color=color.new(#00E5FF, 60), size=size.tiny, offset=-i_swingLen, title="Pivot Low")
+plotshape(not na(ph), style=shape.triangledown, location=location.abovebar, color=color.new(#FF3366, 60), size=size.tiny, offset=-effSwingLen, title="Pivot High")
+plotshape(not na(pl), style=shape.triangleup,   location=location.belowbar, color=color.new(#00E5FF, 60), size=size.tiny, offset=-effSwingLen, title="Pivot Low")
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MSS + trigger freshness (v3.3)
@@ -420,8 +487,10 @@ if mssDownEvent and htfBear
     structBull := false
     structInit := true
 
-biasOkBuy  = not structInit or structBull == true
-biasOkSell = not structInit or structBull == false
+// v3.5: Scalp trades both directions — the HTF-locked structural bias would
+// block half the scalps, so it is bypassed in Scalp mode only.
+biasOkBuy  = isScalp or not structInit or structBull == true
+biasOkSell = isScalp or not structInit or structBull == false
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FVGs — with expiration (v3.3)
@@ -492,8 +561,8 @@ fvgRetestBearMid = i_fvgMidTrig and not na(bearMid) and high >= bearMid and clos
 fvgRetestBullStd = not na(lBullBot) and low <= lBullTop and close >= lBullBot and closePos >= 0.6
 fvgRetestBearStd = not na(lBearTop) and high >= lBearBot and close <= lBearTop and closePos <= 0.4
 
-fvgRetestBull = barstate.isconfirmed and (fvgRetestBullStd or fvgRetestBullMid) and htfOkBull
-fvgRetestBear = barstate.isconfirmed and (fvgRetestBearStd or fvgRetestBearMid) and htfOkBear
+fvgRetestBull = barstate.isconfirmed and (fvgRetestBullStd or fvgRetestBullMid) and trigHtfBull
+fvgRetestBear = barstate.isconfirmed and (fvgRetestBearStd or fvgRetestBearMid) and trigHtfBear
 
 if barstate.isconfirmed and not na(lBullBot) and close < lBullBot
     lBullTop := na
@@ -522,8 +591,8 @@ legacySweepLo = ta.lowest(low[1],   i_sweepLook)
 sweepLevelHi  = i_sweepUsePivot and not na(lastPH) ? lastPH : legacySweepHi
 sweepLevelLo  = i_sweepUsePivot and not na(lastPL) ? lastPL : legacySweepLo
 
-sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and closePos >= 0.6 and htfOkBull
-sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and closePos <= 0.4 and htfOkBear
+sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
+sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
 
 var int sweepBullAge = 999
 var int sweepBearAge = 999
@@ -685,8 +754,10 @@ if barstate.isconfirmed and i_frvpShow and not na(pocPrice)
 // MODE GATES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-modePassBull = (i_mode == "Aggressive" ? true : (htfOkBull and vwapOkBull and (i_mode != "Strict" or frvpBullOk)))
-modePassBear = (i_mode == "Aggressive" ? true : (htfOkBear and vwapOkBear and (i_mode != "Strict" or frvpBearOk)))
+// v3.5: Scalp gates only on the VWAP overextension guard (never chase an
+// extended move); Aggressive remains fully ungated.
+modePassBull = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBull and vwapOkBull and (i_mode != "Strict" or frvpBullOk))
+modePassBear = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBear and vwapOkBear and (i_mode != "Strict" or frvpBearOk))
 
 buyAligned  = (htfOkBull ? 1 : 0) + (vwapOkBull ? 1 : 0) + (frvpBullOk ? 1 : 0)
 sellAligned = (htfOkBear ? 1 : 0) + (vwapOkBear ? 1 : 0) + (frvpBearOk ? 1 : 0)
@@ -705,8 +776,8 @@ buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
 sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
 
 // v3.3: both a floor AND a cap
-riskOkBuy  = buyRiskDist  >= atr14 * i_minRisk and buyRiskDist  <= atr14 * i_maxRisk
-riskOkSell = sellRiskDist >= atr14 * i_minRisk and sellRiskDist <= atr14 * i_maxRisk
+riskOkBuy  = buyRiskDist  >= atr14 * effMinRisk and buyRiskDist  <= atr14 * effMaxRisk
+riskOkSell = sellRiskDist >= atr14 * effMinRisk and sellRiskDist <= atr14 * effMaxRisk
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNIFIED TP SELECTION (v3.4.1)
@@ -745,12 +816,12 @@ f_tpLevels(bool _isBuy, float _entry, float _risk) =>
     float lvl = _isBuy ? vahPrice : valPrice
     string lt = _isBuy ? " VAH" : " VAL"
     float dir = _isBuy ? 1.0 : -1.0
-    tp1 = n >= 1 ? array.get(cands, 0) : _entry + dir * _risk * i_tp1R
-    tp2 = n >= 2 ? array.get(cands, 1) : _entry + dir * _risk * i_tp2R
-    tp3 = n >= 3 ? array.get(cands, 2) : _entry + dir * _risk * i_tp3R
-    tag1 = n >= 1 ? (not na(lvl) and array.get(cands, 0) == lvl ? lt : " Pivot") : " " + str.tostring(i_tp1R) + "R"
-    tag2 = n >= 2 ? (not na(lvl) and array.get(cands, 1) == lvl ? lt : " Pivot") : " " + str.tostring(i_tp2R) + "R"
-    tag3 = n >= 3 ? (not na(lvl) and array.get(cands, 2) == lvl ? lt : " Pivot") : " " + str.tostring(i_tp3R) + "R"
+    tp1 = n >= 1 ? array.get(cands, 0) : _entry + dir * _risk * effTp1R
+    tp2 = n >= 2 ? array.get(cands, 1) : _entry + dir * _risk * effTp2R
+    tp3 = n >= 3 ? array.get(cands, 2) : _entry + dir * _risk * effTp3R
+    tag1 = n >= 1 ? (not na(lvl) and array.get(cands, 0) == lvl ? lt : " Pivot") : " " + str.tostring(effTp1R) + "R"
+    tag2 = n >= 2 ? (not na(lvl) and array.get(cands, 1) == lvl ? lt : " Pivot") : " " + str.tostring(effTp2R) + "R"
+    tag3 = n >= 3 ? (not na(lvl) and array.get(cands, 2) == lvl ? lt : " Pivot") : " " + str.tostring(effTp3R) + "R"
     [tp1, tp2, tp3, tag1, tag2, tag3]
 
 [buyTp1, buyTp2, buyTp3, buyTag1, buyTag2, buyTag3]       = f_tpLevels(true,  close, buyRiskDist)
@@ -763,14 +834,14 @@ f_tpLevels(bool _isBuy, float _entry, float _risk) =>
 var int  lastSigBar   = 0
 var bool lastTradeBuy = false
 var bool lastSlHit    = false
-effCd = i_postSlCd and lastSlHit ? i_cooldown * 2 : i_cooldown
+effCd = i_postSlCd and lastSlHit ? effCooldown * 2 : effCooldown
 coolOk = bar_index - lastSigBar >= effCd
 
 // v3.4.1: mode-gated trigger flags computed once, reused by trigger AND label
 buyTrigFvg   = i_mode != "Strict"     and fvgRetestBull
 sellTrigFvg  = i_mode != "Strict"     and fvgRetestBear
-buyTrigSweep = i_mode == "Aggressive" and sweepBull
-sellTrigSweep= i_mode == "Aggressive" and sweepBear
+buyTrigSweep = (i_mode == "Aggressive" or isScalp) and sweepBull
+sellTrigSweep= (i_mode == "Aggressive" or isScalp) and sweepBear
 
 buyTrigger  = mssUp   or buyTrigFvg  or buyTrigSweep
 sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
@@ -778,8 +849,8 @@ sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
 barBull = close > open
 barBear = close < open
 
-strongBull = bodySize >= atr14 * i_bodyAtr
-strongBear = bodySize >= atr14 * i_bodyAtr
+strongBull = bodySize >= atr14 * effBodyAtr
+strongBear = bodySize >= atr14 * effBodyAtr
 
 rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeak and ofBull and cvdBull and momOkBuy  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy
 rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeak and ofBear and cvdBear and momOkSell and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell
@@ -968,21 +1039,23 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "MOVEMENT ENGINE PRO v3.4.1", text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5 — " + str.upper(i_mode), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
-    table.cell(dash, 0, 1, "HTF " + i_htfTf, text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 1, htfBull ? "BULL ✓" : i_htfFilter ? "BLOCKED" : "BEAR",   htfBull ? grn : i_htfFilter ? red_ : dim)
-    f_cell(2, 1, htfBear ? "BEAR ✓" : i_htfFilter ? "BLOCKED" : "BULL",   htfBear ? red_ : i_htfFilter ? red_ : dim)
+    // v3.5: in Scalp the HTF gate is bypassed — show direction as info, never "BLOCKED"
+    htfGateOn = i_htfFilter and not isScalp
+    table.cell(dash, 0, 1, "HTF " + i_htfTf + (isScalp ? " (off)" : ""), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 1, htfBull ? "BULL ✓" : htfGateOn ? "BLOCKED" : "BEAR",   htfBull ? grn : htfGateOn ? red_ : dim)
+    f_cell(2, 1, htfBear ? "BEAR ✓" : htfGateOn ? "BLOCKED" : "BULL",   htfBear ? red_ : htfGateOn ? red_ : dim)
 
     table.cell(dash, 0, 2, "VWAP", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 2, aboveVwap ? (notExtended ? "ABOVE ✓" : "EXTENDED") : i_vwapFilter ? "BLOCKED" : "BELOW", aboveVwap and notExtended ? grn : aboveVwap and not notExtended ? yel : i_vwapFilter ? red_ : dim)
     f_cell(2, 2, belowVwap ? (notExtended ? "BELOW ✓" : "EXTENDED") : i_vwapFilter ? "BLOCKED" : "ABOVE", belowVwap and notExtended ? red_ : belowVwap and not notExtended ? yel : i_vwapFilter ? red_ : dim)
 
-    table.cell(dash, 0, 3, "Momentum + Slope", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 3, momBull ? "BULL ✓" : i_momFilter ? "BLOCKED" : "BEAR", momBull ? grn : i_momFilter ? red_ : dim)
-    f_cell(2, 3, momBear ? "BEAR ✓" : i_momFilter ? "BLOCKED" : "BULL", momBear ? red_ : i_momFilter ? red_ : dim)
+    table.cell(dash, 0, 3, isScalp ? "Momentum (fast)" : "Momentum + Slope", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 3, momBullEff ? "BULL ✓" : i_momFilter ? "BLOCKED" : "BEAR", momBullEff ? grn : i_momFilter ? red_ : dim)
+    f_cell(2, 3, momBearEff ? "BEAR ✓" : i_momFilter ? "BLOCKED" : "BULL", momBearEff ? red_ : i_momFilter ? red_ : dim)
 
     table.cell(dash, 0, 4, "RSI " + str.tostring(math.round(rsi, 1)), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 4, rsiOkBuy  ? "OK" : "OUT",  rsiOkBuy  ? grn  : dim)
