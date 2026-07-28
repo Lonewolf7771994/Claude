@@ -1,0 +1,127 @@
+//@version=6
+indicator("Scalp Mode + Movement Engine", shorttitle="SCALP-ME", overlay=true, max_labels_count=500)
+
+// ============================================================
+//  MODE SETTINGS
+// ============================================================
+grpMode  = "Mode"
+mode     = input.string("Scalp", "Trading Mode", options=["Scalp", "Standard"], group=grpMode)
+isScalp  = mode == "Scalp"
+
+// Scalp mode = fast, reactive parameters. Standard = smoother, fewer signals.
+fastLen  = isScalp ? 8  : 21
+slowLen  = isScalp ? 21 : 50
+momLen   = isScalp ? 5  : 14
+atrLen   = isScalp ? 7  : 14
+volLen   = isScalp ? 10 : 20
+
+// ============================================================
+//  MOVEMENT ENGINE SETTINGS
+// ============================================================
+grpEng      = "Movement Engine"
+moveThresh  = input.int(60, "Movement Score Threshold", minval=30, maxval=90, group=grpEng,
+                 tooltip="Score 0-100. Signals only fire when movement strength exceeds this.")
+useVolume   = input.bool(true, "Require Volume Surge", group=grpEng)
+volSurgeX   = input.float(1.3, "Volume Surge Multiplier", minval=1.0, step=0.1, group=grpEng)
+paintBars   = input.bool(true, "Color Bars by Movement Strength", group=grpEng)
+showZones   = input.bool(true, "Highlight Impulse Zones", group=grpEng)
+showDash    = input.bool(true, "Show Dashboard", group=grpEng)
+
+// ============================================================
+//  MOVEMENT ENGINE CORE
+//  Measures how strongly price is MOVING (not just direction):
+//    1. Velocity  – ATR-normalized rate of change
+//    2. Expansion – current range vs average range
+//    3. Volume    – participation vs average
+//  Combined into a 0-100 Movement Score.
+// ============================================================
+atrVal    = ta.atr(atrLen)
+
+// 1) Velocity: price change over momLen bars, normalized by ATR
+velRaw    = (close - close[momLen]) / (atrVal * math.sqrt(momLen))
+velScore  = math.min(math.abs(velRaw) * 50, 100)          // 0-100
+
+// 2) Range expansion: candle range vs average range
+avgRange  = ta.sma(high - low, atrLen)
+expRaw    = avgRange > 0 ? (high - low) / avgRange : 1.0
+expScore  = math.min(expRaw * 40, 100)                    // 0-100
+
+// 3) Volume participation
+avgVol    = ta.sma(volume, volLen)
+volRatio  = avgVol > 0 ? volume / avgVol : 1.0
+volScore  = math.min(volRatio * 40, 100)                  // 0-100
+
+// Weighted Movement Score (velocity matters most)
+moveScore = velScore * 0.5 + expScore * 0.3 + volScore * 0.2
+moveDir   = velRaw > 0 ? 1 : velRaw < 0 ? -1 : 0
+
+// Movement states
+isImpulse  = moveScore >= moveThresh
+isChop     = moveScore < moveThresh * 0.5
+volSurgeOK = not useVolume or volRatio >= volSurgeX
+
+// ============================================================
+//  TREND FILTER
+// ============================================================
+emaFast  = ta.ema(close, fastLen)
+emaSlow  = ta.ema(close, slowLen)
+trendUp  = emaFast > emaSlow
+trendDn  = emaFast < emaSlow
+
+plot(emaFast, "Fast EMA", color=color.new(color.aqua,   0), linewidth=1)
+plot(emaSlow, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
+
+// ============================================================
+//  SIGNALS
+//  Buy  : impulse move up, aligned with trend, volume confirmed
+//  Sell : impulse move down, aligned with trend, volume confirmed
+// ============================================================
+buySignal  = isImpulse and moveDir ==  1 and trendUp and volSurgeOK and not (isImpulse[1] and moveDir[1] ==  1)
+sellSignal = isImpulse and moveDir == -1 and trendDn and volSurgeOK and not (isImpulse[1] and moveDir[1] == -1)
+
+plotshape(buySignal,  "Buy",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), size=size.small, text="BUY")
+plotshape(sellSignal, "Sell", shape.triangledown, location.abovebar, color.new(color.red,  0), size=size.small, text="SELL")
+
+// ============================================================
+//  VISUALS
+// ============================================================
+// Bar coloring by movement strength and direction
+barCol = not paintBars ? na :
+     isImpulse and moveDir ==  1 ? color.lime :
+     isImpulse and moveDir == -1 ? color.red  :
+     isChop                      ? color.gray : na
+barcolor(barCol)
+
+// Impulse zone background
+bgCol = not showZones ? na :
+     isImpulse and moveDir ==  1 ? color.new(color.green, 88) :
+     isImpulse and moveDir == -1 ? color.new(color.red,   88) : na
+bgcolor(bgCol)
+
+// ============================================================
+//  DASHBOARD
+// ============================================================
+var table dash = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 60))
+if showDash and barstate.islast
+    stateTxt = isImpulse ? (moveDir == 1 ? "IMPULSE UP" : "IMPULSE DOWN") : isChop ? "CHOP" : "NEUTRAL"
+    stateCol = isImpulse ? (moveDir == 1 ? color.lime : color.red) : isChop ? color.gray : color.silver
+    trendTxt = trendUp ? "UP" : trendDn ? "DOWN" : "FLAT"
+    trendCol = trendUp ? color.lime : trendDn ? color.red : color.gray
+
+    table.cell(dash, 0, 0, "MODE",     text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 0, mode,       text_color=isScalp ? color.yellow : color.aqua, text_size=size.small)
+    table.cell(dash, 0, 1, "MOVEMENT", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(moveScore, "#") + " / 100", text_color=stateCol, text_size=size.small)
+    table.cell(dash, 0, 2, "STATE",    text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 2, stateTxt,   text_color=stateCol, text_size=size.small)
+    table.cell(dash, 0, 3, "TREND",    text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 3, trendTxt,   text_color=trendCol, text_size=size.small)
+    table.cell(dash, 0, 4, "VOLUME",   text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(volRatio, "#.##") + "x", text_color=volRatio >= volSurgeX ? color.yellow : color.gray, text_size=size.small)
+
+// ============================================================
+//  ALERTS
+// ============================================================
+alertcondition(buySignal,  "Buy Signal",       "SCALP-ME: BUY — impulse up with trend on {{ticker}} {{interval}}")
+alertcondition(sellSignal, "Sell Signal",      "SCALP-ME: SELL — impulse down with trend on {{ticker}} {{interval}}")
+alertcondition(isImpulse and not isImpulse[1], "Impulse Started", "SCALP-ME: movement impulse started on {{ticker}} {{interval}}")
