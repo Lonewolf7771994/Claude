@@ -1,7 +1,42 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.1 (Scalp Mode fixes + performance pass)
+// © ME Institutional — Movement Engine Pro v3.5.2 (all modes fire again + block-reason debugging)
 //@version=6
-indicator("Movement Engine Pro v3.5.1", shorttitle="ME Pro v3.5.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.2", shorttitle="ME Pro v3.5.2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.2 CHANGELOG — ALL MODES FIRE AGAIN + BLOCK-REASON DEBUGGING
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.1 fixed Scalp; this pass fixes the gates that starved EVERY mode.
+// 1. NO-VOLUME BLACKOUT. On symbols with no volume feed (many indices, FX and
+//    CFD tickers) volOk, deltaRatio and the CVD gate were all na/false — no
+//    signal could EVER fire in any mode, silently. Volume-dependent gates
+//    (rel-vol floor, CVD) now self-disable on such symbols (the dashboard
+//    says so) while bar-shape gates stay active. Also: relVol divided by
+//    max(avg, 1.0), which distorted the ratio on low-nominal-volume symbols;
+//    the floor is now epsilon-only.
+// 2. RISK WINDOW IN WRONG UNITS (all modes). Same class of bug fixed for
+//    Scalp in v3.5.1: the SL is built from atrBase = max(atr14, atr50) but
+//    the min/max risk window was judged in atr14. In chop (atr50 > atr14)
+//    the structural stop routinely overflowed the cap and silently blocked
+//    the trade. The window is now measured in the same ATR the SL is built
+//    from. Dashboard and JSON "risk_atr" use the same reference.
+// 3. DELTA FLOOR SILENTLY OVERRODE THE OF THRESHOLD. With bar-shape
+//    estimation deltaRatio is mathematically 2·closePos−1 — the same scale
+//    as the OF %. The 0.30 default therefore demanded a 65% close position,
+//    overriding the advertised 60% threshold. New default 0.20 (⇔ 60%) so
+//    the two gates agree; raise it back if you want the stricter behavior.
+// 4. RSI CEILING CLIPPED BREAKOUT BARS. MSS fires on strong breakout closes,
+//    exactly where RSI(14) runs above the old 72 ceiling — the band vetoed
+//    the very bars the trigger selects. Defaults widened: BUY max 72→78,
+//    SELL min 28→22. Retune to taste; the inputs are unchanged in range.
+// 5. AGGRESSIVE WAS STILL HTF-GATED. Its mode gate was open, but the HTF
+//    check baked inside the FVG/Sweep trigger construction still applied —
+//    contradicting "structure + OF only". Aggressive now bypasses it there
+//    too (Balanced/Strict unchanged).
+// 6. "LAST BLOCK" DEBUGGING. New dashboard row names the exact gates that
+//    vetoed the most recent trigger (e.g. "BUY ✕ of% rsi"), plus an optional
+//    on-chart ✕ label on every blocked trigger bar — no more blind tuning.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.1 CHANGELOG — SCALP MODE ACTUALLY FIRES + PERFORMANCE PASS
@@ -165,9 +200,9 @@ i_ofThresh   = input.float(60.0,"OF Pressure Threshold (%)",
      minval=55.0, maxval=90.0, step=0.5,
      tooltip="Base close-position (%) required. v3.3 relaxed 62→60 because a real delta-ratio gate now sits alongside this — buyPct becomes the coarse floor.",
      group=G_OF)
-i_deltaFloor = input.float(0.30,"Min Net Delta Ratio",
+i_deltaFloor = input.float(0.20,"Min Net Delta Ratio",
      minval=0.0, maxval=1.0, step=0.05,
-     tooltip="(up-volume - down-volume) / total-volume must exceed this. Estimated from bar shape when tick data unavailable. v3.3 accuracy fix — replaces redundant closePos check.",
+     tooltip="(up-volume - down-volume) / total-volume must exceed this. Estimated from bar shape, which makes it exactly 2×closePos−1 — the SAME scale as the OF threshold (0.20 ⇔ 60% close position).\nv3.5.2: default 0.30→0.20 — the old default silently demanded 65% and overrode the 60% OF threshold input.",
      group=G_OF)
 i_ofAdaptive = input.bool(true, "Adaptive OF Threshold (tighten in chop)",
      tooltip="Raises threshold by +5% in chop regime. Never LOWERS the threshold.\nScalp mode ignores the chop tightening — it would override the scalp 57% floor (v3.5.1).",
@@ -239,8 +274,10 @@ i_rsiFilter  = input.bool(true, "Enable RSI Sanity Filter",
      group=G_RSI)
 i_rsiLen     = input.int(14, "RSI Length", minval=2, maxval=100, group=G_RSI)
 i_rsiBuyLo   = input.int(40, "BUY min RSI", minval=10, maxval=60, group=G_RSI)
-i_rsiBuyHi   = input.int(72, "BUY max RSI", minval=55, maxval=90, group=G_RSI)
-i_rsiSellLo  = input.int(28, "SELL min RSI", minval=10, maxval=45, group=G_RSI)
+i_rsiBuyHi   = input.int(78, "BUY max RSI", minval=55, maxval=90,
+     tooltip="v3.5.2 default 72→78: MSS fires on strong breakout closes, exactly where RSI runs hot — 72 vetoed the very bars the trigger selects.", group=G_RSI)
+i_rsiSellLo  = input.int(22, "SELL min RSI", minval=10, maxval=45,
+     tooltip="v3.5.2 default 28→22 (mirror of the BUY-side fix).", group=G_RSI)
 i_rsiSellHi  = input.int(60, "SELL max RSI", minval=40, maxval=90, group=G_RSI)
 
 // ── TP / SL ──────────────────────────────────────────────────────────────────
@@ -275,6 +312,9 @@ i_barTint    = input.bool(true, "Tint bars on OF signal", group=G_VIS)
 i_dashboard  = input.bool(true, "Show Confluence Dashboard", group=G_VIS)
 i_dashPos    = input.string("Top Right","Dashboard Position",
      options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=G_VIS)
+i_debugLabels = input.bool(false, "Show Block-Reason Labels (✕)",
+     tooltip="v3.5.2: prints a small ✕ label on every trigger bar that was vetoed, listing the gates that blocked it (body, wick, vol, of%, delta, cvd, mom, mode, bias, cooldown, risk, rsi). The dashboard 'Last Block' row always shows the most recent one regardless of this toggle.",
+     group=G_VIS)
 i_jsonAlerts = input.bool(true, "JSON Push Alerts", group=G_ALERT)
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -322,14 +362,22 @@ range_   = math.max(high - low, 1e-9)
 closePos = (close - low) / range_
 buyPct   = closePos * 100.0
 
-volAvg = ta.sma(volume, 20)
-relVol = volume / math.max(volAvg, 1.0)
-volOk  = relVol >= effVolFloor
+// v3.5.2: symbols with no volume feed (many indices / FX / CFD tickers)
+// previously produced volOk=false, deltaRatio=na and a flat CVD — no mode
+// could EVER fire on them, silently. Volume-dependent gates self-disable
+// when the symbol has never reported volume; bar-shape gates stay active.
+var bool volDataSeen = false
+if nz(volume) > 0
+    volDataSeen := true
 
-// Net delta ratio: estimated up-vol vs down-vol from bar shape.
-// A near-doji closing mid-bar has delta ≈ 0 regardless of raw volume.
-netDelta      = volume * (2.0 * closePos - 1.0)
-deltaRatio    = volume > 0 ? netDelta / volume : 0.0
+volAvg = ta.sma(nz(volume), 20)
+relVol = volDataSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
+volOk  = not volDataSeen or relVol >= effVolFloor
+
+// Net delta ratio, estimated from bar shape — identically 2·closePos−1 (a
+// near-doji closing mid-bar has delta ≈ 0 regardless of raw volume). Same
+// scale as the OF threshold; see the i_deltaFloor tooltip (v3.5.2).
+deltaRatio    = volDataSeen and nz(volume) == 0 ? 0.0 : 2.0 * closePos - 1.0
 deltaBullOk   = deltaRatio >=  effDeltaFloor
 deltaBearOk   = deltaRatio <= -effDeltaFloor
 
@@ -340,7 +388,7 @@ adaptThresh = i_ofAdaptive and volChop and not isScalp ? effOfThresh + 5.0 : eff
 
 // v3.3: doji contributes zero to CVD (was volume*(2*closePos-1) which drifted EMAs)
 sessionChange = ta.change(time("D")) != 0
-cvdVol = close > open ? volume : close < open ? -volume : 0.0
+cvdVol = close > open ? nz(volume) : close < open ? -nz(volume) : 0.0
 var float cvd = 0.0
 if i_cvdReset and sessionChange
     cvd := 0.0
@@ -403,9 +451,11 @@ htfOkBear = not i_htfFilter or htfBear
 
 // v3.5: Scalp bypasses the HTF gate everywhere — including inside the
 // FVG-retest and Sweep trigger construction, where it was baked in for all
-// modes and quietly delayed even "Aggressive" entries.
-trigHtfBull = isScalp or htfOkBull
-trigHtfBear = isScalp or htfOkBear
+// modes. v3.5.2: Aggressive bypasses it there too — its description says
+// "structure + OF only (no HTF gate)" but this trigger-level check still
+// applied, quietly delaying or blocking Aggressive entries.
+trigHtfBull = isScalp or i_mode == "Aggressive" or htfOkBull
+trigHtfBear = isScalp or i_mode == "Aggressive" or htfOkBear
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VWAP + overextension guard (v3.3)
@@ -802,9 +852,14 @@ buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
 sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
 
 // v3.3: both a floor AND a cap (v3.5: Scalp window 0.5-2.0 ATR; v3.5.1: the
-// cap can no longer block Scalp — the stop is clamped to it instead)
-riskOkBuy  = buyRiskDist  >= atr14 * effMinRisk and buyRiskDist  <= atr14 * effMaxRisk
-riskOkSell = sellRiskDist >= atr14 * effMinRisk and sellRiskDist <= atr14 * effMaxRisk
+// cap can no longer block Scalp — the stop is clamped to it instead).
+// v3.5.2: the window is judged in the SAME ATR units the SL is built from
+// (atrBase for non-Scalp). It was judged in atr14 while the stop was placed
+// with atrBase distances — in chop (atr50 > atr14) the structural stop
+// routinely overflowed the cap and silently blocked every mode's entries.
+riskAtrRef = isScalp ? atr14 : atrBase
+riskOkBuy  = buyRiskDist  >= riskAtrRef * effMinRisk and buyRiskDist  <= riskAtrRef * effMaxRisk
+riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk and sellRiskDist <= riskAtrRef * effMaxRisk
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNIFIED TP SELECTION (v3.4.1; v3.5.1 computes it lazily on signal bars)
@@ -877,8 +932,10 @@ sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
 // (closePos ≥ 0.6 back above the level), the delta floor, the OF threshold
 // and the volume floor still gate the entry. MSS/FVG scalps (continuation
 // setups) keep both gates. Non-Scalp modes are unchanged.
-cvdOkBuy   = cvdBull  or (isScalp and buyTrigSweep)
-cvdOkSell  = cvdBear  or (isScalp and sellTrigSweep)
+// v3.5.2: CVD gate also self-disables on symbols with no volume feed —
+// with volume permanently na the CVD was flat and vetoed everything.
+cvdOkBuy   = not volDataSeen or cvdBull  or (isScalp and buyTrigSweep)
+cvdOkSell  = not volDataSeen or cvdBear  or (isScalp and sellTrigSweep)
 momOkBuyEff  = momOkBuy  or (isScalp and buyTrigSweep)
 momOkSellEff = momOkSell or (isScalp and sellTrigSweep)
 
@@ -906,6 +963,45 @@ if rawSell
     lastSigBar := bar_index
     lastTradeBuy := false
     lastSlHit := false
+
+// v3.5.2: name the gates that vetoed the most recent trigger — shown in the
+// dashboard "Last Block" row and (optionally) as on-chart ✕ labels.
+var string lastBlockReason = "—"
+if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
+    string r = ""
+    r += strongBull ? "" : "body "
+    r += notWeak ? "" : "wick "
+    r += volOk ? "" : "vol "
+    r += buyPct >= adaptThresh ? "" : "of% "
+    r += deltaBullOk ? "" : "delta "
+    r += cvdOkBuy ? "" : "cvd "
+    r += momOkBuyEff ? "" : "mom "
+    r += modePassBull ? "" : "mode "
+    r += biasOkBuy ? "" : "bias "
+    r += coolOk ? "" : "cooldown "
+    r += riskOkBuy ? "" : "risk "
+    r += rsiOkBuy ? "" : "rsi "
+    if r != ""
+        lastBlockReason := "BUY ✕ " + r
+        if i_debugLabels
+            label.new(bar_index, low - atr14 * 0.4, "✕ " + r, style=label.style_label_up, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
+if barstate.isconfirmed and sellTrigger and barBear and not rawSell
+    string r = ""
+    r += strongBear ? "" : "body "
+    r += notWeak ? "" : "wick "
+    r += volOk ? "" : "vol "
+    r += (100.0 - buyPct) >= adaptThresh ? "" : "of% "
+    r += deltaBearOk ? "" : "delta "
+    r += cvdOkSell ? "" : "cvd "
+    r += momOkSellEff ? "" : "mom "
+    r += modePassBear ? "" : "mode "
+    r += biasOkSell ? "" : "bias "
+    r += coolOk ? "" : "cooldown "
+    r += riskOkSell ? "" : "risk "
+    if r != ""
+        lastBlockReason := "SELL ✕ " + r
+        if i_debugLabels
+            label.new(bar_index, high + atr14 * 0.4, "✕ " + r, style=label.style_label_down, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
 
 // v3.5.1: TP selection (array build + sort ×2) previously ran on EVERY bar;
 // the levels are only consumed on signal bars, so compute them only there.
@@ -1096,8 +1192,9 @@ if i_dashboard and barstate.islast
     tPos = (i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left)
 
     if na(dash)
-        dash := table.new(tPos, 3, 16, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
+        dash := table.new(tPos, 3, 17, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
         table.merge_cells(dash, 1, 15, 2, 15)
+        table.merge_cells(dash, 1, 16, 2, 16)
 
     grn  = color.new(#00FF88, 0)
     red_ = color.new(#FF3366, 0)
@@ -1107,7 +1204,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.1 — " + str.upper(i_mode), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.2 — " + str.upper(i_mode), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -1151,13 +1248,14 @@ if i_dashboard and barstate.islast
     f_cell(1, 9, str.tostring(math.round(deltaRatio, 2)), deltaBullOk ? grn : dim)
     f_cell(2, 9, str.tostring(math.round(deltaRatio, 2)), deltaBearOk ? red_ : dim)
 
+    relVolTxt = volDataSeen ? str.tostring(math.round(relVol, 2)) + "×" : "N/A (no vol)"
     table.cell(dash, 0, 10, "Rel Volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 10, str.tostring(math.round(relVol, 2)) + "×", volOk ? grn : red_)
-    f_cell(2, 10, str.tostring(math.round(relVol, 2)) + "×", volOk ? grn : red_)
+    f_cell(1, 10, relVolTxt, not volDataSeen ? dim : volOk ? grn : red_)
+    f_cell(2, 10, relVolTxt, not volDataSeen ? dim : volOk ? grn : red_)
 
     table.cell(dash, 0, 11, "CVD Flow", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 11, cvdBull ? "BULL" : "BEAR", cvdBull ? grn : red_)
-    f_cell(2, 11, cvdBull ? "BULL" : "BEAR", cvdBull ? grn : red_)
+    f_cell(1, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
+    f_cell(2, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
 
     // v3.4: FRVP row shows live POC price
     table.cell(dash, 0, 12, "FRVP" + (na(pocPrice) ? "" : " @ " + str.tostring(math.round(pocPrice, 2))), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
@@ -1170,15 +1268,21 @@ if i_dashboard and barstate.islast
     f_cell(1, 13, regTxt + " " + str.tostring(math.round(volRegime, 2)) + "×", regCol)
     f_cell(2, 13, regTxt + " " + str.tostring(math.round(volRegime, 2)) + "×", regCol)
 
-    buyRatioStr  = str.tostring(math.round(buyRiskDist  / atr14, 2)) + "× ATR"
-    sellRatioStr = str.tostring(math.round(sellRiskDist / atr14, 2)) + "× ATR"
+    // v3.5.2: shown in the SAME ATR units the risk window is judged in, and
+    // the SELL cell now dims when blocked (was red for OK and blocked alike)
+    buyRatioStr  = str.tostring(math.round(buyRiskDist  / riskAtrRef, 2)) + "× ATR"
+    sellRatioStr = str.tostring(math.round(sellRiskDist / riskAtrRef, 2)) + "× ATR"
     table.cell(dash, 0, 14, "Risk Dist", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 14, buyRatioStr,  riskOkBuy  ? grn : red_)
-    f_cell(2, 14, sellRatioStr, riskOkSell ? red_ : red_)
+    f_cell(1, 14, buyRatioStr,  riskOkBuy  ? grn : dim)
+    f_cell(2, 14, sellRatioStr, riskOkSell ? red_ : dim)
 
     lastSigCol = str.contains(lastSigMemory, "BUY") ? grn : str.contains(lastSigMemory, "SELL") ? red_ : dim
     table.cell(dash, 0, 15, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
     table.cell(dash, 1, 15, lastSigMemory, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
+
+    // v3.5.2: which gates vetoed the most recent trigger
+    table.cell(dash, 0, 16, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 16, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // JSON ALERTS — v3.4.1: TPs are the SAME structure-based levels shown on chart
@@ -1187,7 +1291,7 @@ if i_dashboard and barstate.islast
 // ═══════════════════════════════════════════════════════════════════════════════
 
 f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_) =>
-    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(math.round(close, 2)) + ',"sl":' + str.tostring(math.round(slPx_, 2)) + ',"tp1":' + str.tostring(math.round(tp1_, 2)) + ',"tp2":' + str.tostring(math.round(tp2_, 2)) + ',"tp3":' + str.tostring(math.round(tp3_, 2)) + ',"risk_atr":' + str.tostring(math.round(rDist_ / atr14, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + str.tostring(na(pocPrice) ? 0 : math.round(pocPrice, 2)) + ',"vah":' + str.tostring(na(vahPrice) ? 0 : math.round(vahPrice, 2)) + ',"val":' + str.tostring(na(valPrice) ? 0 : math.round(valPrice, 2)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '"}'
+    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(math.round(close, 2)) + ',"sl":' + str.tostring(math.round(slPx_, 2)) + ',"tp1":' + str.tostring(math.round(tp1_, 2)) + ',"tp2":' + str.tostring(math.round(tp2_, 2)) + ',"tp3":' + str.tostring(math.round(tp3_, 2)) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + str.tostring(na(pocPrice) ? 0 : math.round(pocPrice, 2)) + ',"vah":' + str.tostring(na(vahPrice) ? 0 : math.round(vahPrice, 2)) + ',"val":' + str.tostring(na(valPrice) ? 0 : math.round(valPrice, 2)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '"}'
 
 alertcondition(buySignal,               "ME Pro — BUY Signal",  "ME Pro: BUY signal fired")
 alertcondition(sellSignal,              "ME Pro — SELL Signal", "ME Pro: SELL signal fired")
