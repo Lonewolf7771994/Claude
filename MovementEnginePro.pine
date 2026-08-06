@@ -1,7 +1,27 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.2 (all modes fire again + block-reason debugging)
+// © ME Institutional — Movement Engine Pro v3.5.3 (news blackout windows + TP de-duplication)
 //@version=6
-indicator("Movement Engine Pro v3.5.2", shorttitle="ME Pro v3.5.2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.3", shorttitle="ME Pro v3.5.3", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.3 CHANGELOG — NEWS BLACKOUT WINDOWS + TP DE-DUPLICATION
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NEWS BLACKOUT WINDOWS (built for oil, useful on any scheduled-news
+//    symbol). Optional filter blocks NEW signals during up to two weekly
+//    windows (session syntax, own timezone), with a background tint while
+//    active and "news" reported in the Last Block row. Defaults are
+//    preloaded for WTI crude: EIA inventories (Wed 10:15-11:30 ET) and API
+//    (Tue 16:15-17:45 ET). Release spike bars score as perfect order-flow
+//    confluence (huge volume, strong delta, big body) right before they
+//    mean-revert — exactly the bars to skip. OFF by default. Most effective
+//    on intraday charts, where bars actually open inside the window.
+// 2. TP DE-DUPLICATION. A double top/bottom put two pivot candidates a few
+//    points apart and the TP selector assigned BOTH as TP1 and TP2 (seen
+//    live on XAUUSD: TP1 ~4118 / TP2 4120.5), collapsing the plan into one
+//    target zone. Structure candidates closer than max(0.5 ATR, 0.25R) to
+//    the previously kept target are now merged, so TP2/TP3 promote to the
+//    next real level or the R-multiple fallback.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.2 CHANGELOG — ALL MODES FIRE AGAIN + BLOCK-REASON DEBUGGING
@@ -146,6 +166,7 @@ var string G_FRVP   = "══ Fixed-Range Volume Profile ══"
 var string G_RSI    = "══ RSI Sanity Filter ══"
 var string G_TPSL   = "══ TP / SL Projection ══"
 var string G_RISK   = "══ Risk Guards ══"
+var string G_NEWS   = "══ News Blackout ══"
 var string G_VIS    = "══ Visuals ══"
 var string G_ALERT  = "══ Alerts ══"
 
@@ -304,6 +325,20 @@ i_cooldown   = input.int(12,   "Signal Cooldown (bars)", minval=0, maxval=100,
 i_postSlCd   = input.bool(true, "Double Cooldown After SL Hit",
      tooltip="If the prior trade hit its SL before any TP, the next signal is blocked for 2× cooldown.",
      group=G_RISK)
+
+// ── News Blackout ────────────────────────────────────────────────────────────
+i_newsFilter = input.bool(false, "Enable News Blackout Windows",
+     tooltip="v3.5.3: blocks new signals during the windows below (background tinted while active). Built for oil — EIA/API/OPEC releases produce spike bars that score as perfect order-flow confluence right before they mean-revert. Enable on USOIL/UKOIL/CL; harmless to leave off elsewhere.",
+     group=G_NEWS)
+i_newsSess1  = input.session("1015-1130:4", "Blackout Window 1",
+     tooltip="Session syntax HHMM-HHMM:days, days 1=Sun…7=Sat. Default: EIA crude inventories, Wednesday 10:15-11:30 (in the timezone below).",
+     group=G_NEWS)
+i_newsSess2  = input.session("1615-1745:3", "Blackout Window 2",
+     tooltip="Default: API crude report, Tuesday 16:15-17:45 (in the timezone below).",
+     group=G_NEWS)
+i_newsTz     = input.string("America/New_York", "Blackout Timezone",
+     tooltip="IANA timezone the windows are evaluated in, e.g. America/New_York, UTC, Europe/London.",
+     group=G_NEWS)
 
 // ── Visuals ──────────────────────────────────────────────────────────────────
 i_buyCol     = input.color(color.new(#00E5FF, 0),  "BUY Color",  group=G_VIS)
@@ -480,6 +515,16 @@ vwapOkBear = (not i_vwapFilter or belowVwap) and notExtended
 rsi     = ta.rsi(close, i_rsiLen)
 rsiOkBuy  = not i_rsiFilter or (rsi >= effRsiBuyLo  and rsi <= effRsiBuyHi)
 rsiOkSell = not i_rsiFilter or (rsi >= effRsiSellLo and rsi <= effRsiSellHi)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEWS BLACKOUT WINDOWS (v3.5.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+inNews1 = i_newsFilter and not na(time(timeframe.period, i_newsSess1, i_newsTz))
+inNews2 = i_newsFilter and not na(time(timeframe.period, i_newsSess2, i_newsTz))
+inNewsWindow = inNews1 or inNews2
+newsOk = not inNewsWindow
+bgcolor(inNewsWindow ? color.new(#FF3366, 94) : na, title="News Blackout Tint")
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PIVOTS
@@ -871,29 +916,39 @@ riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk and sellRiskDist <= riskAtr
 // ═══════════════════════════════════════════════════════════════════════════════
 
 f_tpLevels(bool _isBuy, float _entry, float _risk) =>
-    float[] cands = array.new_float(0)
+    float[] raw = array.new_float(0)
     if _isBuy
         if not na(ph1) and ph1 > _entry
-            array.push(cands, ph1)
+            array.push(raw, ph1)
         if not na(ph2) and ph2 > _entry
-            array.push(cands, ph2)
+            array.push(raw, ph2)
         if not na(ph3) and ph3 > _entry
-            array.push(cands, ph3)
+            array.push(raw, ph3)
         if not na(vahPrice) and vahPrice > _entry
-            array.push(cands, vahPrice)
-        if array.size(cands) > 1
-            array.sort(cands, order.ascending)
+            array.push(raw, vahPrice)
+        if array.size(raw) > 1
+            array.sort(raw, order.ascending)
     else
         if not na(pl1) and pl1 < _entry
-            array.push(cands, pl1)
+            array.push(raw, pl1)
         if not na(pl2) and pl2 < _entry
-            array.push(cands, pl2)
+            array.push(raw, pl2)
         if not na(pl3) and pl3 < _entry
-            array.push(cands, pl3)
+            array.push(raw, pl3)
         if not na(valPrice) and valPrice < _entry
-            array.push(cands, valPrice)
-        if array.size(cands) > 1
-            array.sort(cands, order.descending)
+            array.push(raw, valPrice)
+        if array.size(raw) > 1
+            array.sort(raw, order.descending)
+    // v3.5.3: merge structure candidates closer than max(0.5 ATR, 0.25R) to
+    // the previously kept one — a double top/bottom otherwise fills TWO TP
+    // slots with near-identical prices and the plan loses a real target.
+    float minGap = math.max(atr14 * 0.5, _risk * 0.25)
+    float[] cands = array.new_float(0)
+    if array.size(raw) > 0
+        for i = 0 to array.size(raw) - 1
+            c = array.get(raw, i)
+            if array.size(cands) == 0 or math.abs(c - array.get(cands, array.size(cands) - 1)) >= minGap
+                array.push(cands, c)
     int n     = array.size(cands)
     float lvl = _isBuy ? vahPrice : valPrice
     string lt = _isBuy ? " VAH" : " VAL"
@@ -945,8 +1000,8 @@ barBear = close < open
 strongBull = bodySize >= atr14 * effBodyAtr
 strongBear = bodySize >= atr14 * effBodyAtr
 
-rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeak and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy
-rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeak and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell
+rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeak and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk
+rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeak and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk
 
 buySignal  = rawBuy
 sellSignal = rawSell
@@ -981,6 +1036,7 @@ if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
     r += coolOk ? "" : "cooldown "
     r += riskOkBuy ? "" : "risk "
     r += rsiOkBuy ? "" : "rsi "
+    r += newsOk ? "" : "news "
     if r != ""
         lastBlockReason := "BUY ✕ " + r
         if i_debugLabels
@@ -998,6 +1054,8 @@ if barstate.isconfirmed and sellTrigger and barBear and not rawSell
     r += biasOkSell ? "" : "bias "
     r += coolOk ? "" : "cooldown "
     r += riskOkSell ? "" : "risk "
+    r += rsiOkSell ? "" : "rsi "
+    r += newsOk ? "" : "news "
     if r != ""
         lastBlockReason := "SELL ✕ " + r
         if i_debugLabels
@@ -1204,7 +1262,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.2 — " + str.upper(i_mode), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.3 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : ""), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
