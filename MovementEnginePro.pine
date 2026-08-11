@@ -1,7 +1,41 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.4 (accuracy audit pass)
+// © ME Institutional — Movement Engine Pro v3.5.5 (tick precision + breakeven + trade management)
 //@version=6
-indicator("Movement Engine Pro v3.5.4", shorttitle="ME Pro v3.5.4", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.5", shorttitle="ME Pro v3.5.5", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.5 CHANGELOG — PRICE PRECISION + TRADE MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. PRICE PRECISION BUG — CRITICAL ON FX AND LOW-PRICED SYMBOLS. Every price
+//    in the chart labels and the JSON alert payload was hard-rounded to TWO
+//    decimals (math.round(x, 2)). On EURUSD an SL of 1.09345 was published as
+//    1.09 — a 34-pip error in a webhook order; on a sub-dollar crypto TP1/2/3
+//    could collapse to the same number. Gold and indices happened to be fine,
+//    which is why this survived. All prices now format at the symbol's own
+//    tick size (format.mintick).
+// 2. BREAKEVEN STOP AFTER TP1 (new input, ON). The engine already treated TP1
+//    as "de-risked" for cooldown purposes but never moved the stop, so a
+//    trade could tag TP1 and still run all the way back to a full loss. The
+//    tracked SL now moves to entry when TP1 trades, and the drawn SL line and
+//    label move with it.
+// 3. CONSECUTIVE-LOSS CIRCUIT BREAKER (new input, default 0 = off). Pauses
+//    new signals after N stop-outs in a row; the streak resets on any TP1.
+//    A cooldown measured in bars does not help when the regime itself has
+//    turned against the setup type.
+// 4. CONFLUENCE SCORE WAS COMPUTED AND THROWN AWAY. buyAligned/sellAligned
+//    have existed for versions without ever being read. They also counted
+//    disabled filters as alignment (htfOkBull is true when the HTF filter is
+//    off), which would have inflated the score. Now computed from the raw
+//    directional facts (HTF side, VWAP side, value-area side), shown on the
+//    dashboard and sent in the alert payload as "confluence": 0-3.
+// 5. ALERT DEDUPE METADATA. Payloads now carry "seq" (monotonic signal
+//    counter) and "bar_time" (bar open, epoch ms) so a webhook receiver can
+//    reject duplicates and out-of-order deliveries.
+// 6. FVG BOXES IGNORED THEIR OWN RIGHT EDGE. box.new got both an explicit
+//    right edge and extend=extend.right; the extend wins, so boxes ran to
+//    the edge of the chart forever, contradicting v3.4's bounded rendering.
+//    They now end at the age limit that invalidates them (i_fvgMaxAge).
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.4 CHANGELOG — ACCURACY AUDIT (six measurement bugs)
@@ -371,6 +405,12 @@ i_cooldown   = input.int(12,   "Signal Cooldown (bars)", minval=0, maxval=100,
 i_postSlCd   = input.bool(true, "Double Cooldown After SL Hit",
      tooltip="If the prior trade hit its SL before any TP, the next signal is blocked for 2× cooldown.",
      group=G_RISK)
+i_beAfterTp1 = input.bool(true, "Move SL To Breakeven After TP1",
+     tooltip="v3.5.5: when TP1 trades, move the tracked stop to the entry price. The engine already treated TP1 as 'de-risked' for the cooldown guard but left the stop where it was, so a trade could tag TP1 and still return a full loss. The drawn SL line and label move with it.",
+     group=G_RISK)
+i_maxLossStreak = input.int(0, "Pause After N Consecutive Losses", minval=0, maxval=20,
+     tooltip="v3.5.5: after N stop-outs in a row (none of which reached TP1), block new signals until a trade reaches TP1 again. 0 = disabled. A bar-count cooldown does not help when the regime has turned against the setup type.",
+     group=G_RISK)
 
 // ── News Blackout ────────────────────────────────────────────────────────────
 i_newsFilter = input.bool(false, "Enable News Blackout Windows",
@@ -695,7 +735,9 @@ if bullFvgValid
     if i_fvgShow
         if not na(lBullBox)
             box.delete(lBullBox)
-        lBullBox := box.new(bar_index - 2, lBullTop, bar_index + 50, lBullBot, border_color=color.new(i_fvgBullCol, 30), bgcolor=i_fvgBullCol, border_width=1, extend=extend.right)
+        // v3.5.5: no extend.right — it overrode the explicit right edge, so
+        // boxes ran to the chart edge forever. End where the gap expires.
+        lBullBox := box.new(bar_index - 2, lBullTop, bar_index + i_fvgMaxAge, lBullBot, border_color=color.new(i_fvgBullCol, 30), bgcolor=i_fvgBullCol, border_width=1)
         if i_fvgLabel
             label.new(bar_index, (lBullTop + lBullBot) / 2.0, "FVG", color=color.new(i_fvgBullCol, 60), textcolor=color.new(i_buyCol, 0), style=label.style_label_right, size=size.tiny)
 
@@ -706,7 +748,7 @@ if bearFvgValid
     if i_fvgShow
         if not na(lBearBox)
             box.delete(lBearBox)
-        lBearBox := box.new(bar_index - 2, lBearTop, bar_index + 50, lBearBot, border_color=color.new(i_fvgBearCol, 30), bgcolor=i_fvgBearCol, border_width=1, extend=extend.right)
+        lBearBox := box.new(bar_index - 2, lBearTop, bar_index + i_fvgMaxAge, lBearBot, border_color=color.new(i_fvgBearCol, 30), bgcolor=i_fvgBearCol, border_width=1)
         if i_fvgLabel
             label.new(bar_index, (lBearTop + lBearBot) / 2.0, "FVG", color=color.new(i_fvgBearCol, 60), textcolor=color.new(i_sellCol, 0), style=label.style_label_right, size=size.tiny)
 
@@ -927,9 +969,9 @@ if i_frvpShow and barstate.islast and not na(pocPrice)
     vahLine := line.new(xL, vahPrice, xR, vahPrice, color=i_vahCol, width=1, style=line.style_dashed)
     valLine := line.new(xL, valPrice, xR, valPrice, color=i_valCol, width=1, style=line.style_dashed)
     if i_frvpLevels
-        pocLab := label.new(xR, pocPrice, "POC " + str.tostring(math.round(pocPrice, 2)), style=label.style_label_left, color=color.new(#000000, 100), textcolor=i_pocCol, size=size.tiny)
-        vahLab := label.new(xR, vahPrice, "VAH " + str.tostring(math.round(vahPrice, 2)), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(i_vahCol, 0), size=size.tiny)
-        valLab := label.new(xR, valPrice, "VAL " + str.tostring(math.round(valPrice, 2)), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(i_valCol, 0), size=size.tiny)
+        pocLab := label.new(xR, pocPrice, "POC " + str.tostring(pocPrice, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=i_pocCol, size=size.tiny)
+        vahLab := label.new(xR, vahPrice, "VAH " + str.tostring(vahPrice, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(i_vahCol, 0), size=size.tiny)
+        valLab := label.new(xR, valPrice, "VAL " + str.tostring(valPrice, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(i_valCol, 0), size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MODE GATES
@@ -940,8 +982,13 @@ if i_frvpShow and barstate.islast and not na(pocPrice)
 modePassBull = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBull and vwapOkBull and (i_mode != "Strict" or frvpBullOk))
 modePassBear = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBear and vwapOkBear and (i_mode != "Strict" or frvpBearOk))
 
-buyAligned  = (htfOkBull ? 1 : 0) + (vwapOkBull ? 1 : 0) + (frvpBullOk ? 1 : 0)
-sellAligned = (htfOkBear ? 1 : 0) + (vwapOkBear ? 1 : 0) + (frvpBearOk ? 1 : 0)
+// v3.5.5: confluence score, 0-3. Was computed from the *Ok flags, which are
+// true whenever their filter is switched OFF — a disabled filter counted as
+// alignment and inflated the score. Built from raw directional facts now, and
+// actually surfaced (dashboard row + "confluence" in the alert payload);
+// previously these two values were computed every bar and never read.
+buyAligned  = (htfBull ? 1 : 0) + (aboveVwap ? 1 : 0) + (frvpBullOk ? 1 : 0)
+sellAligned = (htfBear ? 1 : 0) + (belowVwap ? 1 : 0) + (frvpBearOk ? 1 : 0)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ADAPTIVE SL — never tightens (non-Scalp modes)
@@ -1051,6 +1098,13 @@ var bool lastSlHit    = false
 effCd = i_postSlCd and lastSlHit ? effCooldown * 2 : effCooldown
 coolOk = bar_index - lastSigBar >= effCd
 
+// v3.5.5: consecutive-loss circuit breaker. Declared here (before the signal
+// gates read it) but UPDATED in the TP/SL tracking section further down, so
+// on any bar it holds the streak as of that bar's open — the same pattern
+// lastSlHit already uses.
+var int lossStreak = 0
+breakerOk = i_maxLossStreak == 0 or lossStreak < i_maxLossStreak
+
 // v3.4.1: mode-gated trigger flags computed once, reused by trigger AND label
 buyTrigFvg   = i_mode != "Strict"     and fvgRetestBull
 sellTrigFvg  = i_mode != "Strict"     and fvgRetestBear
@@ -1087,8 +1141,8 @@ barBear = close < open
 strongBull = bodySize >= atr14 * effBodyAtr
 strongBear = bodySize >= atr14 * effBodyAtr
 
-rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk
-rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk
+rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk and breakerOk
+rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk and breakerOk
 
 buySignal  = rawBuy
 sellSignal = rawSell
@@ -1124,6 +1178,7 @@ if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
     r += riskOkBuy ? "" : "risk "
     r += rsiOkBuy ? "" : "rsi "
     r += newsOk ? "" : "news "
+    r += breakerOk ? "" : "lossbreak "
     if r != ""
         lastBlockReason := "BUY ✕ " + r
         if i_debugLabels
@@ -1143,6 +1198,7 @@ if barstate.isconfirmed and sellTrigger and barBear and not rawSell
     r += riskOkSell ? "" : "risk "
     r += rsiOkSell ? "" : "rsi "
     r += newsOk ? "" : "news "
+    r += breakerOk ? "" : "lossbreak "
     if r != ""
         lastBlockReason := "SELL ✕ " + r
         if i_debugLabels
@@ -1185,10 +1241,15 @@ if sellSignal
 // ═══════════════════════════════════════════════════════════════════════════════
 
 var string lastSigMemory = "—"
+// v3.5.5: monotonic signal counter — sent as "seq" so a webhook receiver can
+// dedupe retries and reject out-of-order deliveries.
+var int sigSeq = 0
 if buySignal
     lastSigMemory := "BUY (" + buyType + ")"
+    sigSeq += 1
 if sellSignal
     lastSigMemory := "SELL (" + sellType + ")"
+    sigSeq += 1
 
 var string lastMssDir   = "—"
 var string lastFvgDir   = "—"
@@ -1228,8 +1289,10 @@ var label tpsl_tp3L = na
 var float activeSlPx  = na
 var float activeTp1Px = na
 var float activeTp3Px = na
+var float activeEntryPx = na   // v3.5.5: needed for the breakeven move
 var bool  tradeBuy    = false
 var bool  activeTp1Hit = false
+var bool  activeAtBe   = false
 
 slHitNow  = not na(activeSlPx)  and (tradeBuy ? low  <= activeSlPx  : high >= activeSlPx)
 tp1HitNow = not na(activeTp1Px) and (tradeBuy ? high >= activeTp1Px : low  <= activeTp1Px)
@@ -1245,10 +1308,25 @@ slFirstAmbiguous = slHitNow and tp1HitNow and not activeTp1Hit
 if barstate.isconfirmed and tp1HitNow and not slFirstAmbiguous
     activeTp1Hit := true
     lastSlHit := false
+    lossStreak := 0   // v3.5.5: a trade that reached TP1 breaks the streak
+    // v3.5.5 BREAKEVEN. TP1 was already treated as "de-risked" for the
+    // cooldown guard, but the stop never moved — so a trade could tag TP1
+    // and still come back for a full loss. Move the tracked stop to entry
+    // and drag the drawn line/label with it.
+    if i_beAfterTp1 and not na(activeEntryPx) and not activeAtBe
+        activeSlPx := activeEntryPx
+        activeAtBe := true
+        if not na(tpsl_sl)
+            line.set_y1(tpsl_sl, activeEntryPx)
+            line.set_y2(tpsl_sl, activeEntryPx)
+        if not na(tpsl_slL)
+            label.set_y(tpsl_slL, activeEntryPx)
+            label.set_text(tpsl_slL, " BE  " + str.tostring(activeEntryPx, format.mintick))
 if barstate.isconfirmed and tp3HitNow and not slHitNow
     lastSlHit := false
 if barstate.isconfirmed and slHitNow and not activeTp1Hit
     lastSlHit := true
+    lossStreak := math.min(lossStreak + 1, 999)
 
 if barstate.isconfirmed and (slHitNow or tp3HitNow or buySignal or sellSignal)
     if not na(tpsl_sl)
@@ -1281,13 +1359,17 @@ if barstate.isconfirmed and (slHitNow or tp3HitNow or buySignal or sellSignal)
     activeSlPx   := na
     activeTp1Px  := na
     activeTp3Px  := na
+    activeEntryPx := na
     activeTp1Hit := false
+    activeAtBe   := false
 
 if buySignal
     activeSlPx   := buySLpx
     activeTp1Px  := buyTp1
     activeTp3Px  := buyTp3
+    activeEntryPx := close
     activeTp1Hit := false
+    activeAtBe   := false
     tradeBuy     := true
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
@@ -1296,16 +1378,18 @@ if buySignal
         tpsl_tp1  := line.new(bar_index, buyTp1,  endBar, buyTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, buyTp2,  endBar, buyTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, buyTp3,  endBar, buyTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
-        tpsl_slL  := label.new(endBar, buySLpx, " SL  " + str.tostring(math.round(buySLpx, 2)),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
-        tpsl_tp1L := label.new(endBar, buyTp1,  " TP1 " + str.tostring(math.round(buyTp1,  2)) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp2L := label.new(endBar, buyTp2,  " TP2 " + str.tostring(math.round(buyTp2,  2)) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp3L := label.new(endBar, buyTp3,  " TP3 " + str.tostring(math.round(buyTp3,  2)) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        tpsl_slL  := label.new(endBar, buySLpx, " SL  " + str.tostring(buySLpx, format.mintick),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_tp1L := label.new(endBar, buyTp1,  " TP1 " + str.tostring(buyTp1, format.mintick) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp2L := label.new(endBar, buyTp2,  " TP2 " + str.tostring(buyTp2, format.mintick) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp3L := label.new(endBar, buyTp3,  " TP3 " + str.tostring(buyTp3, format.mintick) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
 
 if sellSignal
     activeSlPx   := sellSLpx
     activeTp1Px  := sellTp1
     activeTp3Px  := sellTp3
+    activeEntryPx := close
     activeTp1Hit := false
+    activeAtBe   := false
     tradeBuy     := false
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
@@ -1314,10 +1398,10 @@ if sellSignal
         tpsl_tp1  := line.new(bar_index, sellTp1,  endBar, sellTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, sellTp2,  endBar, sellTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, sellTp3,  endBar, sellTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
-        tpsl_slL  := label.new(endBar, sellSLpx, " SL  " + str.tostring(math.round(sellSLpx, 2)),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
-        tpsl_tp1L := label.new(endBar, sellTp1,  " TP1 " + str.tostring(math.round(sellTp1,  2)) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp2L := label.new(endBar, sellTp2,  " TP2 " + str.tostring(math.round(sellTp2,  2)) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp3L := label.new(endBar, sellTp3,  " TP3 " + str.tostring(math.round(sellTp3,  2)) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        tpsl_slL  := label.new(endBar, sellSLpx, " SL  " + str.tostring(sellSLpx, format.mintick),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_tp1L := label.new(endBar, sellTp1,  " TP1 " + str.tostring(sellTp1, format.mintick) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp2L := label.new(endBar, sellTp2,  " TP2 " + str.tostring(sellTp2, format.mintick) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp3L := label.new(endBar, sellTp3,  " TP3 " + str.tostring(sellTp3, format.mintick) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SIGNAL LABELS
@@ -1343,9 +1427,9 @@ if i_dashboard and barstate.islast
     tPos = (i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left)
 
     if na(dash)
-        dash := table.new(tPos, 3, 17, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
-        table.merge_cells(dash, 1, 15, 2, 15)
+        dash := table.new(tPos, 3, 18, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
         table.merge_cells(dash, 1, 16, 2, 16)
+        table.merge_cells(dash, 1, 17, 2, 17)
 
     grn  = color.new(#00FF88, 0)
     red_ = color.new(#FF3366, 0)
@@ -1355,7 +1439,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.4 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : ""), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.5 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -1410,7 +1494,7 @@ if i_dashboard and barstate.islast
     f_cell(2, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
 
     // v3.4: FRVP row shows live POC price
-    table.cell(dash, 0, 12, "FRVP" + (na(pocPrice) ? "" : " @ " + str.tostring(math.round(pocPrice, 2))), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 0, 12, "FRVP" + (na(pocPrice) ? "" : " @ " + str.tostring(pocPrice, format.mintick)), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 12, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "ABOVE") ? grn : dim)
     f_cell(2, 12, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "BELOW") ? red_ : dim)
 
@@ -1428,13 +1512,20 @@ if i_dashboard and barstate.islast
     f_cell(1, 14, buyRatioStr,  riskOkBuy  ? grn : dim)
     f_cell(2, 14, sellRatioStr, riskOkSell ? red_ : dim)
 
+    // v3.5.5: confluence 0-3 (HTF side + VWAP side + value-area side).
+    // These two values were computed every bar since v3.3 and never read.
+    table.cell(dash, 0, 15, "Confluence", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 15, str.tostring(buyAligned)  + "/3", buyAligned  == 3 ? grn  : buyAligned  == 2 ? grn2 : dim)
+    f_cell(2, 15, str.tostring(sellAligned) + "/3", sellAligned == 3 ? red_ : sellAligned == 2 ? red2 : dim)
+
     lastSigCol = str.contains(lastSigMemory, "BUY") ? grn : str.contains(lastSigMemory, "SELL") ? red_ : dim
-    table.cell(dash, 0, 15, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
-    table.cell(dash, 1, 15, lastSigMemory, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
+    sigSuffix  = activeAtBe ? "  · SL@BE" : lossStreak > 0 ? "  · " + str.tostring(lossStreak) + "L streak" : ""
+    table.cell(dash, 0, 16, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 16, lastSigMemory + sigSuffix, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
 
     // v3.5.2: which gates vetoed the most recent trigger
-    table.cell(dash, 0, 16, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
-    table.cell(dash, 1, 16, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 0, 17, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 17, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // JSON ALERTS — v3.4.1: TPs are the SAME structure-based levels shown on chart
@@ -1442,14 +1533,14 @@ if i_dashboard and barstate.islast
 // them — previously ~60 str.tostring concatenations ran on every single bar.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_) =>
-    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(math.round(close, 2)) + ',"sl":' + str.tostring(math.round(slPx_, 2)) + ',"tp1":' + str.tostring(math.round(tp1_, 2)) + ',"tp2":' + str.tostring(math.round(tp2_, 2)) + ',"tp3":' + str.tostring(math.round(tp3_, 2)) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + str.tostring(na(pocPrice) ? 0 : math.round(pocPrice, 2)) + ',"vah":' + str.tostring(na(vahPrice) ? 0 : math.round(vahPrice, 2)) + ',"val":' + str.tostring(na(valPrice) ? 0 : math.round(valPrice, 2)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '"}'
+f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_) =>
+    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
 
 alertcondition(buySignal,               "ME Pro — BUY Signal",  "ME Pro: BUY signal fired")
 alertcondition(sellSignal,              "ME Pro — SELL Signal", "ME Pro: SELL signal fired")
 alertcondition(buySignal or sellSignal, "ME Pro — Any Signal",  "ME Pro: signal fired")
 
 if buySignal
-    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3)  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
+    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3,  buyAligned)  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
 if sellSignal
-    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3) : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
+    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3, sellAligned) : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
