@@ -1,7 +1,46 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.5 (tick precision + breakeven + trade management)
+// © ME Institutional — Movement Engine Pro v3.5.6 (stop quality + anti-chase)
 //@version=6
-indicator("Movement Engine Pro v3.5.5", shorttitle="ME Pro v3.5.5", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.6", shorttitle="ME Pro v3.5.6", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.6 CHANGELOG — STOPS BACK INSIDE STRUCTURE + ANTI-CHASE
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: Strict and Balanced entries were reaching their stops. Both fixes
+// below target the two ways this engine manufactures a losing stop.
+//
+// 1. THE FAR-SIDE CLAMP WAS UNSOUND — REGRESSION FROM v3.5.4. That version
+//    clamped a structural stop into BOTH ends of the risk window rather than
+//    skipping the setup. The near end is harmless (the stop moves FURTHER
+//    from price, still beyond the invalidation level). The far end is not:
+//    it drags the stop INSIDE the structure that defines the trade, so price
+//    can take it out while the setup remains valid. That converted setups
+//    the max-risk cap was correctly refusing into trades with stops that
+//    were pre-positioned to be hit — and Strict/Balanced, being the
+//    structure-led modes, are where the damage lands.
+//    Clamping is now a 3-way choice, defaulting to NEAR SIDE ONLY:
+//      • Off (block instead) — pre-v3.5.4 behavior, both ends gate.
+//      • Near side only (default) — widen a too-tight stop; SKIP a setup
+//        whose real invalidation sits beyond the max-risk cap.
+//      • Both sides — the v3.5.4/v3.5.5 behavior, kept for anyone who wants
+//        a pure volatility stop.
+//    Scalp still clamps the far side under the default, because a tight
+//    volatility stop IS the scalp design (unchanged since v3.5.1); the other
+//    three modes now refuse the trade instead of faking the stop.
+//
+// 2. NO UPPER BOUND ON ENTRY EXTENSION (pre-existing, all versions). MSS
+//    required the close to clear the pivot by at least i_mssFollow, but
+//    NOTHING capped how far past it the entry could be — and the freshness
+//    window lets the entry land up to i_triggerAge bars later, by which time
+//    price may have run much further. Combined with an order-flow gate that
+//    by design demands a close near the bar's high, entries could be taken
+//    1-3 ATR above the level they broke, with the stop still under the swing
+//    low: a textbook chase, and a textbook stop-out. New "Max Entry
+//    Extension Past Trigger" (default 1.0 ATR) rejects those. It applies
+//    ONLY when the breakout is the sole trigger — sweep and FVG-retest
+//    entries happen AT a level, so they are untouched — and reports as
+//    "chase" in the Last Block row.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.5 CHANGELOG — PRICE PRECISION + TRADE MANAGEMENT
@@ -264,7 +303,11 @@ i_slAtr      = input.float(0.5,"SL Buffer Below/Above Pivot (× ATR)",
      group=G_STRUCT)
 i_triggerAge = input.int(3, "Trigger Max Age (bars)",
      minval=1, maxval=10,
-     tooltip="MSS and Sweep triggers stay 'fresh' for this many bars after firing. Lets OF/CVD confirm on N+1/N+2 rather than only same-bar. v3.3 accuracy fix.",
+     tooltip="MSS and Sweep triggers stay 'fresh' for this many bars after firing. Lets OF/CVD confirm on N+1/N+2 rather than only same-bar. v3.3 accuracy fix.\nPair this with the extension cap below — freshness alone let entries land several bars and several ATR past the level that was broken.",
+     group=G_STRUCT)
+i_maxChase   = input.float(1.0, "Max Entry Extension Past Trigger (× ATR)",
+     minval=0.1, maxval=5.0, step=0.1,
+     tooltip="v3.5.6: rejects a breakout entry taken more than this far ABOVE the broken pivot (below it, for shorts). i_mssFollow sets the MINIMUM break distance; nothing set a maximum, so with the freshness window an entry could land 1-3 ATR past the level with the stop still under the swing low — a chase, and the most reliable way to be stopped out.\nApplies only when the breakout is the sole trigger; sweep and FVG-retest entries occur AT a level and are unaffected.\nRaise it to allow more momentum continuation; lower it to demand entries close to structure.",
      group=G_STRUCT)
 
 // ── Fair Value Gaps ──────────────────────────────────────────────────────────
@@ -396,8 +439,9 @@ i_maxRisk    = input.float(3.0,"Max Risk Cap (× ATR)",
      minval=1.0, maxval=10.0, step=0.25,
      tooltip="Signal blocked if entry-to-SL distance > this many ATRs. Kills setups where the pivot is too far away. v3.3 accuracy fix.\nScalp mode: a structural stop beyond the cap is clamped to the cap (volatility stop) instead of blocking (v3.5.1).",
      group=G_RISK)
-i_riskClamp  = input.bool(true, "Clamp SL Into Risk Window (instead of blocking)",
-     tooltip="v3.5.4: when a structural stop lands outside the min/max risk window, move it to the nearest edge and take the trade, instead of discarding the setup.\nOFF restores pre-v3.5.4 blocking for non-Scalp modes (Scalp always clamped the max side since v3.5.1).\nNote: clamping the MIN side widens a too-tight stop, so risk per trade rises to the floor — that is the point of the floor, but it is a real increase versus the structural stop.",
+i_riskClampMode = input.string("Near side only", "Stop Clamping",
+     options=["Off (block instead)","Near side only","Both sides"],
+     tooltip="What to do when the structural stop falls outside the min/max risk window.\n\nNEAR SIDE ONLY (default, v3.5.6): a too-TIGHT stop is widened to the min-risk floor — safe, because the stop only moves further from price and stays beyond the invalidation level. A setup whose real invalidation lies beyond the max-risk cap is SKIPPED, not clamped.\n\nBOTH SIDES (v3.5.4/v3.5.5 behavior): also drags a too-far stop IN to the cap, placing it inside the structure that defines the trade, so price can hit it while the setup is still valid — the cause of the Strict/Balanced stop-outs reported against v3.5.5. Choose it only if you want a pure volatility stop.\n\nOFF: both ends gate the signal (pre-v3.5.4).\n\nScalp keeps far-side clamping under the default — a tight volatility stop is the scalp design.",
      group=G_RISK)
 i_cooldown   = input.int(12,   "Signal Cooldown (bars)", minval=0, maxval=100,
      tooltip="Minimum bars between any two signals. v3.3 relaxed 15→12; all other filters compensate.",
@@ -1022,8 +1066,24 @@ sellSLraw = not na(lastPH) ? math.max(lastPH + slBuf, close + riskAtrRef * 0.5) 
 // the old block-instead-of-clamp behavior.
 slFar     = riskAtrRef * effMaxRisk
 slNear    = riskAtrRef * effMinRisk
-buySLpx   = i_riskClamp ? math.min(math.max(buySLraw,  close - slFar), close - slNear) : isScalp ? math.max(buySLraw,  close - atr14 * effMaxRisk) : buySLraw
-sellSLpx  = i_riskClamp ? math.max(math.min(sellSLraw, close + slFar), close + slNear) : isScalp ? math.min(sellSLraw, close + atr14 * effMaxRisk) : sellSLraw
+clampOn   = i_riskClampMode != "Off (block instead)"
+// v3.5.6: the FAR side is the unsound one — it pulls the stop inside the
+// structure that defines the trade. Only Scalp (whose design IS a tight
+// volatility stop) or an explicit "Both sides" choice gets it.
+clampFar  = clampOn and (isScalp or i_riskClampMode == "Both sides")
+clampNear = clampOn
+buySLfar  = clampFar  ? math.max(buySLraw,  close - slFar) : buySLraw
+sellSLfar = clampFar  ? math.min(sellSLraw, close + slFar) : sellSLraw
+buySLpx   = clampNear ? math.min(buySLfar,  close - slNear) : buySLfar
+sellSLpx  = clampNear ? math.max(sellSLfar, close + slNear) : sellSLfar
+
+// v3.5.6: is the stop the real structural level, or one we moved? Shown on
+// the SL label, the dashboard and in the alert payload, so a synthetic stop
+// is never mistaken for a structural one.
+buyClamped   = buySLpx  != buySLraw
+sellClamped  = sellSLpx != sellSLraw
+buyStopTxt   = buyClamped  ? " SL~ " : " SL  "
+sellStopTxt  = sellClamped ? " SL~ " : " SL  "
 
 buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
 sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
@@ -1135,14 +1195,25 @@ momOkSellEff = momOkSell or (isScalp and sellTrigSweep)
 notWeakBuy  = (buyTrigSweep  or buyTrigFvg)  ? notWeakRejBuy  : notWeak
 notWeakSell = (sellTrigSweep or sellTrigFvg) ? notWeakRejSell : notWeak
 
+// v3.5.6 ANTI-CHASE. i_mssFollow sets a MINIMUM break distance past the pivot;
+// nothing ever set a maximum. With the freshness window the entry could land
+// several bars and several ATR beyond the level that was broken, while the
+// stop still sat under the swing low — the widest-risk, worst-price version
+// of the trade. Only gate this when the breakout is the SOLE trigger: sweep
+// and FVG-retest entries occur AT a level and are never "extended".
+buyMssOnly  = mssUp   and not buyTrigFvg  and not buyTrigSweep
+sellMssOnly = mssDown and not sellTrigFvg and not sellTrigSweep
+chaseOkBuy  = not buyMssOnly  or na(lastPH) or (close - lastPH) <= atr14 * i_maxChase
+chaseOkSell = not sellMssOnly or na(lastPL) or (lastPL - close) <= atr14 * i_maxChase
+
 barBull = close > open
 barBear = close < open
 
 strongBull = bodySize >= atr14 * effBodyAtr
 strongBear = bodySize >= atr14 * effBodyAtr
 
-rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk and breakerOk
-rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk and breakerOk
+rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk and breakerOk and chaseOkBuy
+rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk and breakerOk and chaseOkSell
 
 buySignal  = rawBuy
 sellSignal = rawSell
@@ -1179,6 +1250,7 @@ if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
     r += rsiOkBuy ? "" : "rsi "
     r += newsOk ? "" : "news "
     r += breakerOk ? "" : "lossbreak "
+    r += chaseOkBuy ? "" : "chase "
     if r != ""
         lastBlockReason := "BUY ✕ " + r
         if i_debugLabels
@@ -1199,6 +1271,7 @@ if barstate.isconfirmed and sellTrigger and barBear and not rawSell
     r += rsiOkSell ? "" : "rsi "
     r += newsOk ? "" : "news "
     r += breakerOk ? "" : "lossbreak "
+    r += chaseOkSell ? "" : "chase "
     if r != ""
         lastBlockReason := "SELL ✕ " + r
         if i_debugLabels
@@ -1378,7 +1451,7 @@ if buySignal
         tpsl_tp1  := line.new(bar_index, buyTp1,  endBar, buyTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, buyTp2,  endBar, buyTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, buyTp3,  endBar, buyTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
-        tpsl_slL  := label.new(endBar, buySLpx, " SL  " + str.tostring(buySLpx, format.mintick),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_slL  := label.new(endBar, buySLpx, buyStopTxt  + str.tostring(buySLpx, format.mintick),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
         tpsl_tp1L := label.new(endBar, buyTp1,  " TP1 " + str.tostring(buyTp1, format.mintick) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
         tpsl_tp2L := label.new(endBar, buyTp2,  " TP2 " + str.tostring(buyTp2, format.mintick) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
         tpsl_tp3L := label.new(endBar, buyTp3,  " TP3 " + str.tostring(buyTp3, format.mintick) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
@@ -1398,7 +1471,7 @@ if sellSignal
         tpsl_tp1  := line.new(bar_index, sellTp1,  endBar, sellTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, sellTp2,  endBar, sellTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, sellTp3,  endBar, sellTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
-        tpsl_slL  := label.new(endBar, sellSLpx, " SL  " + str.tostring(sellSLpx, format.mintick),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_slL  := label.new(endBar, sellSLpx, sellStopTxt + str.tostring(sellSLpx, format.mintick),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
         tpsl_tp1L := label.new(endBar, sellTp1,  " TP1 " + str.tostring(sellTp1, format.mintick) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
         tpsl_tp2L := label.new(endBar, sellTp2,  " TP2 " + str.tostring(sellTp2, format.mintick) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
         tpsl_tp3L := label.new(endBar, sellTp3,  " TP3 " + str.tostring(sellTp3, format.mintick) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
@@ -1439,7 +1512,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.5 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.6 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -1533,14 +1606,14 @@ if i_dashboard and barstate.islast
 // them — previously ~60 str.tostring concatenations ran on every single bar.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_) =>
-    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
+f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_, stopType_) =>
+    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","stop_type":"' + stopType_ + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
 
 alertcondition(buySignal,               "ME Pro — BUY Signal",  "ME Pro: BUY signal fired")
 alertcondition(sellSignal,              "ME Pro — SELL Signal", "ME Pro: SELL signal fired")
 alertcondition(buySignal or sellSignal, "ME Pro — Any Signal",  "ME Pro: signal fired")
 
 if buySignal
-    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3,  buyAligned)  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
+    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3,  buyAligned,  buyClamped  ? "clamped" : "structural")  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
 if sellSignal
-    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3, sellAligned) : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
+    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3, sellAligned, sellClamped ? "clamped" : "structural") : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
