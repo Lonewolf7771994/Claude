@@ -1,7 +1,47 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.3 (news blackout windows + TP de-duplication)
+// © ME Institutional — Movement Engine Pro v3.5.4 (accuracy audit pass)
 //@version=6
-indicator("Movement Engine Pro v3.5.3", shorttitle="ME Pro v3.5.3", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.4", shorttitle="ME Pro v3.5.4", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.4 CHANGELOG — ACCURACY AUDIT (six measurement bugs)
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. WICK FILTER VETOED THE SWEEP TRIGGER'S OWN SIGNATURE. notWeak blocked any
+//    bar whose COMBINED wicks exceed body × 2. A liquidity sweep is BY
+//    DEFINITION a long-rejection-wick bar (wick ≥ 0.4 ATR beyond the level,
+//    body ≥ 0.3-0.5 ATR ⇒ ratio typically 2-4), so the filter rejected the
+//    very bars the sweep and FVG-midpoint triggers select — undoing much of
+//    the v3.5.1 sweep fix. Rejection-based triggers are now judged on the
+//    OPPOSING wick only: for a BUY the upper wick is supply (weakness), the
+//    lower wick is the rejection you are trading. MSS (continuation) keeps
+//    the original combined test.
+// 2. MIN-RISK FLOOR WAS UNREACHABLE. The SL floor (close ± 0.5 ATR) sat BELOW
+//    the min-risk requirement (1.0 ATR), so any setup with a near pivot
+//    produced a stop the engine then rejected — a dead zone between 0.5 and
+//    1.0 ATR that silently discarded valid setups. Stops are now clamped into
+//    BOTH ends of the risk window (new "Clamp SL Into Risk Window" input, ON
+//    by default; turn it off to restore blocking). Generalizes the Scalp-only
+//    max-side clamp from v3.5.1 to both bounds and all modes.
+// 3. DELTA GATE WAS A DUPLICATE OF THE OF GATE. v3.5.2 defined deltaRatio as
+//    2·closePos−1, which makes "delta ≥ 0.20" and "close position ≥ 60%"
+//    THE SAME TEST — the order-flow stack was one measurement counted twice
+//    (the exact redundancy v3.3 set out to remove). Delta is now body
+//    conviction, (close−open)/range: a bar can close at its high with a
+//    doji body and now correctly fails delta while passing close position.
+//    Two genuinely independent bar-shape measures again.
+// 4. VWAP WAS NEAR-MEANINGLESS ON 4H. ta.vwap anchors to the session, so a 4H
+//    chart averages ~6 bars — noise that the distance guard then gates on.
+//    New anchor input (Auto/Session/Week/Month); Auto uses the session below
+//    1H and the week at 1H and above.
+// 5. SAME-BAR SL + TP1 WAS RESOLVED OPTIMISTICALLY. When one bar traded
+//    through both levels the code credited TP1 and cleared the SL-hit flag,
+//    disabling the post-SL cooldown after what may have been a loss. Now
+//    resolved conservatively (SL first) — the standard assumption when
+//    intrabar order is unknown.
+// 6. REL VOLUME COMPARED A BAR TO AN AVERAGE CONTAINING ITSELF. The 20-bar
+//    SMA included the current bar, damping exactly the spikes the floor is
+//    meant to detect. Now averages the PRIOR 20 bars.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.3 CHANGELOG — NEWS BLACKOUT WINDOWS + TP DE-DUPLICATION
@@ -221,9 +261,9 @@ i_ofThresh   = input.float(60.0,"OF Pressure Threshold (%)",
      minval=55.0, maxval=90.0, step=0.5,
      tooltip="Base close-position (%) required. v3.3 relaxed 62→60 because a real delta-ratio gate now sits alongside this — buyPct becomes the coarse floor.",
      group=G_OF)
-i_deltaFloor = input.float(0.20,"Min Net Delta Ratio",
+i_deltaFloor = input.float(0.20,"Min Body Conviction (Δ)",
      minval=0.0, maxval=1.0, step=0.05,
-     tooltip="(up-volume - down-volume) / total-volume must exceed this. Estimated from bar shape, which makes it exactly 2×closePos−1 — the SAME scale as the OF threshold (0.20 ⇔ 60% close position).\nv3.5.2: default 0.30→0.20 — the old default silently demanded 65% and overrode the 60% OF threshold input.",
+     tooltip="(close − open) / bar range must exceed this. v3.5.4: this is now BODY CONVICTION, a measure independent of the OF threshold. Previously it was 2×closePos−1, i.e. mathematically the same test as the OF close-position threshold — the order-flow stack was one measurement counted twice.\nTogether the two gates now require: closed near the extreme (OF %) AND real directional body (Δ). A doji closing at its high passes the first and correctly fails the second.\nWithout tick data neither is true exchange delta; both are bar-shape estimates.",
      group=G_OF)
 i_ofAdaptive = input.bool(true, "Adaptive OF Threshold (tighten in chop)",
      tooltip="Raises threshold by +5% in chop regime. Never LOWERS the threshold.\nScalp mode ignores the chop tightening — it would override the scalp 57% floor (v3.5.1).",
@@ -238,7 +278,7 @@ i_bodyAtr    = input.float(0.5,"Min Signal Bar Body (× ATR)",
      group=G_OF)
 i_wickMax    = input.float(2.0,"Max Wick/Body Ratio",
      minval=0.5, maxval=10.0, step=0.1,
-     tooltip="Blocks bars where combined wicks exceed body × this ratio. Filters doji/indecision candles.",
+     tooltip="Blocks bars where wicks exceed body × this ratio. Filters doji/indecision candles.\nv3.5.4: MSS (continuation) entries are judged on COMBINED wicks as before. Sweep and FVG-retest entries are judged on the OPPOSING wick only — a sweep bar's long rejection wick is the setup, not weakness, and the combined test was vetoing the trigger's own signature.",
      group=G_OF)
 i_cvdReset   = input.bool(false, "Reset CVD Each Session (daily anchor)",
      tooltip="Anchors CVD to session open. Default OFF because reset creates 20-bar noisy EMA readings.",
@@ -261,6 +301,9 @@ i_htfFilter  = input.bool(true, "Enforce HTF Direction (strict)", group=G_HTF)
 
 // ── VWAP ─────────────────────────────────────────────────────────────────────
 i_vwapFilter = input.bool(true, "Enable VWAP Filter", group=G_VWAP)
+i_vwapAnchor = input.string("Auto", "VWAP Anchor", options=["Auto","Session","Week","Month"],
+     tooltip="v3.5.4: ta.vwap anchors to the SESSION by default, which on a 4H chart averages only ~6 bars — too few to be a meaningful mean, yet the distance guard still gated on it. Auto uses Session below 1H and Week at 1H and above.",
+     group=G_VWAP)
 i_vwapMaxDist= input.float(3.0, "Max Distance From VWAP (× ATR)",
      minval=0.5, maxval=20.0, step=0.25,
      tooltip="Signal blocked if |close - VWAP| > this × ATR. Prevents chasing extended moves. v3.3 accuracy fix.",
@@ -318,6 +361,9 @@ i_minRisk    = input.float(1.0,"Min Risk Required (× ATR)",
 i_maxRisk    = input.float(3.0,"Max Risk Cap (× ATR)",
      minval=1.0, maxval=10.0, step=0.25,
      tooltip="Signal blocked if entry-to-SL distance > this many ATRs. Kills setups where the pivot is too far away. v3.3 accuracy fix.\nScalp mode: a structural stop beyond the cap is clamped to the cap (volatility stop) instead of blocking (v3.5.1).",
+     group=G_RISK)
+i_riskClamp  = input.bool(true, "Clamp SL Into Risk Window (instead of blocking)",
+     tooltip="v3.5.4: when a structural stop lands outside the min/max risk window, move it to the nearest edge and take the trade, instead of discarding the setup.\nOFF restores pre-v3.5.4 blocking for non-Scalp modes (Scalp always clamped the max side since v3.5.1).\nNote: clamping the MIN side widens a too-tight stop, so risk per trade rises to the floor — that is the point of the floor, but it is a real increase versus the structural stop.",
      group=G_RISK)
 i_cooldown   = input.int(12,   "Signal Cooldown (bars)", minval=0, maxval=100,
      tooltip="Minimum bars between any two signals. v3.3 relaxed 15→12; all other filters compensate.",
@@ -405,14 +451,19 @@ var bool volDataSeen = false
 if nz(volume) > 0
     volDataSeen := true
 
-volAvg = ta.sma(nz(volume), 20)
+// v3.5.4: average the PRIOR 20 bars. Including the current bar in its own
+// benchmark damps exactly the spikes this floor exists to detect (a 3× bar
+// lifts the divisor it is measured against).
+volAvg = ta.sma(nz(volume[1]), 20)
 relVol = volDataSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
 volOk  = not volDataSeen or relVol >= effVolFloor
 
-// Net delta ratio, estimated from bar shape — identically 2·closePos−1 (a
-// near-doji closing mid-bar has delta ≈ 0 regardless of raw volume). Same
-// scale as the OF threshold; see the i_deltaFloor tooltip (v3.5.2).
-deltaRatio    = volDataSeen and nz(volume) == 0 ? 0.0 : 2.0 * closePos - 1.0
+// BODY CONVICTION (v3.5.4). Was 2·closePos−1, which is algebraically the same
+// test as the OF close-position threshold — the "second" order-flow gate was
+// the first one restated, so the stack had one measurement, not two.
+// (close−open)/range is independent of where in the range the bar closed:
+// a doji closing at its high scores ~0 here and is correctly rejected.
+deltaRatio    = (close - open) / range_
 deltaBullOk   = deltaRatio >=  effDeltaFloor
 deltaBearOk   = deltaRatio <= -effDeltaFloor
 
@@ -442,6 +493,17 @@ upperWick = high - math.max(close, open)
 lowerWick = math.min(close, open) - low
 wickRatio = bodySize > 0 ? (upperWick + lowerWick) / bodySize : 999.0
 notWeak   = wickRatio <= i_wickMax
+
+// v3.5.4: directional wick tests for REJECTION-based triggers (sweep, FVG
+// retest). Those setups are long-wick bars by construction — a sweep must
+// spear ≥0.4 ATR through the level and close back — so the combined-wick
+// test above rejected the exact bars the trigger selects. For a BUY only the
+// UPPER wick is supply/weakness; the lower wick is the rejection being
+// traded. Selection happens at signal time, where the trigger flags exist.
+wickRatioBuy   = bodySize > 0 ? upperWick / bodySize : 999.0
+wickRatioSell  = bodySize > 0 ? lowerWick / bodySize : 999.0
+notWeakRejBuy  = wickRatioBuy  <= i_wickMax
+notWeakRejSell = wickRatioSell <= i_wickMax
 
 // v3.3: replaced redundant `closePos >= 0.55` with `deltaBullOk` (real second signal)
 ofBull = volOk and buyPct          >= adaptThresh and deltaBullOk
@@ -496,7 +558,18 @@ trigHtfBear = isScalp or i_mode == "Aggressive" or htfOkBear
 // VWAP + overextension guard (v3.3)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-vwapVal   = ta.vwap(hlc3)
+// v3.5.4: anchor is selectable. Session-anchored VWAP on a 4H chart averages
+// ~6 bars — not a mean the distance guard can meaningfully gate on.
+vwapUseWeek  = i_vwapAnchor == "Week" or (i_vwapAnchor == "Auto" and timeframe.in_seconds() >= 3600)
+vwapUseMonth = i_vwapAnchor == "Month"
+// The three ta.change() calls are UNCONDITIONAL — stateful builtins placed in
+// ternary branches execute inconsistently and corrupt their own history (the
+// same defect fixed for ta.highest/ta.lowest in v3.4.1). Select afterwards.
+newDay    = ta.change(time("D")) != 0
+newWeek   = ta.change(time("W")) != 0
+newMonth  = ta.change(time("M")) != 0
+vwapAnchor = vwapUseMonth ? newMonth : vwapUseWeek ? newWeek : newDay
+vwapVal   = ta.vwap(hlc3, vwapAnchor)
 aboveVwap = close > vwapVal
 belowVwap = close < vwapVal
 vwapLabel = aboveVwap ? "ABOVE" : "BELOW"
@@ -883,26 +956,33 @@ sellAligned = (htfOkBear ? 1 : 0) + (vwapOkBear ? 1 : 0) + (frvpBearOk ? 1 : 0)
 // (volatility stop) instead of blocking the trade. Other modes are unchanged.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// v3.5.2/v3.5.4: ONE ATR reference — the stop is built, judged, displayed and
+// reported in the same units. Mixing atr14 and atrBase across those four
+// places is what silently blocked entries in every mode before v3.5.2.
+riskAtrRef = isScalp ? atr14 : atrBase
+
 slMult    = volExpand ? 1.3 : volChop ? 1.2 : 1.0
-slAtrRef  = isScalp ? atr14 : atrBase
-slBuf     = isScalp ? atr14 * math.min(i_slAtr, 0.3) : atrBase * i_slAtr * slMult
+slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, 0.3) : riskAtrRef * i_slAtr * slMult
 
-buySLraw  = not na(lastPL) ? math.min(lastPL - slBuf, close - slAtrRef * 0.5) : close - slAtrRef * 1.5
-sellSLraw = not na(lastPH) ? math.max(lastPH + slBuf, close + slAtrRef * 0.5) : close + slAtrRef * 1.5
+buySLraw  = not na(lastPL) ? math.min(lastPL - slBuf, close - riskAtrRef * 0.5) : close - riskAtrRef * 1.5
+sellSLraw = not na(lastPH) ? math.max(lastPH + slBuf, close + riskAtrRef * 0.5) : close + riskAtrRef * 1.5
 
-buySLpx   = isScalp ? math.max(buySLraw,  close - atr14 * effMaxRisk) : buySLraw
-sellSLpx  = isScalp ? math.min(sellSLraw, close + atr14 * effMaxRisk) : sellSLraw
+// v3.5.4 DEAD-ZONE FIX. The structural stop was floored at 0.5 ATR from
+// price while the min-risk gate demanded 1.0 ATR — so a near pivot produced
+// a stop the engine then rejected, discarding the setup instead of using a
+// stop it would accept. Clamp into BOTH ends of the window (all modes;
+// v3.5.1 already did the max side for Scalp). Turning the clamp off restores
+// the old block-instead-of-clamp behavior.
+slFar     = riskAtrRef * effMaxRisk
+slNear    = riskAtrRef * effMinRisk
+buySLpx   = i_riskClamp ? math.min(math.max(buySLraw,  close - slFar), close - slNear) : isScalp ? math.max(buySLraw,  close - atr14 * effMaxRisk) : buySLraw
+sellSLpx  = i_riskClamp ? math.max(math.min(sellSLraw, close + slFar), close + slNear) : isScalp ? math.min(sellSLraw, close + atr14 * effMaxRisk) : sellSLraw
 
 buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
 sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
 
-// v3.3: both a floor AND a cap (v3.5: Scalp window 0.5-2.0 ATR; v3.5.1: the
-// cap can no longer block Scalp — the stop is clamped to it instead).
-// v3.5.2: the window is judged in the SAME ATR units the SL is built from
-// (atrBase for non-Scalp). It was judged in atr14 while the stop was placed
-// with atrBase distances — in chop (atr50 > atr14) the structural stop
-// routinely overflowed the cap and silently blocked every mode's entries.
-riskAtrRef = isScalp ? atr14 : atrBase
+// v3.3: both a floor AND a cap. With the clamp ON these always pass (the stop
+// was moved into the window); they still gate when the clamp is OFF.
 riskOkBuy  = buyRiskDist  >= riskAtrRef * effMinRisk and buyRiskDist  <= riskAtrRef * effMaxRisk
 riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk and sellRiskDist <= riskAtrRef * effMaxRisk
 
@@ -994,14 +1074,21 @@ cvdOkSell  = not volDataSeen or cvdBear  or (isScalp and sellTrigSweep)
 momOkBuyEff  = momOkBuy  or (isScalp and buyTrigSweep)
 momOkSellEff = momOkSell or (isScalp and sellTrigSweep)
 
+// v3.5.4: rejection-based entries (sweep, FVG retest) are judged on the
+// opposing wick only — see the wickRatioBuy/Sell definitions. MSS entries
+// keep the combined-wick test. Without this the wick filter cancelled the
+// sweep trigger it was paired with.
+notWeakBuy  = (buyTrigSweep  or buyTrigFvg)  ? notWeakRejBuy  : notWeak
+notWeakSell = (sellTrigSweep or sellTrigFvg) ? notWeakRejSell : notWeak
+
 barBull = close > open
 barBear = close < open
 
 strongBull = bodySize >= atr14 * effBodyAtr
 strongBear = bodySize >= atr14 * effBodyAtr
 
-rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeak and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk
-rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeak and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk
+rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk
+rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk
 
 buySignal  = rawBuy
 sellSignal = rawSell
@@ -1025,7 +1112,7 @@ var string lastBlockReason = "—"
 if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
     string r = ""
     r += strongBull ? "" : "body "
-    r += notWeak ? "" : "wick "
+    r += notWeakBuy ? "" : "wick "
     r += volOk ? "" : "vol "
     r += buyPct >= adaptThresh ? "" : "of% "
     r += deltaBullOk ? "" : "delta "
@@ -1044,7 +1131,7 @@ if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
 if barstate.isconfirmed and sellTrigger and barBear and not rawSell
     string r = ""
     r += strongBear ? "" : "body "
-    r += notWeak ? "" : "wick "
+    r += notWeakSell ? "" : "wick "
     r += volOk ? "" : "vol "
     r += (100.0 - buyPct) >= adaptThresh ? "" : "of% "
     r += deltaBearOk ? "" : "delta "
@@ -1148,11 +1235,17 @@ slHitNow  = not na(activeSlPx)  and (tradeBuy ? low  <= activeSlPx  : high >= ac
 tp1HitNow = not na(activeTp1Px) and (tradeBuy ? high >= activeTp1Px : low  <= activeTp1Px)
 tp3HitNow = not na(activeTp3Px) and (tradeBuy ? high >= activeTp3Px : low  <= activeTp3Px)
 
-// v3.3: TP1 counts as "de-risked" — SL after that shouldn't extend cooldown
-if barstate.isconfirmed and tp1HitNow
+// v3.3: TP1 counts as "de-risked" — SL after that shouldn't extend cooldown.
+// v3.5.4: when ONE bar trades through both TP1 and the SL, the intrabar order
+// is unknown. The old order credited TP1 first and cleared the SL-hit flag,
+// so a bar that may have stopped out disabled the post-SL cooldown. Resolve
+// conservatively: SL first when both are touched on the same bar.
+slFirstAmbiguous = slHitNow and tp1HitNow and not activeTp1Hit
+
+if barstate.isconfirmed and tp1HitNow and not slFirstAmbiguous
     activeTp1Hit := true
     lastSlHit := false
-if barstate.isconfirmed and tp3HitNow
+if barstate.isconfirmed and tp3HitNow and not slHitNow
     lastSlHit := false
 if barstate.isconfirmed and slHitNow and not activeTp1Hit
     lastSlHit := true
@@ -1262,7 +1355,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.3 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : ""), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.4 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : ""), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -1272,7 +1365,8 @@ if i_dashboard and barstate.islast
     f_cell(1, 1, htfBull ? "BULL ✓" : htfGateOn ? "BLOCKED" : "BEAR",   htfBull ? grn : htfGateOn ? red_ : dim)
     f_cell(2, 1, htfBear ? "BEAR ✓" : htfGateOn ? "BLOCKED" : "BULL",   htfBear ? red_ : htfGateOn ? red_ : dim)
 
-    table.cell(dash, 0, 2, "VWAP", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    vwapAnchTxt = vwapUseMonth ? "M" : vwapUseWeek ? "W" : "D"
+    table.cell(dash, 0, 2, "VWAP (" + vwapAnchTxt + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 2, aboveVwap ? (notExtended ? "ABOVE ✓" : "EXTENDED") : i_vwapFilter ? "BLOCKED" : "BELOW", aboveVwap and notExtended ? grn : aboveVwap and not notExtended ? yel : i_vwapFilter ? red_ : dim)
     f_cell(2, 2, belowVwap ? (notExtended ? "BELOW ✓" : "EXTENDED") : i_vwapFilter ? "BLOCKED" : "ABOVE", belowVwap and notExtended ? red_ : belowVwap and not notExtended ? yel : i_vwapFilter ? red_ : dim)
 
@@ -1302,7 +1396,7 @@ if i_dashboard and barstate.islast
     f_cell(1, 8, ofBuyTxt,  ofBull ? grn : buyPct  > 50 ? wht : dim)
     f_cell(2, 8, ofSellTxt, ofBear ? red_ : buyPct < 50 ? wht : dim)
 
-    table.cell(dash, 0, 9, "Δ Ratio", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 0, 9, "Δ Body", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 9, str.tostring(math.round(deltaRatio, 2)), deltaBullOk ? grn : dim)
     f_cell(2, 9, str.tostring(math.round(deltaRatio, 2)), deltaBearOk ? red_ : dim)
 
