@@ -1,8 +1,49 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.6 (stop quality + anti-chase)
+// © ME Institutional — Movement Engine Pro v3.5.7 (trigger-aware invalidation)
 //@version=6
-indicator("Movement Engine Pro v3.5.6", shorttitle="ME Pro v3.5.6", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.7", shorttitle="ME Pro v3.5.7", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.7 CHANGELOG — THE STOP NOW MATCHES WHAT TRIGGERED THE TRADE
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: Scalp trades lack accuracy. Scalp leans on the sweep trigger more
+// than any other mode (it is the only mode besides Aggressive that enables
+// sweeps, and v3.5.1 exempted sweep scalps from the CVD and momentum gates),
+// so a defect in sweep handling shows up there first and worst.
+//
+// 1. THE SWEEP STOP WAS INSIDE THE SWEEP. The stop was ALWAYS derived from the
+//    last pivot, regardless of which trigger fired. Work the arithmetic for a
+//    bullish sweep:
+//        entry requires   low ≤ pivotLow − 0.4 ATR   (i_sweepWick)
+//        stop was placed at pivotLow − 0.3 ATR       (slBuf, Scalp)
+//    so the stop sat ABOVE the low of the very bar that defined the setup.
+//    Price retesting the sweep low — the single most ordinary thing it can do
+//    after a sweep — stopped the trade out before the idea had failed. Every
+//    sweep scalp carried a stop pre-placed inside its own noise.
+//    Each trigger now stops beyond ITS OWN invalidation:
+//      • Sweep → beyond the sweep bar's extreme (the wick is the invalidation)
+//      • FVG   → beyond the far edge of the gap
+//      • MSS   → the last pivot, unchanged (correct for a continuation trade)
+//    This required hoisting the trigger flags above the stop block, which is
+//    also why the stop can finally know what it is protecting.
+//
+// 2. ANTI-CHASE NOW COVERS SWEEP AND FVG. v3.5.6 capped extension for MSS only,
+//    reasoning that sweep/FVG entries occur AT a level. That holds on the
+//    trigger bar, but the freshness window lets them fire up to i_triggerAge
+//    bars later — by then price has left the level and the reclaim edge with
+//    it. Each trigger is now measured against its own reference level.
+//
+// 3. SCALP NO LONGER CLAMPS THE FAR STOP. v3.5.6 removed far-side clamping for
+//    every mode except Scalp, where it was kept on the argument that a tight
+//    volatility stop IS the scalp design. With sweep stops now anchored to the
+//    wick, Scalp stops are naturally tight and the clamp rarely binds — and
+//    where it would have, it was doing the same harmful thing it did in
+//    Strict/Balanced: pulling the stop inside the structure. If a setup's
+//    invalidation sits beyond the scalp risk cap, it is not a scalp.
+//
+// UNMEASURED: like every version here, this is reasoning about the code, not a
+// backtest. Fix 1 is arithmetically provable; 2 and 3 are judgment.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.6 CHANGELOG — STOPS BACK INSIDE STRUCTURE + ANTI-CHASE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -441,7 +482,7 @@ i_maxRisk    = input.float(3.0,"Max Risk Cap (× ATR)",
      group=G_RISK)
 i_riskClampMode = input.string("Near side only", "Stop Clamping",
      options=["Off (block instead)","Near side only","Both sides"],
-     tooltip="What to do when the structural stop falls outside the min/max risk window.\n\nNEAR SIDE ONLY (default, v3.5.6): a too-TIGHT stop is widened to the min-risk floor — safe, because the stop only moves further from price and stays beyond the invalidation level. A setup whose real invalidation lies beyond the max-risk cap is SKIPPED, not clamped.\n\nBOTH SIDES (v3.5.4/v3.5.5 behavior): also drags a too-far stop IN to the cap, placing it inside the structure that defines the trade, so price can hit it while the setup is still valid — the cause of the Strict/Balanced stop-outs reported against v3.5.5. Choose it only if you want a pure volatility stop.\n\nOFF: both ends gate the signal (pre-v3.5.4).\n\nScalp keeps far-side clamping under the default — a tight volatility stop is the scalp design.",
+     tooltip="What to do when the structural stop falls outside the min/max risk window.\n\nNEAR SIDE ONLY (default, v3.5.6): a too-TIGHT stop is widened to the min-risk floor — safe, because the stop only moves further from price and stays beyond the invalidation level. A setup whose real invalidation lies beyond the max-risk cap is SKIPPED, not clamped.\n\nBOTH SIDES (v3.5.4/v3.5.5 behavior): also drags a too-far stop IN to the cap, placing it inside the structure that defines the trade, so price can hit it while the setup is still valid — the cause of the Strict/Balanced stop-outs reported against v3.5.5. Choose it only if you want a pure volatility stop.\n\nOFF: both ends gate the signal (pre-v3.5.4).\n\nv3.5.7: Scalp uses the same near-side-only default as every other mode. Its sweep stops are now anchored to the sweep wick rather than the pivot, so they are naturally tight and the far clamp rarely binds; when it would, the invalidation is too far away to be a scalp.",
      group=G_RISK)
 i_cooldown   = input.int(12,   "Signal Cooldown (bars)", minval=0, maxval=100,
      tooltip="Minimum bars between any two signals. v3.3 relaxed 15→12; all other filters compensate.",
@@ -866,6 +907,19 @@ if sweepBearEvent
 sweepBull = sweepBullAge <= i_triggerAge
 sweepBear = sweepBearAge <= i_triggerAge
 
+// v3.5.7: remember the sweep bar's OWN extreme and the level it violated.
+// The stop for a sweep entry belongs below that wick — see the SL section.
+var float sweepBullLow  = na
+var float sweepBullLvl  = na
+var float sweepBearHigh = na
+var float sweepBearLvl  = na
+if sweepBullEvent
+    sweepBullLow := low
+    sweepBullLvl := sweepLevelLo
+if sweepBearEvent
+    sweepBearHigh := high
+    sweepBearLvl  := sweepLevelHi
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FRVP — v3.4 ACCURACY REBUILD (v3.5.1 adds the refresh stride)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1050,13 +1104,35 @@ sellAligned = (htfBear ? 1 : 0) + (belowVwap ? 1 : 0) + (frvpBearOk ? 1 : 0)
 // v3.5.2/v3.5.4: ONE ATR reference — the stop is built, judged, displayed and
 // reported in the same units. Mixing atr14 and atrBase across those four
 // places is what silently blocked entries in every mode before v3.5.2.
+// v3.4.1: mode-gated trigger flags computed once, reused by trigger AND label
+buyTrigFvg   = i_mode != "Strict"     and fvgRetestBull
+sellTrigFvg  = i_mode != "Strict"     and fvgRetestBear
+buyTrigSweep = (i_mode == "Aggressive" or isScalp) and sweepBull
+sellTrigSweep= (i_mode == "Aggressive" or isScalp) and sweepBear
+
+buyTrigger  = mssUp   or buyTrigFvg  or buyTrigSweep
+sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
+
 riskAtrRef = isScalp ? atr14 : atrBase
 
 slMult    = volExpand ? 1.3 : volChop ? 1.2 : 1.0
 slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, 0.3) : riskAtrRef * i_slAtr * slMult
 
-buySLraw  = not na(lastPL) ? math.min(lastPL - slBuf, close - riskAtrRef * 0.5) : close - riskAtrRef * 1.5
-sellSLraw = not na(lastPH) ? math.max(lastPH + slBuf, close + riskAtrRef * 0.5) : close + riskAtrRef * 1.5
+// v3.5.7 TRIGGER-AWARE INVALIDATION. The stop was ALWAYS built from the last
+// pivot, whatever fired the entry. For a sweep that is provably wrong: the
+// sweep is DEFINED by price trading at least i_sweepWick (0.4 ATR) BELOW the
+// pivot, while the stop was placed only slBuf (≤0.3 ATR in Scalp) below the
+// same pivot — so the stop sat ABOVE the sweep's own wick, inside the move
+// that created the setup. An ordinary retest of the sweep low took it out.
+// Each trigger now stops beyond its own invalidation:
+//   sweep → beyond the sweep bar's extreme (the wick IS the invalidation)
+//   FVG   → beyond the far edge of the gap
+//   MSS   → the last pivot, as before (correct for continuation)
+buySlAnchor  = buyTrigSweep  and not na(sweepBullLow)  ? sweepBullLow  : buyTrigFvg  and not na(lBullBot) ? lBullBot : lastPL
+sellSlAnchor = sellTrigSweep and not na(sweepBearHigh) ? sweepBearHigh : sellTrigFvg and not na(lBearTop) ? lBearTop : lastPH
+
+buySLraw  = not na(buySlAnchor)  ? math.min(buySlAnchor - slBuf,  close - riskAtrRef * 0.5) : close - riskAtrRef * 1.5
+sellSLraw = not na(sellSlAnchor) ? math.max(sellSlAnchor + slBuf, close + riskAtrRef * 0.5) : close + riskAtrRef * 1.5
 
 // v3.5.4 DEAD-ZONE FIX. The structural stop was floored at 0.5 ATR from
 // price while the min-risk gate demanded 1.0 ATR — so a near pivot produced
@@ -1070,7 +1146,7 @@ clampOn   = i_riskClampMode != "Off (block instead)"
 // v3.5.6: the FAR side is the unsound one — it pulls the stop inside the
 // structure that defines the trade. Only Scalp (whose design IS a tight
 // volatility stop) or an explicit "Both sides" choice gets it.
-clampFar  = clampOn and (isScalp or i_riskClampMode == "Both sides")
+clampFar  = clampOn and i_riskClampMode == "Both sides"
 clampNear = clampOn
 buySLfar  = clampFar  ? math.max(buySLraw,  close - slFar) : buySLraw
 sellSLfar = clampFar  ? math.min(sellSLraw, close + slFar) : sellSLraw
@@ -1165,15 +1241,6 @@ coolOk = bar_index - lastSigBar >= effCd
 var int lossStreak = 0
 breakerOk = i_maxLossStreak == 0 or lossStreak < i_maxLossStreak
 
-// v3.4.1: mode-gated trigger flags computed once, reused by trigger AND label
-buyTrigFvg   = i_mode != "Strict"     and fvgRetestBull
-sellTrigFvg  = i_mode != "Strict"     and fvgRetestBear
-buyTrigSweep = (i_mode == "Aggressive" or isScalp) and sweepBull
-sellTrigSweep= (i_mode == "Aggressive" or isScalp) and sweepBear
-
-buyTrigger  = mssUp   or buyTrigFvg  or buyTrigSweep
-sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
-
 // v3.5.1 SCALP FIX. A bullish sweep happens at the END of a decline — CVD and
 // EMA momentum are still bearish on that bar by construction, so requiring
 // cvdBull + momOkBuy vetoed every sweep-reversal scalp. Sweep-triggered
@@ -1201,10 +1268,15 @@ notWeakSell = (sellTrigSweep or sellTrigFvg) ? notWeakRejSell : notWeak
 // stop still sat under the swing low — the widest-risk, worst-price version
 // of the trade. Only gate this when the breakout is the SOLE trigger: sweep
 // and FVG-retest entries occur AT a level and are never "extended".
-buyMssOnly  = mssUp   and not buyTrigFvg  and not buyTrigSweep
-sellMssOnly = mssDown and not sellTrigFvg and not sellTrigSweep
-chaseOkBuy  = not buyMssOnly  or na(lastPH) or (close - lastPH) <= atr14 * i_maxChase
-chaseOkSell = not sellMssOnly or na(lastPL) or (lastPL - close) <= atr14 * i_maxChase
+// v3.5.7: extended to sweep and FVG entries, each measured from its own
+// reference. v3.5.6 only capped MSS, on the reasoning that sweep/FVG entries
+// occur AT a level — true on the trigger bar, but the freshness window lets
+// them fire up to i_triggerAge bars later, by which time price has left the
+// level and the reclaim edge is gone.
+buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
+sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
+chaseOkBuy   = na(buyChaseRef)  or (close - buyChaseRef)  <= atr14 * i_maxChase
+chaseOkSell  = na(sellChaseRef) or (sellChaseRef - close) <= atr14 * i_maxChase
 
 barBull = close > open
 barBear = close < open
@@ -1512,7 +1584,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.6 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.7 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
