@@ -1,8 +1,34 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.7 (trigger-aware invalidation)
+// © ME Institutional — Movement Engine Pro v3.5.8 (reward gate + time stop)
 //@version=6
-indicator("Movement Engine Pro v3.5.7", shorttitle="ME Pro v3.5.7", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.8", shorttitle="ME Pro v3.5.8", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.8 CHANGELOG — THE ENGINE FINALLY LOOKS AT REWARD
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NO REWARD CHECK EXISTED — AT ALL. Every version since v3.3 bounded RISK
+//    (min/max ATR window, cap, clamp, buffers) and never once asked what a
+//    trade could MAKE. TP1 is just the nearest structure level above entry, so
+//    it can sit a small fraction of the stop distance away. That interacts
+//    badly with the v3.5.5 breakeven rule: TP1 fires almost immediately, a
+//    third comes off for a few ticks, the stop jumps to entry, and the rest is
+//    brushed out on noise. The result is a stream of scratches and small wins
+//    punctuated by full-size losses — which reads on a chart exactly as
+//    "lacks accuracy", because it is negative expectancy dressed as a decent
+//    hit rate. New "Min TP1 Reward (× risk)", default 1.0, rejects setups
+//    whose first target is closer than the stop; 0 restores old behavior.
+//    Reports as "rr" in Last Block. This WILL reduce signal count.
+//    Consequence: TP selection now runs on the pre-signal, since the gate has
+//    to know where TP1 is before the signal can be confirmed.
+//
+// 2. TRADES COULD STAY OPEN FOREVER. Tracking only ever released on a stop, on
+//    TP3, or when a new signal replaced it. A trade that stalled between the
+//    two simply stayed active: the runner never resolved, the TP1/SL
+//    bookkeeping that feeds the cooldown and loss-streak guards froze, and in
+//    the strategy build the position sat on the books distorting the numbers.
+//    New "Max Bars In Trade" (0 = off) closes it out as a neutral exit —
+//    neither a win nor a loss for the streak guard.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.7 CHANGELOG — THE STOP NOW MATCHES WHAT TRIGGERED THE TRADE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -470,6 +496,12 @@ i_tp1R       = input.float(1.5, "TP1 (R-multiple fallback)", minval=0.5, maxval=
 i_tp2R       = input.float(2.5, "TP2 (R-multiple fallback)", minval=0.5, maxval=20.0, step=0.5, group=G_TPSL)
 i_tp3R       = input.float(4.0, "TP3 (R-multiple fallback)", minval=0.5, maxval=30.0, step=0.5, group=G_TPSL)
 i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200, group=G_TPSL)
+i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5.0, step=0.1,
+     tooltip="v3.5.8: TP1 must sit at least this many multiples of the stop distance away, or the setup is skipped (reports as 'rr' in Last Block). 0 disables.\nThe engine has always bounded RISK and never once checked REWARD. TP1 is simply the nearest structure level above entry, so it can be a fraction of the stop distance away — and since TP1 also triggers the breakeven move, a too-close first target turns trades into scratches: a third off for a few ticks, stop to entry, brushed out of the rest.\nRaising this demands better setups and cuts signal count; lower it if you want closer first targets.",
+     group=G_TPSL)
+i_maxBars    = input.int(0, "Max Bars In Trade (0 = off)", minval=0, maxval=500,
+     tooltip="v3.5.8: closes tracking after this many bars if neither the stop nor TP3 has been reached. Without it a trade that stalls stays 'open' forever — the runner never resolves, the post-TP1/SL bookkeeping never updates, and in the strategy build the position sits there distorting results. Counts as a neutral exit, not a loss.",
+     group=G_TPSL)
 
 // ── Risk Guards ──────────────────────────────────────────────────────────────
 i_minRisk    = input.float(1.0,"Min Risk Required (× ATR)",
@@ -1284,21 +1316,70 @@ barBear = close < open
 strongBull = bodySize >= atr14 * effBodyAtr
 strongBear = bodySize >= atr14 * effBodyAtr
 
-rawBuy  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk and breakerOk and chaseOkBuy
-rawSell = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk and breakerOk and chaseOkSell
+rawBuyPre  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk and breakerOk and chaseOkBuy
+rawSellPre = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk and breakerOk and chaseOkSell
 
-buySignal  = rawBuy
-sellSignal = rawSell
+// v3.5.1: TP selection ran on EVERY bar; it is only consumed on signal bars.
+// v3.5.8: it now runs on the PRE-signal, because the reward gate below has
+// to know where TP1 is before the signal can be confirmed. Still rare.
+float  buyTp1  = na
+float  buyTp2  = na
+float  buyTp3  = na
+string buyTag1 = na
+string buyTag2 = na
+string buyTag3 = na
+float  sellTp1  = na
+float  sellTp2  = na
+float  sellTp3  = na
+string sellTag1 = na
+string sellTag2 = na
+string sellTag3 = na
+
+if rawBuyPre
+    [t1, t2, t3, g1, g2, g3] = f_tpLevels(true, close, buyRiskDist)
+    buyTp1  := t1
+    buyTp2  := t2
+    buyTp3  := t3
+    buyTag1 := g1
+    buyTag2 := g2
+    buyTag3 := g3
+if rawSellPre
+    [t1, t2, t3, g1, g2, g3] = f_tpLevels(false, close, sellRiskDist)
+    sellTp1  := t1
+    sellTp2  := t2
+    sellTp3  := t3
+    sellTag1 := g1
+    sellTag2 := g2
+    sellTag3 := g3
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.8 REWARD GATE. The engine bounded RISK from the start (min/max ATR
+// window) but never once checked what the trade could MAKE. TP1 is the
+// nearest structure level above entry, so it can sit a fraction of the stop
+// distance away — and because TP1 also triggers the breakeven move, a
+// too-close first target systematically converts trades into scratches:
+// take a third off for a few ticks, pull the stop to entry, get brushed out
+// of the rest. Many tiny wins and scratches with occasional full losses is
+// exactly what "lacks accuracy" feels like on a chart.
+// TP1 must now be at least i_minRR × the risk. 0 disables the gate.
+// ═══════════════════════════════════════════════════════════════════════════════
+rrBuy    = not na(buyTp1)  ? (buyTp1 - close)  / math.max(buyRiskDist,  1e-9) : na
+rrSell   = not na(sellTp1) ? (close - sellTp1) / math.max(sellRiskDist, 1e-9) : na
+rrOkBuy  = i_minRR <= 0 or (not na(rrBuy)  and rrBuy  >= i_minRR)
+rrOkSell = i_minRR <= 0 or (not na(rrSell) and rrSell >= i_minRR)
+
+buySignal  = rawBuyPre  and rrOkBuy
+sellSignal = rawSellPre and rrOkSell
 // v3.4.1: names respect mode gating — previously "FVG"/"SWEEP" could be
 // reported in modes where those triggers are disabled.
 buyType    = mssUp   ? "MSS" : buyTrigFvg   ? "FVG" : buyTrigSweep  ? "SWEEP" : "MSS"
 sellType   = mssDown ? "MSS" : sellTrigFvg  ? "FVG" : sellTrigSweep ? "SWEEP" : "MSS"
 
-if rawBuy
+if buySignal
     lastSigBar := bar_index
     lastTradeBuy := true
     lastSlHit := false
-if rawSell
+if sellSignal
     lastSigBar := bar_index
     lastTradeBuy := false
     lastSlHit := false
@@ -1306,7 +1387,7 @@ if rawSell
 // v3.5.2: name the gates that vetoed the most recent trigger — shown in the
 // dashboard "Last Block" row and (optionally) as on-chart ✕ labels.
 var string lastBlockReason = "—"
-if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
+if barstate.isconfirmed and buyTrigger and barBull and not buySignal
     string r = ""
     r += strongBull ? "" : "body "
     r += notWeakBuy ? "" : "wick "
@@ -1323,11 +1404,12 @@ if barstate.isconfirmed and buyTrigger and barBull and not rawBuy
     r += newsOk ? "" : "news "
     r += breakerOk ? "" : "lossbreak "
     r += chaseOkBuy ? "" : "chase "
+    r += rrOkBuy ? "" : "rr "
     if r != ""
         lastBlockReason := "BUY ✕ " + r
         if i_debugLabels
             label.new(bar_index, low - atr14 * 0.4, "✕ " + r, style=label.style_label_up, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
-if barstate.isconfirmed and sellTrigger and barBear and not rawSell
+if barstate.isconfirmed and sellTrigger and barBear and not buySignal
     string r = ""
     r += strongBear ? "" : "body "
     r += notWeakSell ? "" : "wick "
@@ -1344,42 +1426,12 @@ if barstate.isconfirmed and sellTrigger and barBear and not rawSell
     r += newsOk ? "" : "news "
     r += breakerOk ? "" : "lossbreak "
     r += chaseOkSell ? "" : "chase "
+    r += rrOkSell ? "" : "rr "
     if r != ""
         lastBlockReason := "SELL ✕ " + r
         if i_debugLabels
             label.new(bar_index, high + atr14 * 0.4, "✕ " + r, style=label.style_label_down, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
 
-// v3.5.1: TP selection (array build + sort ×2) previously ran on EVERY bar;
-// the levels are only consumed on signal bars, so compute them only there.
-float  buyTp1  = na
-float  buyTp2  = na
-float  buyTp3  = na
-string buyTag1 = na
-string buyTag2 = na
-string buyTag3 = na
-float  sellTp1  = na
-float  sellTp2  = na
-float  sellTp3  = na
-string sellTag1 = na
-string sellTag2 = na
-string sellTag3 = na
-
-if buySignal
-    [t1, t2, t3, g1, g2, g3] = f_tpLevels(true, close, buyRiskDist)
-    buyTp1  := t1
-    buyTp2  := t2
-    buyTp3  := t3
-    buyTag1 := g1
-    buyTag2 := g2
-    buyTag3 := g3
-if sellSignal
-    [t1, t2, t3, g1, g2, g3] = f_tpLevels(false, close, sellRiskDist)
-    sellTp1  := t1
-    sellTp2  := t2
-    sellTp3  := t3
-    sellTag1 := g1
-    sellTag2 := g2
-    sellTag3 := g3
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MEMORY
@@ -1443,6 +1495,12 @@ slHitNow  = not na(activeSlPx)  and (tradeBuy ? low  <= activeSlPx  : high >= ac
 tp1HitNow = not na(activeTp1Px) and (tradeBuy ? high >= activeTp1Px : low  <= activeTp1Px)
 tp3HitNow = not na(activeTp3Px) and (tradeBuy ? high >= activeTp3Px : low  <= activeTp3Px)
 
+// v3.5.8 TIME STOP. A trade that reaches neither its stop nor TP3 previously
+// stayed active indefinitely: the runner never resolved and the SL/TP1
+// bookkeeping stayed frozen on a position that had long stopped mattering.
+var int tradeStartBar = na
+timeExit = i_maxBars > 0 and not na(tradeStartBar) and not na(activeSlPx) and (bar_index - tradeStartBar) >= i_maxBars
+
 // v3.3: TP1 counts as "de-risked" — SL after that shouldn't extend cooldown.
 // v3.5.4: when ONE bar trades through both TP1 and the SL, the intrabar order
 // is unknown. The old order credited TP1 first and cleared the SL-hit flag,
@@ -1473,7 +1531,7 @@ if barstate.isconfirmed and slHitNow and not activeTp1Hit
     lastSlHit := true
     lossStreak := math.min(lossStreak + 1, 999)
 
-if barstate.isconfirmed and (slHitNow or tp3HitNow or buySignal or sellSignal)
+if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or buySignal or sellSignal)
     if not na(tpsl_sl)
         line.delete(tpsl_sl)
         tpsl_sl := na
@@ -1507,6 +1565,7 @@ if barstate.isconfirmed and (slHitNow or tp3HitNow or buySignal or sellSignal)
     activeEntryPx := na
     activeTp1Hit := false
     activeAtBe   := false
+    tradeStartBar := na
 
 if buySignal
     activeSlPx   := buySLpx
@@ -1515,6 +1574,7 @@ if buySignal
     activeEntryPx := close
     activeTp1Hit := false
     activeAtBe   := false
+    tradeStartBar := bar_index
     tradeBuy     := true
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
@@ -1535,6 +1595,7 @@ if sellSignal
     activeEntryPx := close
     activeTp1Hit := false
     activeAtBe   := false
+    tradeStartBar := bar_index
     tradeBuy     := false
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
@@ -1584,7 +1645,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.7 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.8 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 

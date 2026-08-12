@@ -53,6 +53,7 @@ var float stTp1     = na
 var float stTp2     = na
 var float stTp3     = na
 var bool  stTp1Done = false
+var int   stStartBar = na
 
 stRiskDist = buySignal ? buyRiskDist : sellSignal ? sellRiskDist : na
 stQty      = not na(stRiskDist) and stRiskDist > 0 ? (strategy.equity * i_stRiskPct / 100.0) / stRiskDist : na
@@ -64,6 +65,7 @@ if buySignal and not na(stQty)
     stTp2     := buyTp2
     stTp3     := buyTp3
     stTp1Done := false
+    stStartBar := bar_index
     strategy.entry("Long", strategy.long, qty=stQty)
 
 if sellSignal and not na(stQty)
@@ -73,6 +75,7 @@ if sellSignal and not na(stQty)
     stTp2     := sellTp2
     stTp3     := sellTp3
     stTp1Done := false
+    stStartBar := bar_index
     strategy.entry("Short", strategy.short, qty=stQty)
 
 // Breakeven after TP1 trades — mirrors the indicator's i_beAfterTp1 behavior.
@@ -92,6 +95,10 @@ if strategy.position_size < 0 and not na(stSl)
     strategy.exit("S1", from_entry="Short", qty_percent=33, limit=stTp1, stop=stSl)
     strategy.exit("S2", from_entry="Short", qty_percent=33, limit=stTp2, stop=stSl)
     strategy.exit("S3", from_entry="Short", qty_percent=34, limit=stTp3, stop=stSl)
+
+// v3.5.8 time stop — mirrors the indicator's Max Bars In Trade.
+if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar_index - stStartBar) >= i_maxBars
+    strategy.close_all(comment="time stop")
 '''
 
 open("MovementEnginePro.strategy.pine", "w", encoding="utf-8").write(src)
