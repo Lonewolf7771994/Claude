@@ -1,8 +1,22 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.8 (reward gate + time stop)
+// © ME Institutional — Movement Engine Pro v3.5.9 (webhook auth for n8n)
 //@version=6
-indicator("Movement Engine Pro v3.5.8", shorttitle="ME Pro v3.5.8", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.9", shorttitle="ME Pro v3.5.9", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.9 CHANGELOG — WEBHOOK AUTHENTICATION
+// ─────────────────────────────────────────────────────────────────────────────
+// A TradingView webhook URL is an unauthenticated public endpoint: anyone who
+// learns it can POST a fabricated signal straight into your automation, and
+// nothing in the payload previously let a receiver tell a real alert from a
+// forged one. New "Webhook Shared Secret" (Alerts group) emits a "secret"
+// field as the first key of the JSON object; the companion n8n workflow in
+// n8n/ rejects any payload whose secret does not match. Leave it empty to
+// omit the field entirely and keep the old payload shape.
+// This is a shared secret in cleartext, not a signature — it stops casual
+// forgery by someone who has the URL, not an attacker who can read the alert
+// configuration or intercept the request. Use HTTPS and a long random string.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.8 CHANGELOG — THE ENGINE FINALLY LOOKS AT REWARD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -554,6 +568,9 @@ i_debugLabels = input.bool(false, "Show Block-Reason Labels (✕)",
      tooltip="v3.5.2: prints a small ✕ label on every trigger bar that was vetoed, listing the gates that blocked it (body, wick, vol, of%, delta, cvd, mom, mode, bias, cooldown, risk, rsi). The dashboard 'Last Block' row always shows the most recent one regardless of this toggle.",
      group=G_VIS)
 i_jsonAlerts = input.bool(true, "JSON Push Alerts", group=G_ALERT)
+i_webhookSecret = input.string("", "Webhook Shared Secret",
+     tooltip="v3.5.9: when set, every JSON payload carries a \"secret\" field and the n8n workflow rejects anything that does not match. A TradingView webhook URL is a public endpoint — without this, anyone who learns the URL can post a fake signal into your automation. Use a long random string. Leave empty to omit the field.",
+     group=G_ALERT)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCALP MODE — EFFECTIVE (MODE-ADJUSTED) SETTINGS (v3.5)
@@ -1645,7 +1662,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.8 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.9 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -1740,7 +1757,9 @@ if i_dashboard and barstate.islast
 // ═══════════════════════════════════════════════════════════════════════════════
 
 f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_, stopType_) =>
-    '{"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","stop_type":"' + stopType_ + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
+    // v3.5.9: optional shared secret, emitted as the FIRST field INSIDE the
+    // object so a receiver can reject an unauthenticated payload early.
+    '{' + (i_webhookSecret == "" ? "" : '"secret":"' + i_webhookSecret + '",') + '"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","stop_type":"' + stopType_ + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
 
 alertcondition(buySignal,               "ME Pro — BUY Signal",  "ME Pro: BUY signal fired")
 alertcondition(sellSignal,              "ME Pro — SELL Signal", "ME Pro: SELL signal fired")

@@ -1,0 +1,216 @@
+{
+  "name": "ME Pro — TradingView Signal Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "me-pro-signal",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "TradingView Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        300
+      ],
+      "webhookId": "me-pro-signal"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ME Pro — validate & authenticate\n// Set this to the same string as the Pine input \"Webhook Shared Secret\".\n// Leave '' only if you also left the Pine field empty (endpoint is then open).\nconst EXPECTED_SECRET = '';\n\nconst out = [];\nfor (const item of $input.all()) {\n  let p = item.json.body ?? item.json;\n  if (typeof p === 'string') {\n    try { p = JSON.parse(p); }\n    catch (e) { throw new Error('Payload is not valid JSON: ' + e.message); }\n  }\n\n  if (EXPECTED_SECRET !== '') {\n    if (p.secret !== EXPECTED_SECRET) throw new Error('Rejected: bad or missing secret');\n  }\n\n  const required = ['action','symbol','tf','entry','sl','tp1','tp2','tp3','seq','bar_time'];\n  const missing = required.filter(k => p[k] === undefined || p[k] === null || p[k] === '');\n  if (missing.length) throw new Error('Missing fields: ' + missing.join(', '));\n\n  if (p.action !== 'BUY' && p.action !== 'SELL') throw new Error('Bad action: ' + p.action);\n\n  for (const k of ['entry','sl','tp1','tp2','tp3','risk_atr','confluence','seq','bar_time','rsi','delta','rel_vol']) {\n    if (p[k] !== undefined) {\n      const v = Number(p[k]);\n      if (!isFinite(v)) throw new Error('Non-numeric field ' + k + ': ' + p[k]);\n      p[k] = v;\n    }\n  }\n\n  // Direction sanity — catches a malformed or spoofed payload that would\n  // otherwise place a stop on the wrong side of entry.\n  if (p.action === 'BUY'  && !(p.sl < p.entry)) throw new Error('BUY with SL at/above entry');\n  if (p.action === 'SELL' && !(p.sl > p.entry)) throw new Error('SELL with SL at/below entry');\n\n  delete p.secret;\n  p.received_at = new Date().toISOString();\n  out.push({ json: p });\n}\nreturn out;"
+      },
+      "id": "validate-&-authenticate",
+      "name": "Validate & Authenticate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ME Pro — drop duplicate deliveries\n// TradingView can retry a webhook, and the engine re-sends nothing, so any\n// repeat of the same (symbol, tf, mode, seq, bar_time) is a duplicate.\nconst store = $getWorkflowStaticData('global');\nstore.seen = store.seen || {};\n\nconst now = Date.now();\nconst TTL_MS = 7 * 24 * 60 * 60 * 1000;\nfor (const k of Object.keys(store.seen)) {\n  if (now - store.seen[k] > TTL_MS) delete store.seen[k];\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const p = item.json;\n  const key = [p.symbol, p.tf, p.mode, p.seq, p.bar_time].join('|');\n  if (store.seen[key]) continue;\n  store.seen[key] = now;\n  out.push(item);\n}\nreturn out;"
+      },
+      "id": "deduplicate",
+      "name": "Deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ME Pro — quality gate. Everything here is a policy choice, not engine logic;\n// tune it without touching Pine. Items are never dropped, only flagged, so\n// rejects stay visible in the execution log.\nconst CFG = {\n  minConfluence:          2,      // 0-3 (HTF side + VWAP side + value-area side)\n  requireStructuralStop:  true,   // reject stop_type === 'clamped'\n  allowedModes:           [],     // [] = any. e.g. ['Balanced','Strict']\n  allowedTriggers:        [],     // [] = any. e.g. ['MSS','SWEEP']\n  minRiskAtr:             0.0,\n  maxRiskAtr:             99.0,\n  minRR1:                 1.0,    // TP1 distance as a multiple of stop distance\n};\n\nconst out = [];\nfor (const item of $input.all()) {\n  const p = { ...item.json };\n  const risk = Math.abs(p.entry - p.sl);\n  const rr1  = risk > 0 ? Math.abs(p.tp1 - p.entry) / risk : 0;\n  const why  = [];\n\n  if (p.confluence !== undefined && p.confluence < CFG.minConfluence) why.push('confluence ' + p.confluence + '<' + CFG.minConfluence);\n  if (CFG.requireStructuralStop && p.stop_type === 'clamped')          why.push('stop is clamped, not structural');\n  if (CFG.allowedModes.length    && !CFG.allowedModes.includes(p.mode))       why.push('mode ' + p.mode);\n  if (CFG.allowedTriggers.length && !CFG.allowedTriggers.includes(p.trigger)) why.push('trigger ' + p.trigger);\n  if (p.risk_atr !== undefined && (p.risk_atr < CFG.minRiskAtr || p.risk_atr > CFG.maxRiskAtr)) why.push('risk_atr ' + p.risk_atr);\n  if (rr1 < CFG.minRR1) why.push('TP1 reward ' + rr1.toFixed(2) + 'R < ' + CFG.minRR1 + 'R');\n\n  p.rr1 = Number(rr1.toFixed(2));\n  p.risk_per_unit = risk;\n  p.passed = why.length === 0;\n  p.reject_reason = why.join('; ');\n  out.push({ json: p });\n}\nreturn out;"
+      },
+      "id": "quality-gate",
+      "name": "Quality Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "passed",
+              "leftValue": "={{ $json.passed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route",
+      "name": "Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ME Pro — risk-normalised position size + a human-readable message.\n// Size follows from stop distance, so a wide-stop trade takes a smaller\n// position and every trade risks the same fraction of equity.\nconst ACCOUNT = {\n  equity:  10000,   // set to your real account size, or fetch it upstream\n  riskPct: 1.0,     // % of equity risked per trade\n  qtyDecimals: 4,\n};\n\nconst out = [];\nfor (const item of $input.all()) {\n  const p = { ...item.json };\n  const risk = p.risk_per_unit || Math.abs(p.entry - p.sl);\n  const qty  = risk > 0 ? (ACCOUNT.equity * ACCOUNT.riskPct / 100) / risk : 0;\n\n  p.qty            = Number(qty.toFixed(ACCOUNT.qtyDecimals));\n  p.risk_amount    = Number((ACCOUNT.equity * ACCOUNT.riskPct / 100).toFixed(2));\n  p.account_equity = ACCOUNT.equity;\n\n  const arrow = p.action === 'BUY' ? 'LONG' : 'SHORT';\n  p.message = [\n    `${arrow} ${p.symbol} ${p.tf}m  (${p.mode} / ${p.trigger})`,\n    `entry ${p.entry}   SL ${p.sl}  [${p.stop_type}]`,\n    `TP1 ${p.tp1}   TP2 ${p.tp2}   TP3 ${p.tp3}`,\n    `risk ${p.risk_atr}x ATR   TP1 = ${p.rr1}R   confluence ${p.confluence}/3`,\n    `HTF ${p.htf}  VWAP ${p.vwap}  CVD ${p.cvd}  regime ${p.regime}`,\n    `size ${p.qty} (risking ${p.risk_amount} of ${p.account_equity})`,\n  ].join('\\n');\n\n  out.push({ json: p });\n}\nreturn out;"
+      },
+      "id": "position-size-&-message",
+      "name": "Position Size & Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://REPLACE-ME.example.com/webhook",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.message }) }}",
+        "options": {}
+      },
+      "id": "notify",
+      "name": "Notify (Discord/Slack/Telegram)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1060,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "rejected",
+      "name": "Rejected (see reject_reason)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        840,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "TradingView Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate & Authenticate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Authenticate": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate": {
+      "main": [
+        [
+          {
+            "node": "Quality Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality Gate": {
+      "main": [
+        [
+          {
+            "node": "Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed?": {
+      "main": [
+        [
+          {
+            "node": "Position Size & Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejected (see reject_reason)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Position Size & Message": {
+      "main": [
+        [
+          {
+            "node": "Notify (Discord/Slack/Telegram)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
