@@ -5,11 +5,16 @@ import re
 
 src = open("MovementEnginePro.pine", encoding="utf-8").read()
 
+# Derive the version from the indicator so the strategy can never advertise a
+# stale one — it did read v3.5.6 while carrying v3.5.7 logic.
+ver = re.search(r'indicator\("Movement Engine Pro ([^"]+)"', src).group(1)
+
 # 1. indicator() -> strategy(). Risk-normalized sizing so stop distance does not
 #    distort results: every trade risks the same % of equity.
 src = re.sub(
     r'indicator\("Movement Engine Pro [^"]*"[^\n]*\)',
-    'strategy("ME Pro Strategy v3.5.6", shorttitle="ME Pro ST", overlay=true, '
+    'strategy("ME Pro Strategy %s", shorttitle="ME Pro ST", overlay=true, ' % ver +
+    ''
     'max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, '
     'initial_capital=10000, currency=currency.NONE, '
     'default_qty_type=strategy.percent_of_equity, default_qty_value=10, '

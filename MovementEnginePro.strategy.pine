@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
 // © ME Institutional — Movement Engine Pro v3.5.7 (trigger-aware invalidation)
 //@version=6
-strategy("ME Pro Strategy v3.5.6", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.7", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.7 CHANGELOG — THE STOP NOW MATCHES WHAT TRIGGERED THE TRADE
