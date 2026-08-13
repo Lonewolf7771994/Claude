@@ -1,8 +1,36 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.10 (multi-gap FVG tracking)
+// © ME Institutional — Movement Engine Pro v3.5.11 (repaint fix)
 //@version=6
-strategy("ME Pro Strategy v3.5.10", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.11", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.11 CHANGELOG — REPAINT FIX (the engine did repaint; it does not now)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "the indicator draws different signals". It did, and this was why.
+//
+// The FRVP refresh condition carried an "or barstate.islast" term, added in
+// v3.5.1 alongside the load-time work. It gave the LIVE bar a profile rebuild
+// that the same bar no longer received once it scrolled into history, so with
+// the default stride of 5 roughly four bars in five held different POC/VAH/VAL
+// in real time than on reload.
+//
+// That leaked into signals by two paths:
+//   • VAH and VAL are TP candidates, so TP1 could differ — and since v3.5.8 the
+//     reward gate decides the signal FROM TP1. A signal could therefore appear
+//     live and be gone on reload, in EVERY mode.
+//   • Strict gates on frvpBullOk/frvpBearOk directly.
+//
+// The header has claimed "100% bar-close confirmed — it does NOT repaint" since
+// v3.5. From v3.5.1 that was untrue for anything downstream of the profile, and
+// from v3.5.8 it was untrue for the signals themselves. Removing the islast term
+// makes the rebuild purely a function of bar_index: identical live and on
+// reload. The cost is the disclosed one — the profile can lag up to
+// i_frvpEvery-1 bars. Set the input to 1 for fresh-every-bar; that is equally
+// deterministic, just slower to load.
+//
+// Drawing still happens on the last bar only (rendering is not state, and
+// redrawing a line does not change a signal).
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.10 CHANGELOG — FVG TRACKING HOLDS MULTIPLE GAPS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1068,7 +1096,17 @@ binSize  = math.max(frvpHigh - frvpLow, 1e-9) / i_frvpBins
 var float[] volBins = array.new_float(0)
 
 frvpReady  = bar_index >= i_frvpLen and not na(frvpHigh) and not na(frvpLow)
-frvpRecalc = barstate.isconfirmed and frvpReady and (bar_index % i_frvpEvery == 0 or barstate.islast)
+// v3.5.11 REPAINT FIX. This previously read
+//   (bar_index % i_frvpEvery == 0 or barstate.islast)
+// The islast term gave the LIVE bar an extra profile rebuild that it lost the
+// moment it became historical, so POC/VAH/VAL differed between what you saw in
+// real time and what the chart redrew on reload. VAH/VAL are TP candidates, and
+// since v3.5.8 the reward gate decides the signal from TP1 — so a signal could
+// appear live and disappear on reload. That is repainting, in a script that
+// claims not to. The stride alone is deterministic: identical live and on
+// reload, at the cost of the profile lagging up to i_frvpEvery-1 bars (set the
+// input to 1 for fresh-every-bar, which is also deterministic, just slower).
+frvpRecalc = barstate.isconfirmed and frvpReady and bar_index % i_frvpEvery == 0
 
 if frvpRecalc
     array.clear(volBins)
@@ -1739,7 +1777,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.10 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.11 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
