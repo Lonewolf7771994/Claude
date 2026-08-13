@@ -1,8 +1,34 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.12 (selectivity levers)
+// © ME Institutional — Movement Engine Pro v3.5.13 (sweeps target real liquidity)
 //@version=6
-strategy("ME Pro Strategy v3.5.12", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.13", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.13 CHANGELOG — SCALP SWEEPS WERE HUNTING NOISE
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. SWEEP LEVELS INHERITED THE ENTRY PIVOT LENGTH. Sweep levels came from
+//    lastPH/lastPL, which use effSwingLen — and Scalp clamps that to 2 bars
+//    per side. A 2-bar swing on a 15m chart is a 5-bar wiggle, not a liquidity
+//    pool: nobody has stops resting under it, so violating it and closing back
+//    is not a stop run, it is noise with a setup's name on it. Scalp leans on
+//    the sweep trigger harder than any other mode (v3.5.1 even exempted sweep
+//    scalps from the CVD and momentum gates to get them firing), so the mode
+//    that depends on sweeps most was aiming them at the shallowest structure
+//    on the chart.
+//    Sweeps now use their OWN pivot series at a dedicated length (default 5 =
+//    an 11-bar swing), independent of the entry pivots and not overridden by
+//    any mode. Entry structure stays fast; the liquidity being hunted is real.
+//
+// 2. SCALP NOW REQUIRES AT LEAST 1 OF 3 CONFLUENCE. Scalp bypasses the HTF
+//    gate, the structural bias, and for sweeps the CVD and momentum gates too.
+//    That is most of the engine's context switched off, which is what lets it
+//    trade both directions. Requiring one of the three directional alignments
+//    (HTF side / VWAP side / value-area side) puts a floor under that without
+//    reverting Scalp into Balanced. Clamped upward like every other Scalp
+//    setting, so 2 or 3 is respected if you set it.
+//    UNMEASURED judgment, unlike (1) which is a defect. Set Min Confluence
+//    higher to test, or use another mode if you want it off entirely.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.12 CHANGELOG — SELECTIVITY LEVERS (asked for: higher Scalp win rate)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,6 +523,9 @@ i_fvgLabel   = input.bool(true, "Show FVG Labels", group=G_FVG)
 i_sweepUsePivot = input.bool(true, "Sweep Uses Pivot Levels (not range high/low)",
      tooltip="ON = sweeps must violate an actual confirmed swing high/low (real liquidity). OFF = legacy N-bar high/low sweep.",
      group=G_SWEEP)
+i_sweepPivotLen = input.int(5, "Sweep Pivot Length (bars each side)", minval=2, maxval=20,
+     tooltip="v3.5.13: sweeps now target their OWN pivots at this depth, independent of the entry pivot length and NOT overridden by any mode.\nScalp clamps the entry pivot to 2 bars per side for responsiveness — fine for spotting a break, but a 2-bar swing is not a liquidity pool, and a sweep of one is noise wearing the name of a setup. Scalp leans on sweeps more than any other mode, so it was aiming its main trigger at the shallowest structure on the chart.\n5 = an 11-bar swing, a level with orders resting under it. Raise for fewer, more significant sweeps.",
+     group=G_SWEEP)
 i_sweepLook  = input.int(10, "Sweep Lookback (bars, legacy mode)", minval=3, maxval=100, group=G_SWEEP)
 i_sweepWick  = input.float(0.4, "Min Sweep Wick (× ATR)", minval=0.1, maxval=2.0, step=0.05,
      tooltip="Wick must extend at least this far beyond the liquidity level. v3.2 default raised to 0.4 to filter near-misses.",
@@ -699,6 +728,12 @@ effRsiBuyLo   = isScalp ? math.min(i_rsiBuyLo,  35)    : i_rsiBuyLo
 effRsiBuyHi   = isScalp ? math.max(i_rsiBuyHi,  80)    : i_rsiBuyHi
 effRsiSellLo  = isScalp ? math.min(i_rsiSellLo, 20)    : i_rsiSellLo
 effRsiSellHi  = isScalp ? math.max(i_rsiSellHi, 65)    : i_rsiSellHi
+// v3.5.13: Scalp bypasses the HTF gate AND the structural bias AND (for
+// sweeps) the CVD and momentum gates. That is a lot of context removed, and
+// it is why Scalp fires in both directions. Requiring at least ONE of the
+// three directional alignments puts a floor under that without turning Scalp
+// back into Balanced. A user asking for 2 or 3 keeps their stricter setting.
+effMinConf    = isScalp ? math.max(i_minConf, 1)       : i_minConf
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATR + VOLATILITY REGIME
@@ -909,6 +944,18 @@ if not na(pl)
 lastPH = ph1
 lastPL = pl1
 
+// v3.5.13: a SECOND, deeper pivot series used only for sweep levels, so the
+// liquidity a sweep targets does not shrink to noise when a mode speeds the
+// entry pivots up.
+phSweep = ta.pivothigh(high, i_sweepPivotLen, i_sweepPivotLen)
+plSweep = ta.pivotlow(low,   i_sweepPivotLen, i_sweepPivotLen)
+var float sweepPH = na
+var float sweepPL = na
+if not na(phSweep)
+    sweepPH := phSweep
+if not na(plSweep)
+    sweepPL := plSweep
+
 plotshape(not na(ph), style=shape.triangledown, location=location.abovebar, color=color.new(#FF3366, 60), size=size.tiny, offset=-effSwingLen, title="Pivot High")
 plotshape(not na(pl), style=shape.triangleup,   location=location.belowbar, color=color.new(#00E5FF, 60), size=size.tiny, offset=-effSwingLen, title="Pivot Low")
 
@@ -1087,8 +1134,8 @@ fvgRetestBear = barstate.isconfirmed and bearRetestHit and trigHtfBear
 // conditional branch they execute inconsistently and corrupt their window.
 legacySweepHi = ta.highest(high[1], i_sweepLook)
 legacySweepLo = ta.lowest(low[1],   i_sweepLook)
-sweepLevelHi  = i_sweepUsePivot and not na(lastPH) ? lastPH : legacySweepHi
-sweepLevelLo  = i_sweepUsePivot and not na(lastPL) ? lastPL : legacySweepLo
+sweepLevelHi  = i_sweepUsePivot and not na(sweepPH) ? sweepPH : legacySweepHi
+sweepLevelLo  = i_sweepUsePivot and not na(sweepPL) ? sweepPL : legacySweepLo
 
 sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
 sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
@@ -1544,8 +1591,8 @@ rrOkBuy  = i_minRR <= 0 or (not na(rrBuy)  and rrBuy  >= i_minRR)
 rrOkSell = i_minRR <= 0 or (not na(rrSell) and rrSell >= i_minRR)
 
 // v3.5.12: confluence gate reads the score computed above; 0 disables it.
-confOkBuy  = buyAligned  >= i_minConf
-confOkSell = sellAligned >= i_minConf
+confOkBuy  = buyAligned  >= effMinConf
+confOkSell = sellAligned >= effMinConf
 
 buySignal  = rawBuyPre  and rrOkBuy  and confOkBuy
 sellSignal = rawSellPre and rrOkSell and confOkSell
@@ -1830,7 +1877,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.12 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.13 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
