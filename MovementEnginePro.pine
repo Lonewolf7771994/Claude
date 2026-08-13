@@ -1,8 +1,35 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.13 (sweeps target real liquidity)
+// © ME Institutional — Movement Engine Pro v3.5.14 (explicit frequency/quality dial)
 //@version=6
-indicator("Movement Engine Pro v3.5.13", shorttitle="ME Pro v3.5.13", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.14", shorttitle="ME Pro v3.5.14", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.14 CHANGELOG — FREQUENCY IS NOW A DIAL, NOT A SIDE EFFECT
+// ─────────────────────────────────────────────────────────────────────────────
+// Asked for a higher win rate, then for at least 4 signals a day. Those pull in
+// opposite directions: win rate comes from fewer/better trades, frequency from
+// looser ones. Rather than quietly re-tune and pretend both were delivered, the
+// trade-off is now a single Scalp-only control with its cost documented.
+//
+//   SELECTIVE (default) cooldown 5, full Min TP1 Reward, confluence floor 1
+//                       — byte-for-byte the v3.5.13 behavior.
+//   STANDARD            cooldown 4, TP1 reward capped 0.9R, confluence floor 1
+//   HIGH                cooldown 2, TP1 reward capped 0.7R, no confluence floor
+//
+// The cooldown is the cheap part: shortening it does not lower the bar for any
+// individual setup, it just lets qualifying setups sit closer together. The
+// other two are not cheap. A 0.7R first target means TP1 sits nearer than the
+// stop, and since TP1 also triggers the breakeven move, more trades will end as
+// scratches — the exact failure mode v3.5.8's reward gate was built to stop.
+// Dropping the confluence floor removes the only trend context Scalp has left.
+//
+// Sweep Pivot Length is deliberately NOT touched by the preset: lowering it back
+// toward 2 re-creates the v3.5.13 defect where sweeps hunted 5-bar wiggles. Set
+// it to 3 or 4 by hand if you want more sweeps and accept shallower liquidity.
+//
+// SIGNALS PER DAY IS A PROPERTY OF THE MARKET, NOT THIS SETTING. Nothing here
+// guarantees 4/day. Measure the real rate in the strategy tester.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.13 CHANGELOG — SCALP SWEEPS WERE HUNTING NOISE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -475,6 +502,10 @@ var string G_NEWS   = "══ Time Filters + News ══"
 var string G_VIS    = "══ Visuals ══"
 var string G_ALERT  = "══ Alerts ══"
 
+i_scalpFreq  = input.string("Selective", "Scalp Signal Frequency",
+     options=["Selective","Standard","High"],
+     tooltip="v3.5.14: Scalp only. Trades signal COUNT against signal QUALITY, explicitly, so the cost of each step is visible instead of buried.\n\nSELECTIVE (default) — cooldown 5 bars, TP1 must reach the full Min TP1 Reward, confluence floor 1. Identical to v3.5.13.\nSTANDARD — cooldown 4, TP1 reward capped at 0.9R, confluence floor 1.\nHIGH — cooldown 2, TP1 reward capped at 0.7R, confluence floor removed.\n\nHIGH raises the rate mainly by letting good setups sit closer together (cooldown), which costs least, but it also accepts nearer first targets and drops the trend-context floor, which costs real quality. A closer TP1 also fires the breakeven move sooner, so more trades end as scratches.\nSignals per day depend on the market, not the setting — measure the actual rate in the strategy tester.",
+     group=G_ENGINE)
 i_mode       = input.string("Balanced", "Engine Mode",
      options=["Scalp","Aggressive","Balanced","Strict"],
      tooltip="Scalp: fastest non-repainting preset — 2-bar pivots, 1-bar momentum, fast CVD, no HTF/bias gate, both directions, cooldown 5, tight 0.5-2 ATR risk window, atr14-based clamped stops, sweep entries exempt from CVD/momentum trend gates (v3.5.1).\nAggressive: structure + OF only (no HTF/VWAP gate).\nBalanced: requires HTF trend + VWAP alignment.\nStrict: requires HTF + VWAP + FRVP value area.",
@@ -715,7 +746,10 @@ effVolFloor   = isScalp ? math.min(i_volFloor,   1.0)  : i_volFloor
 effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
 effOfThresh   = isScalp ? math.min(i_ofThresh,   57.0) : i_ofThresh
 effBodyAtr    = isScalp ? math.min(i_bodyAtr,    0.3)  : i_bodyAtr
-effCooldown   = isScalp ? math.min(i_cooldown,   5)    : i_cooldown
+// v3.5.14: the frequency preset moves three dials, all Scalp-only.
+scalpHigh     = isScalp and i_scalpFreq == "High"
+scalpStd      = isScalp and i_scalpFreq == "Standard"
+effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 2 : scalpStd ? 4 : 5) : i_cooldown
 effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
 effMaxRisk    = isScalp ? math.min(i_maxRisk,    2.0)  : i_maxRisk
 effTp1R       = isScalp ? math.min(i_tp1R,       1.0)  : i_tp1R
@@ -730,7 +764,8 @@ effRsiSellHi  = isScalp ? math.max(i_rsiSellHi, 65)    : i_rsiSellHi
 // it is why Scalp fires in both directions. Requiring at least ONE of the
 // three directional alignments puts a floor under that without turning Scalp
 // back into Balanced. A user asking for 2 or 3 keeps their stricter setting.
-effMinConf    = isScalp ? math.max(i_minConf, 1)       : i_minConf
+effMinConf    = isScalp ? (scalpHigh ? i_minConf : math.max(i_minConf, 1)) : i_minConf
+effMinRR      = isScalp ? math.min(i_minRR, scalpHigh ? 0.7 : scalpStd ? 0.9 : 99.0) : i_minRR
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATR + VOLATILITY REGIME
@@ -1584,8 +1619,8 @@ if rawSellPre
 // ═══════════════════════════════════════════════════════════════════════════════
 rrBuy    = not na(buyTp1)  ? (buyTp1 - close)  / math.max(buyRiskDist,  1e-9) : na
 rrSell   = not na(sellTp1) ? (close - sellTp1) / math.max(sellRiskDist, 1e-9) : na
-rrOkBuy  = i_minRR <= 0 or (not na(rrBuy)  and rrBuy  >= i_minRR)
-rrOkSell = i_minRR <= 0 or (not na(rrSell) and rrSell >= i_minRR)
+rrOkBuy  = effMinRR <= 0 or (not na(rrBuy)  and rrBuy  >= effMinRR)
+rrOkSell = effMinRR <= 0 or (not na(rrSell) and rrSell >= effMinRR)
 
 // v3.5.12: confluence gate reads the score computed above; 0 disables it.
 confOkBuy  = buyAligned  >= effMinConf
@@ -1874,7 +1909,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.13 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.14 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
