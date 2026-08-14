@@ -1,8 +1,29 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.20 (TP reach cap)
+// © ME Institutional — Movement Engine Pro v3.5.21 (TP spacing)
 //@version=6
-strategy("ME Pro Strategy v3.5.20", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.21", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.21 CHANGELOG — TP SPACING (R-multiples vs structure levels)
+// ─────────────────────────────────────────────────────────────────────────────
+// The v3.5.3 minGap merge kept two STRUCTURE levels from landing on top of each
+// other, but it never compared structure against the R-multiple fallbacks that
+// fill any leftover slot. A fallback could therefore sit a fraction of a point
+// from a pivot or VAH, and two of the three targets became the same price with
+// different labels — the scale-out lost a leg while still carrying full risk.
+//
+// On the reported XAUUSD trade: pivot 4362.000 in one slot and the 2R fallback
+// at 4362.486 in another, 0.486 apart against a minGap of 2.332.
+//
+// Fix: structure levels are placed first and keep their EXACT prices — a nudged
+// pivot is not that pivot any more and its tag would be false. Only fallbacks
+// move: each is pushed outward, away from entry, until it clears every level
+// already placed, then retagged with the R multiple it actually lands on. The
+// push runs a bounded number of passes; there is no unbounded loop.
+//
+// This changes level selection on trades where a fallback previously collided,
+// and only on those. When no collision existed the three levels are unchanged.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.20 CHANGELOG — TP REACH CAP, OPT-IN AND OFF BY DEFAULT
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1718,12 +1739,48 @@ f_tpLevels(bool _isBuy, float _entry, float _risk) =>
     float lvl = _isBuy ? vahPrice : valPrice
     string lt = _isBuy ? " VAH" : " VAL"
     float dir = _isBuy ? 1.0 : -1.0
-    tp1 = n >= 1 ? array.get(cands, 0) : _entry + dir * _risk * effTp1R
-    tp2 = n >= 2 ? array.get(cands, 1) : _entry + dir * _risk * effTp2R
-    tp3 = n >= 3 ? array.get(cands, 2) : _entry + dir * _risk * effTp3R
-    tag1 = n >= 1 ? (not na(lvl) and array.get(cands, 0) == lvl ? lt : " Pivot") : " " + str.tostring(effTp1R) + "R"
-    tag2 = n >= 2 ? (not na(lvl) and array.get(cands, 1) == lvl ? lt : " Pivot") : " " + str.tostring(effTp2R) + "R"
-    tag3 = n >= 3 ? (not na(lvl) and array.get(cands, 2) == lvl ? lt : " Pivot") : " " + str.tostring(effTp3R) + "R"
+    // v3.5.21 SPACING FIX. The minGap merge above ran over structure candidates
+    // ONLY. Structure filled the slots first and any leftover slot took an
+    // R-multiple, but the two sets were never gap-checked against each other —
+    // so a fallback could land a fraction of a point from a structure level and
+    // two of the three targets collapsed onto effectively one price, costing
+    // the scale-out a real leg. On the reported XAUUSD trade the pivot at
+    // 4362.000 and the 2R fallback at 4362.486 sat 0.486 apart against a minGap
+    // of 2.332 — TP2 and TP3 were the same target wearing two labels.
+    //
+    // Structure levels are placed first and keep their EXACT prices (a nudged
+    // pivot is no longer that pivot, and its tag would be a lie). Only
+    // fallbacks move: each is pushed outward, away from entry, until it clears
+    // every level already placed, and is retagged with the R it actually ends
+    // up at. Bounded passes, no unbounded loop.
+    // Slot s keeps its original source: structure candidate s when one exists,
+    // otherwise R-multiple s. That mapping is unchanged from every previous
+    // version — only the collision nudge is new, so a plan that never collided
+    // comes out bit-identical.
+    float[]  rMul = array.from(effTp1R, effTp2R, effTp3R)
+    float[]  fV   = array.new_float(0)
+    string[] fT   = array.new_string(0)
+    for s = 0 to 2
+        if s < n
+            sv = array.get(cands, s)
+            array.push(fV, sv)
+            array.push(fT, not na(lvl) and sv == lvl ? lt : " Pivot")
+        else
+            float rv = _entry + dir * _risk * array.get(rMul, s)
+            for pass = 0 to 3
+                if array.size(fV) > 0
+                    for j = 0 to array.size(fV) - 1
+                        if math.abs(rv - array.get(fV, j)) < minGap
+                            rv := array.get(fV, j) + dir * minGap
+            array.push(fV, rv)
+            rTag = math.round(math.abs(rv - _entry) / math.max(_risk, 1e-9), 1)
+            array.push(fT, " " + str.tostring(rTag) + "R")
+    tp1 = array.get(fV, 0)
+    tp2 = array.get(fV, 1)
+    tp3 = array.get(fV, 2)
+    tag1 = array.get(fT, 0)
+    tag2 = array.get(fT, 1)
+    tag3 = array.get(fT, 2)
     // v3.5.15 ORDERING FIX. Structure candidates fill the slots first and any
     // remainder falls back to R-multiples — but the two sets were never sorted
     // TOGETHER, so a lone distant structure level took TP1 while the nearer
@@ -2180,7 +2237,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.20 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.21 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
