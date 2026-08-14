@@ -1,8 +1,37 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.16 (spread-aware stops + TP/SL zones)
+// © ME Institutional — Movement Engine Pro v3.5.17 (HTF repaint fix)
 //@version=6
-indicator("Movement Engine Pro v3.5.16", shorttitle="ME Pro v3.5.16", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.17", shorttitle="ME Pro v3.5.17", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.17 CHANGELOG — SECOND REPAINT SOURCE (HTF security)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: a live Scalp 15m signal vanished — on v3.5.9 AND on v3.5.14. Two
+// separate causes, both mine. v3.5.9 was the FRVP live-bar rebuild (fixed in
+// v3.5.11). v3.5.14 already had that fix, so the disappearance there was this:
+//
+// The HTF request used [close, ema] with lookahead_off. On a live chart bar
+// inside a still-forming HTF bar, that returns the DEVELOPING higher-timeframe
+// close, updating tick by tick. After a reload the same bar is historical and
+// gets the last CLOSED HTF bar instead. Different values, so htfBull could flip
+// between what was watched and what is redrawn.
+//
+// It reached the signals through the confluence score: buyAligned/sellAligned
+// count htfBull, and v3.5.13 gave Scalp a confluence floor of 1. A Scalp entry
+// scoring 1/3 live could score 0/3 on reload and cease to exist. In Balanced
+// and Strict it also feeds htfOkBull and the structural bias directly.
+//
+// Now requests close[1] with lookahead_on — the standard stable idiom, giving
+// the last CLOSED HTF bar, identical live and historical. The offset is what
+// makes lookahead_on safe: without it lookahead_on WOULD leak future data.
+// Cost: the HTF view lags by up to one HTF bar. That is the honest price of a
+// value that does not change after the fact.
+//
+// Note on the claim in the v3.5 header. "It does NOT repaint" has now been
+// wrong twice — the FRVP path from v3.5.1, and this one since v3.5 shipped,
+// reaching signals from v3.5.13. Both are fixed and the repaint surface has
+// been re-audited, but the claim was made before it had been earned.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.16 CHANGELOG — SPREAD-AWARE STOPS, TP/SL ZONES, TRACKER TYPO
 // ─────────────────────────────────────────────────────────────────────────────
@@ -943,7 +972,21 @@ momOkSell = not i_momFilter or momBearEff
 // HTF TREND — v3.5.1: single tuple request instead of two HTF calls
 // ═══════════════════════════════════════════════════════════════════════════════
 
-[htfClose, htfEma] = request.security(syminfo.tickerid, i_htfTf, [close, ta.ema(close, i_htfEmaLen)], lookahead=barmerge.lookahead_off)
+// v3.5.17 SECOND REPAINT FIX. This previously requested [close, ema] with
+// lookahead_off. On a LIVE chart bar sitting inside a still-forming HTF bar
+// that returns the DEVELOPING higher-timeframe close, updating tick by tick.
+// After a reload the same chart bar is historical and receives the last
+// CLOSED HTF bar instead — a different number, so htfBull could flip between
+// what you watched and what the chart redraws.
+// It reached the signals because buyAligned/sellAligned count htfBull, and
+// since v3.5.13 Scalp enforces a confluence floor of 1: a Scalp entry that
+// scored 1/3 live could score 0/3 on reload and simply cease to exist.
+// Requesting close[1] with lookahead_on is the standard stable idiom — it
+// returns the last CLOSED HTF bar, identical live and historical, and does
+// NOT look ahead (the offset is what makes lookahead_on safe here). Cost: the
+// HTF view lags by up to one HTF bar, which is the honest price of a value
+// that does not change after the fact.
+[htfClose, htfEma] = request.security(syminfo.tickerid, i_htfTf, [close[1], ta.ema(close, i_htfEmaLen)[1]], lookahead=barmerge.lookahead_on)
 htfBull  = htfClose > htfEma
 htfBear  = htfClose < htfEma
 htfLabel = htfBull ? "BULL" : "BEAR"
@@ -2027,7 +2070,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.16 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.17 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
