@@ -1,8 +1,35 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.15 (TP ordering fix)
+// © ME Institutional — Movement Engine Pro v3.5.16 (spread-aware stops + TP/SL zones)
 //@version=6
-strategy("ME Pro Strategy v3.5.15", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.16", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.16 CHANGELOG — SPREAD-AWARE STOPS, TP/SL ZONES, TRACKER TYPO
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NOTHING EVER MODELLED SPREAD. The stop sat exactly on the structural
+//    level, so on any symbol with a spread the level could be taken out by the
+//    quote while the traded price never reached it — a loss the chart says
+//    never happened. On XAUUSD a 0.30 spread against a 9-point scalp stop is
+//    ~3% of risk, and worse on a tighter stop. New "Spread + Slippage Buffer"
+//    (price units, default 0 = unchanged) pushes the stop further out and lets
+//    the reported R grow to match; an honest R beats a flattering one.
+//    Only the STOP is buffered. Buffering the targets would move them closer
+//    in effective terms and make the plan look better than it fills.
+//    The clamped/structural flag is evaluated BEFORE the buffer, since spread
+//    is a broker cost rather than an engine decision.
+//
+// 2. TP/SL AS ZONES (display only). A hairline implies a precision the fill
+//    will not honour — spread, slippage and the tick you actually get all sit
+//    around the level, not on it. Optional bands, height in ATR. Changes no
+//    signal and no level.
+//
+// 3. BLOCK-REASON TRACKER TESTED THE WRONG SIGNAL. The sell branch read
+//    "not buySignal" where it meant "not sellSignal" — my typo from the v3.5.8
+//    restructure. It was masked by the empty-reason guard (a valid SELL passes
+//    every gate, so the reason string came out empty and nothing was written),
+//    so it never produced a wrong message. It would have started lying the
+//    moment any gate was added that a passing SELL does not satisfy.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.15 CHANGELOG — TARGETS WERE NOT IN ORDER (present since v3.4.1)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -685,6 +712,15 @@ i_tp3R       = input.float(4.0, "TP3 (R-multiple fallback)", minval=0.5, maxval=
 i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200, group=G_TPSL)
 i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5.0, step=0.1,
      tooltip="v3.5.8: TP1 must sit at least this many multiples of the stop distance away, or the setup is skipped (reports as 'rr' in Last Block). 0 disables.\nThe engine has always bounded RISK and never once checked REWARD. TP1 is simply the nearest structure level above entry, so it can be a fraction of the stop distance away — and since TP1 also triggers the breakeven move, a too-close first target turns trades into scratches: a third off for a few ticks, stop to entry, brushed out of the rest.\nRaising this demands better setups and cuts signal count; lower it if you want closer first targets.",
+     group=G_TPSL)
+i_spreadBuf  = input.float(0.0, "Spread + Slippage Buffer (price)", minval=0.0, step=0.01,
+     tooltip="v3.5.16: pushes the stop this far FURTHER from entry, in price units, and the reported risk grows to match.\nNothing in the engine modelled spread until now: the stop sat exactly on the structural level, so on a symbol with any spread the level could be taken out by the quote alone while the traded price never reached it. On XAUUSD a 0.30 spread against a 9-point scalp stop is ~3% of risk; on a tighter stop it is worse.\nSet it to your broker's typical spread plus expected slippage (gold ~0.20-0.50, majors ~0.00010-0.00020). 0 = off, and the engine behaves exactly as before.\nOnly the STOP is buffered. Targets are left alone: widening them would flatter the plan rather than protect it.",
+     group=G_TPSL)
+i_zoneShow   = input.bool(false, "Draw TP / SL As Zones",
+     tooltip="v3.5.16: renders a band around each level instead of a bare line. A price level is never exact in practice — spread, slippage and the tick you actually get all sit around it — and a hairline encourages precision the fill will not honour.\nBand height is set below. Display only; it changes no signal and no level.",
+     group=G_TPSL)
+i_zoneAtr    = input.float(0.1, "Zone Half-Height (× ATR)", minval=0.02, maxval=1.0, step=0.02,
+     tooltip="Half-height of each TP/SL band, in ATR. 0.1 = a band one fifth of an ATR tall centred on the level.",
      group=G_TPSL)
 i_maxBars    = input.int(0, "Max Bars In Trade (0 = off)", minval=0, maxval=500,
      tooltip="v3.5.8: closes tracking after this many bars if neither the stop nor TP3 has been reached. Without it a trade that stalls stays 'open' forever — the runner never resolves, the post-TP1/SL bookkeeping never updates, and in the strategy build the position sits there distorting results. Counts as a neutral exit, not a loss.",
@@ -1464,14 +1500,23 @@ clampFar  = clampOn and i_riskClampMode == "Both sides"
 clampNear = clampOn
 buySLfar  = clampFar  ? math.max(buySLraw,  close - slFar) : buySLraw
 sellSLfar = clampFar  ? math.min(sellSLraw, close + slFar) : sellSLraw
-buySLpx   = clampNear ? math.min(buySLfar,  close - slNear) : buySLfar
-sellSLpx  = clampNear ? math.max(sellSLfar, close + slNear) : sellSLfar
+buySLbase  = clampNear ? math.min(buySLfar,  close - slNear) : buySLfar
+sellSLbase = clampNear ? math.max(sellSLfar, close + slNear) : sellSLfar
 
 // v3.5.6: is the stop the real structural level, or one we moved? Shown on
 // the SL label, the dashboard and in the alert payload, so a synthetic stop
-// is never mistaken for a structural one.
-buyClamped   = buySLpx  != buySLraw
-sellClamped  = sellSLpx != sellSLraw
+// is never mistaken for a structural one. Compared BEFORE the spread buffer,
+// which is a broker cost rather than an engine decision.
+buyClamped   = buySLbase  != buySLraw
+sellClamped  = sellSLbase != sellSLraw
+
+// v3.5.16 SPREAD BUFFER. The stop previously sat exactly on the structural
+// level, so on any symbol with a spread the level could be taken out by the
+// quote while the traded price never reached it. Push the stop out by the
+// buffer and let the reported risk grow to match — an honest R beats a
+// flattering one. Targets are deliberately NOT buffered.
+buySLpx   = buySLbase  - i_spreadBuf
+sellSLpx  = sellSLbase + i_spreadBuf
 buyStopTxt   = buyClamped  ? " SL~ " : " SL  "
 sellStopTxt  = sellClamped ? " SL~ " : " SL  "
 
@@ -1717,7 +1762,7 @@ if barstate.isconfirmed and buyTrigger and barBull and not buySignal
         lastBlockReason := "BUY ✕ " + r
         if i_debugLabels
             label.new(bar_index, low - atr14 * 0.4, "✕ " + r, style=label.style_label_up, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
-if barstate.isconfirmed and sellTrigger and barBear and not buySignal
+if barstate.isconfirmed and sellTrigger and barBear and not sellSignal
     string r = ""
     r += strongBear ? "" : "body "
     r += notWeakSell ? "" : "wick "
@@ -1793,6 +1838,11 @@ var label tpsl_slL  = na
 var label tpsl_tp1L = na
 var label tpsl_tp2L = na
 var label tpsl_tp3L = na
+// v3.5.16: optional bands around each level (display only).
+var box   tpsl_slZ  = na
+var box   tpsl_tp1Z = na
+var box   tpsl_tp2Z = na
+var box   tpsl_tp3Z = na
 
 var float activeSlPx  = na
 var float activeTp1Px = na
@@ -1870,6 +1920,18 @@ if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or buySignal or s
     if not na(tpsl_tp3L)
         label.delete(tpsl_tp3L)
         tpsl_tp3L := na
+    if not na(tpsl_slZ)
+        box.delete(tpsl_slZ)
+        tpsl_slZ := na
+    if not na(tpsl_tp1Z)
+        box.delete(tpsl_tp1Z)
+        tpsl_tp1Z := na
+    if not na(tpsl_tp2Z)
+        box.delete(tpsl_tp2Z)
+        tpsl_tp2Z := na
+    if not na(tpsl_tp3Z)
+        box.delete(tpsl_tp3Z)
+        tpsl_tp3Z := na
     activeSlPx   := na
     activeTp1Px  := na
     activeTp3Px  := na
@@ -1898,6 +1960,12 @@ if buySignal
         tpsl_tp1L := label.new(endBar, buyTp1,  " TP1 " + str.tostring(buyTp1, format.mintick) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
         tpsl_tp2L := label.new(endBar, buyTp2,  " TP2 " + str.tostring(buyTp2, format.mintick) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
         tpsl_tp3L := label.new(endBar, buyTp3,  " TP3 " + str.tostring(buyTp3, format.mintick) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        if i_zoneShow
+            zh = atr14 * i_zoneAtr
+            tpsl_slZ  := box.new(bar_index, buySLpx + zh, endBar, buySLpx - zh, bgcolor=color.new(#FF3366, 85), border_color=color.new(#FF3366, 60))
+            tpsl_tp1Z := box.new(bar_index, buyTp1 + zh, endBar, buyTp1 - zh, bgcolor=color.new(#00FF88, 85), border_color=color.new(#00FF88, 60))
+            tpsl_tp2Z := box.new(bar_index, buyTp2 + zh, endBar, buyTp2 - zh, bgcolor=color.new(#FFD700, 85), border_color=color.new(#FFD700, 60))
+            tpsl_tp3Z := box.new(bar_index, buyTp3 + zh, endBar, buyTp3 - zh, bgcolor=color.new(#FF9500, 85), border_color=color.new(#FF9500, 60))
 
 if sellSignal
     activeSlPx   := sellSLpx
@@ -1919,6 +1987,12 @@ if sellSignal
         tpsl_tp1L := label.new(endBar, sellTp1,  " TP1 " + str.tostring(sellTp1, format.mintick) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
         tpsl_tp2L := label.new(endBar, sellTp2,  " TP2 " + str.tostring(sellTp2, format.mintick) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
         tpsl_tp3L := label.new(endBar, sellTp3,  " TP3 " + str.tostring(sellTp3, format.mintick) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        if i_zoneShow
+            zh = atr14 * i_zoneAtr
+            tpsl_slZ  := box.new(bar_index, sellSLpx + zh, endBar, sellSLpx - zh, bgcolor=color.new(#FF3366, 85), border_color=color.new(#FF3366, 60))
+            tpsl_tp1Z := box.new(bar_index, sellTp1 + zh, endBar, sellTp1 - zh, bgcolor=color.new(#00FF88, 85), border_color=color.new(#00FF88, 60))
+            tpsl_tp2Z := box.new(bar_index, sellTp2 + zh, endBar, sellTp2 - zh, bgcolor=color.new(#FFD700, 85), border_color=color.new(#FFD700, 60))
+            tpsl_tp3Z := box.new(bar_index, sellTp3 + zh, endBar, sellTp3 - zh, bgcolor=color.new(#FF9500, 85), border_color=color.new(#FF9500, 60))
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SIGNAL LABELS
@@ -1956,7 +2030,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.15 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.16 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
