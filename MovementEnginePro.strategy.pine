@@ -1,8 +1,26 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.17 (HTF repaint fix)
+// © ME Institutional — Movement Engine Pro v3.5.18 (trade-numbered levels)
 //@version=6
-strategy("ME Pro Strategy v3.5.17", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.18", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.18 CHANGELOG — LEVELS CARRY THEIR TRADE NUMBER (display only)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "TP3 moved to 4399 after it got hit". It did not. A drawn TP line
+// is never repositioned — only the SL is, and only to breakeven. What happened:
+// TP3 was hit, the engine deleted the whole plan and closed tracking, and a new
+// signal opened moments later. That new trade recomputes its targets from the
+// CURRENT volume profile, and the value area high had risen with the rally, so
+// its VAH-based TP3 landed a few points above the old one.
+//
+// Correct behavior, but the chart gave no way to tell two trades apart: both
+// render as an orange TP3 line at a similar price. Every TP/SL/BE label now
+// carries the signal number (" TP3 #12 4399.00 VAH"), so a new plan is
+// unmistakably a new plan. The number is the same monotonic counter the alert
+// payload already sends as "seq", so chart and webhook agree on trade identity.
+//
+// Display only — no gate, level or signal changes.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.17 CHANGELOG — SECOND REPAINT SOURCE (HTF security)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1887,6 +1905,13 @@ var box   tpsl_tp1Z = na
 var box   tpsl_tp2Z = na
 var box   tpsl_tp3Z = na
 
+// v3.5.18: every TP/SL label carries the signal number. When a trade closes
+// at TP3 and a fresh signal opens moments later, its targets are recomputed
+// from the CURRENT profile — so a VAH-based TP can land a few points from the
+// old one and look exactly like a target that moved. It never moves; only the
+// SL does, and only to breakeven. The number makes a new plan unmistakable.
+sigTag = " #" + str.tostring(sigSeq) + " "
+
 var float activeSlPx  = na
 var float activeTp1Px = na
 var float activeTp3Px = na
@@ -1928,7 +1953,7 @@ if barstate.isconfirmed and tp1HitNow and not slFirstAmbiguous
             line.set_y2(tpsl_sl, activeEntryPx)
         if not na(tpsl_slL)
             label.set_y(tpsl_slL, activeEntryPx)
-            label.set_text(tpsl_slL, " BE  " + str.tostring(activeEntryPx, format.mintick))
+            label.set_text(tpsl_slL, " BE  " + sigTag + str.tostring(activeEntryPx, format.mintick))
 if barstate.isconfirmed and tp3HitNow and not slHitNow
     lastSlHit := false
 if barstate.isconfirmed and slHitNow and not activeTp1Hit
@@ -1999,10 +2024,10 @@ if buySignal
         tpsl_tp1  := line.new(bar_index, buyTp1,  endBar, buyTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, buyTp2,  endBar, buyTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, buyTp3,  endBar, buyTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
-        tpsl_slL  := label.new(endBar, buySLpx, buyStopTxt  + str.tostring(buySLpx, format.mintick),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
-        tpsl_tp1L := label.new(endBar, buyTp1,  " TP1 " + str.tostring(buyTp1, format.mintick) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp2L := label.new(endBar, buyTp2,  " TP2 " + str.tostring(buyTp2, format.mintick) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp3L := label.new(endBar, buyTp3,  " TP3 " + str.tostring(buyTp3, format.mintick) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        tpsl_slL  := label.new(endBar, buySLpx, buyStopTxt  + sigTag + str.tostring(buySLpx, format.mintick),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_tp1L := label.new(endBar, buyTp1,  " TP1" + sigTag + str.tostring(buyTp1, format.mintick) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp2L := label.new(endBar, buyTp2,  " TP2" + sigTag + str.tostring(buyTp2, format.mintick) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp3L := label.new(endBar, buyTp3,  " TP3" + sigTag + str.tostring(buyTp3, format.mintick) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
         if i_zoneShow
             zh = atr14 * i_zoneAtr
             tpsl_slZ  := box.new(bar_index, buySLpx + zh, endBar, buySLpx - zh, bgcolor=color.new(#FF3366, 85), border_color=color.new(#FF3366, 60))
@@ -2026,10 +2051,10 @@ if sellSignal
         tpsl_tp1  := line.new(bar_index, sellTp1,  endBar, sellTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, sellTp2,  endBar, sellTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, sellTp3,  endBar, sellTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
-        tpsl_slL  := label.new(endBar, sellSLpx, sellStopTxt + str.tostring(sellSLpx, format.mintick),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
-        tpsl_tp1L := label.new(endBar, sellTp1,  " TP1 " + str.tostring(sellTp1, format.mintick) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp2L := label.new(endBar, sellTp2,  " TP2 " + str.tostring(sellTp2, format.mintick) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
-        tpsl_tp3L := label.new(endBar, sellTp3,  " TP3 " + str.tostring(sellTp3, format.mintick) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        tpsl_slL  := label.new(endBar, sellSLpx, sellStopTxt + sigTag + str.tostring(sellSLpx, format.mintick),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_tp1L := label.new(endBar, sellTp1,  " TP1" + sigTag + str.tostring(sellTp1, format.mintick) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp2L := label.new(endBar, sellTp2,  " TP2" + sigTag + str.tostring(sellTp2, format.mintick) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp3L := label.new(endBar, sellTp3,  " TP3" + sigTag + str.tostring(sellTp3, format.mintick) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
         if i_zoneShow
             zh = atr14 * i_zoneAtr
             tpsl_slZ  := box.new(bar_index, sellSLpx + zh, endBar, sellSLpx - zh, bgcolor=color.new(#FF3366, 85), border_color=color.new(#FF3366, 60))
@@ -2042,9 +2067,9 @@ if sellSignal
 // ═══════════════════════════════════════════════════════════════════════════════
 
 if buySignal
-    label.new(bar_index, low - atr14 * 0.8, "BUY", style=label.style_label_up, color=color.new(i_buyCol, 5), textcolor=color.rgb(0, 0, 0), size=size.normal)
+    label.new(bar_index, low - atr14 * 0.8, "BUY #" + str.tostring(sigSeq), style=label.style_label_up, color=color.new(i_buyCol, 5), textcolor=color.rgb(0, 0, 0), size=size.normal)
 if sellSignal
-    label.new(bar_index, high + atr14 * 0.8, "SELL", style=label.style_label_down, color=color.new(i_sellCol, 5), textcolor=color.white, size=size.normal)
+    label.new(bar_index, high + atr14 * 0.8, "SELL #" + str.tostring(sigSeq), style=label.style_label_down, color=color.new(i_sellCol, 5), textcolor=color.white, size=size.normal)
 
 barcolor(i_barTint and ofBull ? color.new(i_buyCol, 80) : i_barTint and ofBear ? color.new(i_sellCol, 80) : na)
 
@@ -2073,7 +2098,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.17 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.18 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
