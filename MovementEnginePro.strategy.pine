@@ -1,8 +1,33 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.14 (explicit frequency/quality dial)
+// © ME Institutional — Movement Engine Pro v3.5.15 (TP ordering fix)
 //@version=6
-strategy("ME Pro Strategy v3.5.14", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.15", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.15 CHANGELOG — TARGETS WERE NOT IN ORDER (present since v3.4.1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported from a live XAUUSD chart: TP1 4395.11, TP2 4357.82, TP3 4362.49 on a
+// LONG. TP1 was the furthest target, not the nearest.
+//
+// f_tpLevels fills the three slots from structure levels first, then pads any
+// remainder with R-multiple fallbacks — but it never sorted the two sets
+// TOGETHER. With exactly one qualifying structure level (here the VAH at 5.5R)
+// that level took TP1, and the 1.5R and 2R fallbacks landed below it as TP2 and
+// TP3. Any signal with one or two structure candidates could invert this way.
+//
+// Consequences beyond a confusing chart:
+//   • The scale-out plan was backwards — a third of the position sized for the
+//     nearest target was actually assigned the furthest.
+//   • The breakeven move keys off TP1. With TP1 at 5.5R it would essentially
+//     never arm, so the de-risk the engine advertises never happened.
+//   • activeTp3Px sat NEARER than activeTp1Px, so tracking closed on the 2R
+//     level while TP1 was still unreached — the trade silently resolved on what
+//     the chart called TP3.
+//   • The strategy build issued its three exits in the wrong sequence.
+//
+// The three are now sorted in the trade's direction with their tags following
+// them. Which levels get chosen is unchanged; only their order is fixed.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.14 CHANGELOG — FREQUENCY IS NOW A DIAL, NOT A SIDE EFFECT
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1511,7 +1536,26 @@ f_tpLevels(bool _isBuy, float _entry, float _risk) =>
     tag1 = n >= 1 ? (not na(lvl) and array.get(cands, 0) == lvl ? lt : " Pivot") : " " + str.tostring(effTp1R) + "R"
     tag2 = n >= 2 ? (not na(lvl) and array.get(cands, 1) == lvl ? lt : " Pivot") : " " + str.tostring(effTp2R) + "R"
     tag3 = n >= 3 ? (not na(lvl) and array.get(cands, 2) == lvl ? lt : " Pivot") : " " + str.tostring(effTp3R) + "R"
-    [tp1, tp2, tp3, tag1, tag2, tag3]
+    // v3.5.15 ORDERING FIX. Structure candidates fill the slots first and any
+    // remainder falls back to R-multiples — but the two sets were never sorted
+    // TOGETHER, so a lone distant structure level took TP1 while the nearer
+    // R-multiples sat below it. Seen live on XAUUSD: TP1 4395.11 (VAH, 5.5R),
+    // TP2 4357.82 (1.5R), TP3 4362.49 (2R) — the scale-out plan inverted, and
+    // because the breakeven move keys off TP1 it would essentially never arm.
+    // Order the final three in the trade's direction, tags following values.
+    float[]  tpV = array.from(tp1, tp2, tp3)
+    string[] tpT = array.from(tag1, tag2, tag3)
+    for a = 0 to 1
+        for b = a + 1 to 2
+            vA = array.get(tpV, a)
+            vB = array.get(tpV, b)
+            if _isBuy ? vB < vA : vB > vA
+                array.set(tpV, a, vB)
+                array.set(tpV, b, vA)
+                tmpT = array.get(tpT, a)
+                array.set(tpT, a, array.get(tpT, b))
+                array.set(tpT, b, tmpT)
+    [array.get(tpV, 0), array.get(tpV, 1), array.get(tpV, 2), array.get(tpT, 0), array.get(tpT, 1), array.get(tpT, 2)]
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SIGNAL GENERATION
@@ -1912,7 +1956,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.14 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.15 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
