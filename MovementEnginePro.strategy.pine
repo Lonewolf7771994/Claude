@@ -1,23 +1,46 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.18 (trade-numbered levels)
+// © ME Institutional — Movement Engine Pro v3.5.19 (bar_index stride repaint fix)
 //@version=6
-strategy("ME Pro Strategy v3.5.18", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.19", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.19 CHANGELOG — THIRD REPAINT SOURCE (FRVP stride keyed to bar_index)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "I did take the third TP, then it changed to TP3 4399." The v3.5.18
+// note below blamed this on a second trade being drawn. That was wrong. The
+// chart settled it: ONE plan, entry 4343.830, TP1 4357.822 (1.5R) and TP2
+// 4362.486 (2R) identical across both renders — while TP3, tagged VAH, read
+// 4395.110 on one and 4399.366 on the next. A second trade would have moved the
+// entry and all three targets. Only the structure-anchored one moved.
+//
+// Cause: the volume profile rebuilt on `bar_index % i_frvpEvery == 0`.
+// bar_index is counted from the first bar the CHART HAS LOADED, not from a
+// fixed origin, so a different history depth — scrolling back, a reload, a
+// settings change — shifts every index by a constant and the modulo then picks
+// a DIFFERENT set of bars to snapshot the profile on. POC/VAH/VAL at any given
+// bar therefore differ between two renders of the same chart, and any target
+// anchored to them moves with it. TP1/TP2 are pure R-multiples off entry and
+// stop and were never exposed; only VAH/VAL-tagged targets were.
+//
+// This is the third repaint source found in this engine, after the FRVP
+// `barstate.islast` rebuild (v3.5.11) and the HTF `request.security` returning
+// the developing bar (v3.5.17). It survived v3.5.11 because the fix's own
+// comment asserted "the stride alone is deterministic" without checking what
+// bar_index is anchored to.
+//
+// Fix: the stride is now keyed to the bar's open time divided by the timeframe
+// — an absolute quantity identical on every render — so the same bars always
+// carry the rebuild no matter how much history is loaded.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.18 CHANGELOG — LEVELS CARRY THEIR TRADE NUMBER (display only)
 // ─────────────────────────────────────────────────────────────────────────────
-// Reported: "TP3 moved to 4399 after it got hit". It did not. A drawn TP line
-// is never repositioned — only the SL is, and only to breakeven. What happened:
-// TP3 was hit, the engine deleted the whole plan and closed tracking, and a new
-// signal opened moments later. That new trade recomputes its targets from the
-// CURRENT volume profile, and the value area high had risen with the rally, so
-// its VAH-based TP3 landed a few points above the old one.
-//
-// Correct behavior, but the chart gave no way to tell two trades apart: both
-// render as an orange TP3 line at a similar price. Every TP/SL/BE label now
-// carries the signal number (" TP3 #12 4399.00 VAH"), so a new plan is
-// unmistakably a new plan. The number is the same monotonic counter the alert
-// payload already sends as "seq", so chart and webhook agree on trade identity.
+// Added while diagnosing the report that v3.5.19 above actually fixes. The
+// diagnosis in this entry was wrong — see v3.5.19 — but the change stands on
+// its own: every TP/SL/BE label and every BUY/SELL arrow now carries the signal
+// number (" TP3 #12 4399.00 VAH", "BUY #12"), so two plans can never be
+// confused for one moving plan. The number is the same monotonic counter the
+// alert payload already sends as "seq", so chart and webhook agree on identity.
 //
 // Display only — no gate, level or signal changes.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1350,10 +1373,28 @@ frvpReady  = bar_index >= i_frvpLen and not na(frvpHigh) and not na(frvpLow)
 // real time and what the chart redrew on reload. VAH/VAL are TP candidates, and
 // since v3.5.8 the reward gate decides the signal from TP1 — so a signal could
 // appear live and disappear on reload. That is repainting, in a script that
-// claims not to. The stride alone is deterministic: identical live and on
-// reload, at the cost of the profile lagging up to i_frvpEvery-1 bars (set the
-// input to 1 for fresh-every-bar, which is also deterministic, just slower).
-frvpRecalc = barstate.isconfirmed and frvpReady and bar_index % i_frvpEvery == 0
+// claims not to.
+//
+// v3.5.19 THIRD REPAINT FIX. The v3.5.11 note above went on to claim "the
+// stride alone is deterministic: identical live and on reload". It is not, and
+// this is the bug that claim hid. bar_index counts from the FIRST BAR THE CHART
+// HAS LOADED — not from any fixed origin. Scrolling back, reloading, changing a
+// setting or simply getting a different history depth shifts every bar's index
+// by the same offset, so bar_index % i_frvpEvery == 0 selects an entirely
+// DIFFERENT set of bars to rebuild the profile on. POC/VAH/VAL at any given bar
+// then differ between two renders of the same chart.
+//
+// Seen live on XAUUSD 15m: one trade, entry 4343.830, TP1 4357.822 (1.5R) and
+// TP2 4362.486 (2R) identical across both renders because they are pure
+// arithmetic off entry and stop — while TP3, tagged VAH, read 4395.110 on one
+// render and 4399.366 on the next. Only the structure-anchored target moved,
+// which is the signature of this bug.
+//
+// The stride is now keyed to the bar's OPEN TIME divided by the timeframe —
+// an absolute quantity that is the same on every render regardless of how much
+// history is loaded — so the same bars always carry the rebuild.
+frvpBarNo  = int(time / (math.max(timeframe.in_seconds(), 1) * 1000))
+frvpRecalc = barstate.isconfirmed and frvpReady and frvpBarNo % i_frvpEvery == 0
 
 if frvpRecalc
     array.clear(volBins)
@@ -2098,7 +2139,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.18 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.19 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
