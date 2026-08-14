@@ -1,8 +1,40 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.19 (bar_index stride repaint fix)
+// © ME Institutional — Movement Engine Pro v3.5.20 (TP reach cap)
 //@version=6
-strategy("ME Pro Strategy v3.5.19", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.20", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.20 CHANGELOG — TP REACH CAP, OPT-IN AND OFF BY DEFAULT
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "didn't hit TP3 at the 4399 it put in the spot."
+//
+// Real asymmetry found: f_tpLevels accepts a structure candidate (pivot / VAH /
+// VAL) at ANY distance — the only test is that the level sits the correct side
+// of entry. Scalp meanwhile clamps its R-multiple fallbacks to 1.0/1.5/2.0R, so
+// the engine enforces a ceiling on one source of targets and none on the other,
+// and a VAH can hand a 15-minute scalp a 6R runner.
+//
+// The obvious fix — cap structure targets at the mode's own TP3 — was built,
+// simulated against the reported trade, and REJECTED as the default:
+//   entry 4343.830, risk 9.328, TP3 tagged VAH at 4399.366 = 5.95R
+//   price ran to 4397.0 = 5.70R, missing the target by 0.25R (2.4 points)
+//   reported exit 4395.0 = 5.49R
+// The target was not unreachable. Capping at Scalp's 2R would have closed the
+// runner at 4362 and surrendered a move that paid 5.49R. On the only trade
+// there is evidence for, the cap loses money.
+//
+// So the cap ships as i_maxTpR, DEFAULT 0 = OFF: behaviour is identical to
+// v3.5.19 unless it is deliberately switched on. It is a right-tail versus
+// fill-rate trade-off and there is no backtest to settle it — a single trade
+// is not evidence either way, and it happens to argue against capping.
+//
+// Also found while simulating, NOT yet changed: the minGap merge that keeps two
+// targets from landing on top of each other runs over structure candidates
+// only. R-multiple fallbacks are not gap-checked against them, so a fallback
+// can land within a fraction of a point of a structure level and collapse the
+// scale-out. Left alone deliberately — fixing it changes level selection on
+// every trade in every mode, which is not something to ship untested on top of
+// a repaint fix. Logged for a version of its own.
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.19 CHANGELOG — THIRD REPAINT SOURCE (FRVP stride keyed to bar_index)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -779,6 +811,9 @@ i_tpslShow   = input.bool(true, "Show TP / SL Lines",
 i_tp1R       = input.float(1.5, "TP1 (R-multiple fallback)", minval=0.5, maxval=10.0, step=0.5, group=G_TPSL)
 i_tp2R       = input.float(2.5, "TP2 (R-multiple fallback)", minval=0.5, maxval=20.0, step=0.5, group=G_TPSL)
 i_tp3R       = input.float(4.0, "TP3 (R-multiple fallback)", minval=0.5, maxval=30.0, step=0.5, group=G_TPSL)
+i_maxTpR     = input.float(0.0, "Max TP Distance (× risk, 0 = off)", minval=0.0, maxval=30.0, step=0.5, group=G_TPSL,
+     tooltip="v3.5.20: a structure target (pivot / VAH / VAL) further than this many multiples of the stop distance is DISCARDED and that slot falls back to its R-multiple. 0 = OFF, which is the default and matches every previous version.\nStructure levels are otherwise accepted at ANY distance — the only test is that the level sits the right side of entry. Scalp clamps its R-multiple fallbacks to 1.0/1.5/2.0R, so a VAH can hand a 15-minute scalp a 6R runner and the mode's own ceiling is bypassed. That asymmetry is real.\nBUT DO NOT ASSUME CAPPING HELPS. On the trade that prompted this (XAUUSD 15m, entry 4343.830, risk 9.328, TP3 tagged VAH at 4399.366 = 5.95R) price ran to 4397 = 5.70R and missed the target by 0.25R. Capping at the mode's 2R would have closed the runner at 4362 and given up a move that reached 5.49R at the reported exit. On that sample the cap LOSES money.\nThis is a right-tail-versus-fill-rate trade-off and no backtest has been run to settle it. Off by default for that reason. If you enable it, measure profit factor before and after over the same range — win rate will rise and expectancy may well fall."
+     )
 i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200, group=G_TPSL)
 i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5.0, step=0.1,
      tooltip="v3.5.8: TP1 must sit at least this many multiples of the stop distance away, or the setup is skipped (reports as 'rr' in Last Block). 0 disables.\nThe engine has always bounded RISK and never once checked REWARD. TP1 is simply the nearest structure level above entry, so it can be a fraction of the stop distance away — and since TP1 also triggers the breakeven move, a too-close first target turns trades into scratches: a third off for a few ticks, stop to entry, brushed out of the rest.\nRaising this demands better setups and cuts signal count; lower it if you want closer first targets.",
@@ -1640,26 +1675,32 @@ riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk and sellRiskDist <= riskAtr
 // ═══════════════════════════════════════════════════════════════════════════════
 
 f_tpLevels(bool _isBuy, float _entry, float _risk) =>
+    // v3.5.20 REACH CAP. Structure candidates were accepted at ANY distance —
+    // the only test was that the level sat the right side of entry. Scalp
+    // clamps its R-multiple fallbacks to 1.0/1.5/2.0R, so a VAH handing it a
+    // 6R target broke the mode's own ceiling. Anything beyond the cap is
+    // dropped here and the slot falls back to its R-multiple.
+    float maxDist = i_maxTpR > 0 ? _risk * i_maxTpR : 1.0e12
     float[] raw = array.new_float(0)
     if _isBuy
-        if not na(ph1) and ph1 > _entry
+        if not na(ph1) and ph1 > _entry and ph1 - _entry <= maxDist
             array.push(raw, ph1)
-        if not na(ph2) and ph2 > _entry
+        if not na(ph2) and ph2 > _entry and ph2 - _entry <= maxDist
             array.push(raw, ph2)
-        if not na(ph3) and ph3 > _entry
+        if not na(ph3) and ph3 > _entry and ph3 - _entry <= maxDist
             array.push(raw, ph3)
-        if not na(vahPrice) and vahPrice > _entry
+        if not na(vahPrice) and vahPrice > _entry and vahPrice - _entry <= maxDist
             array.push(raw, vahPrice)
         if array.size(raw) > 1
             array.sort(raw, order.ascending)
     else
-        if not na(pl1) and pl1 < _entry
+        if not na(pl1) and pl1 < _entry and _entry - pl1 <= maxDist
             array.push(raw, pl1)
-        if not na(pl2) and pl2 < _entry
+        if not na(pl2) and pl2 < _entry and _entry - pl2 <= maxDist
             array.push(raw, pl2)
-        if not na(pl3) and pl3 < _entry
+        if not na(pl3) and pl3 < _entry and _entry - pl3 <= maxDist
             array.push(raw, pl3)
-        if not na(valPrice) and valPrice < _entry
+        if not na(valPrice) and valPrice < _entry and _entry - valPrice <= maxDist
             array.push(raw, valPrice)
         if array.size(raw) > 1
             array.sort(raw, order.descending)
@@ -2139,7 +2180,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.19 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.20 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
