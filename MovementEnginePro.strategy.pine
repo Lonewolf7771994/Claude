@@ -1,8 +1,27 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.21 (TP spacing)
+// © ME Institutional — Movement Engine Pro v3.5.22 (portable spread buffer)
 //@version=6
-strategy("ME Pro Strategy v3.5.21", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.22", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.22 CHANGELOG — SPREAD BUFFER IN ATR UNITS (portability across symbols)
+// ─────────────────────────────────────────────────────────────────────────────
+// The v3.5.16 spread buffer was absolute price only. That does not survive a
+// change of instrument: 0.30 is roughly 3% of a scalp stop on gold at 4,400 and
+// rounding error on BTC at 100,000, so one input silently meant different
+// things per symbol and a setting carried from gold to crypto quietly stopped
+// modelling anything.
+//
+// Adds i_spreadMode. "Price" is the original behaviour and remains the default,
+// so nothing changes unless it is switched. "× ATR" measures the buffer in the
+// instrument's own volatility, so a single setting is correct on every symbol
+// and timeframe.
+//
+// This is a units fix, not a tuning change — no threshold was guessed at and no
+// signal logic moved. It is the only code change needed to run this engine on
+// crypto; everything else that differs (24/7 sessions, no news windows) is
+// already handled by inputs that default to off.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.21 CHANGELOG — TP SPACING (R-multiples vs structure levels)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -839,9 +858,12 @@ i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200,
 i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5.0, step=0.1,
      tooltip="v3.5.8: TP1 must sit at least this many multiples of the stop distance away, or the setup is skipped (reports as 'rr' in Last Block). 0 disables.\nThe engine has always bounded RISK and never once checked REWARD. TP1 is simply the nearest structure level above entry, so it can be a fraction of the stop distance away — and since TP1 also triggers the breakeven move, a too-close first target turns trades into scratches: a third off for a few ticks, stop to entry, brushed out of the rest.\nRaising this demands better setups and cuts signal count; lower it if you want closer first targets.",
      group=G_TPSL)
-i_spreadBuf  = input.float(0.0, "Spread + Slippage Buffer (price)", minval=0.0, step=0.01,
-     tooltip="v3.5.16: pushes the stop this far FURTHER from entry, in price units, and the reported risk grows to match.\nNothing in the engine modelled spread until now: the stop sat exactly on the structural level, so on a symbol with any spread the level could be taken out by the quote alone while the traded price never reached it. On XAUUSD a 0.30 spread against a 9-point scalp stop is ~3% of risk; on a tighter stop it is worse.\nSet it to your broker's typical spread plus expected slippage (gold ~0.20-0.50, majors ~0.00010-0.00020). 0 = off, and the engine behaves exactly as before.\nOnly the STOP is buffered. Targets are left alone: widening them would flatter the plan rather than protect it.",
+i_spreadBuf  = input.float(0.0, "Spread + Slippage Buffer", minval=0.0, step=0.01,
+     tooltip="v3.5.16: pushes the stop this far FURTHER from entry, and the reported risk grows to match.\nNothing in the engine modelled spread until now: the stop sat exactly on the structural level, so on a symbol with any spread the level could be taken out by the quote alone while the traded price never reached it. On XAUUSD a 0.30 spread against a 9-point scalp stop is ~3% of risk; on a tighter stop it is worse.\nUnits are set by 'Buffer Units' below. 0 = off, and the engine behaves exactly as before.\nOnly the STOP is buffered. Targets are left alone: widening them would flatter the plan rather than protect it.",
      group=G_TPSL)
+i_spreadMode = input.string("Price", "Buffer Units", options=["Price", "× ATR"], group=G_TPSL,
+     tooltip="v3.5.22: what the buffer above is measured in.\n'Price' — absolute price units, the original behaviour. Gold ~0.20-0.50, FX majors ~0.00010-0.00020. Correct only for the symbol you set it on: 0.30 is ~3% of a scalp stop on gold at 4,400 and rounding error on BTC at 100,000, so the same number silently means different things per instrument.\n'× ATR' — a multiple of the current ATR, so one setting transfers across every symbol and timeframe. Start around 0.03-0.05 ATR for a liquid instrument and raise it if your fills are consistently worse than the drawn stop.\nUse '× ATR' whenever you run the same settings on more than one market."
+     )
 i_zoneShow   = input.bool(false, "Draw TP / SL As Zones",
      tooltip="v3.5.16: renders a band around each level instead of a bare line. A price level is never exact in practice — spread, slippage and the tick you actually get all sit around it — and a hairline encourages precision the fill will not honour.\nBand height is set below. Display only; it changes no signal and no level.",
      group=G_TPSL)
@@ -1673,8 +1695,14 @@ sellClamped  = sellSLbase != sellSLraw
 // quote while the traded price never reached it. Push the stop out by the
 // buffer and let the reported risk grow to match — an honest R beats a
 // flattering one. Targets are deliberately NOT buffered.
-buySLpx   = buySLbase  - i_spreadBuf
-sellSLpx  = sellSLbase + i_spreadBuf
+// v3.5.22: the buffer was absolute price only, which does not survive a change
+// of instrument. 0.30 is ~3% of a scalp stop on gold at 4,400 and meaningless
+// on BTC at 100,000 — the same input silently means different things per
+// symbol. "× ATR" expresses it in the instrument's own volatility instead, so
+// one setting is correct everywhere.
+spreadPx  = i_spreadMode == "× ATR" ? atr14 * i_spreadBuf : i_spreadBuf
+buySLpx   = buySLbase  - spreadPx
+sellSLpx  = sellSLbase + spreadPx
 buyStopTxt   = buyClamped  ? " SL~ " : " SL  "
 sellStopTxt  = sellClamped ? " SL~ " : " SL  "
 
@@ -2237,7 +2265,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.21 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.22 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
