@@ -1,8 +1,38 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.23 (invalidation exit)
+// © ME Institutional — Movement Engine Pro v3.5.24 (invalidation anchored to entry)
 //@version=6
-strategy("ME Pro Strategy v3.5.23", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.24", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.24 CHANGELOG — INVALIDATION MEASURED AS DEGRADATION FROM ENTRY
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.23 compared a live trade's confluence against a fixed threshold. That
+// broke Scalp outright, and the report was immediate: "healthy trade: no — it
+// makes it useless in scalp."
+//
+// Correct. Scalp bypasses the HTF/VWAP/FRVP gates deliberately —
+//   modePassBull = i_mode == "Aggressive" ? true : isScalp ? notExtended : (...)
+// and effMinConf falls to 0 in Scalp/High — so a Scalp trade may legitimately
+// enter at 0/3 confluence. Judging it afterwards against those same three legs
+// closed it for a thesis it never claimed: entered on a sweep, killed by an HTF
+// bias the setup was never asked to have. On a trending 15m chart that fires
+// two bars after entry, over and over.
+//
+// The trade's own confluence at entry is now recorded (activeEntryConf) and
+// invalidation additionally requires ownNow < activeEntryConf. A plan can only
+// be invalidated by losing alignment it actually HAD:
+//
+//   entered 0/3 (Scalp/High)  -> can never invalidate on confluence
+//   entered 2/3               -> invalidates only if it drops below 2
+//   entered 3/3 (Strict)      -> the BTCUSD 1D #10 case, still closes
+//
+// Verified against 9 sequences covering Scalp entered at 0/3 with the HTF fully
+// against it, Scalp at 1/3 drifting, Scalp 2/3 collapsing, Strict healthy,
+// Strict pulling back, a one-bar flip that recovers, the observed #10 reading,
+// total collapse, and a short-side flip. All behave as specified.
+//
+// Mirrored in the strategy build (stEntryConf) so backtest and chart agree.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.23 CHANGELOG — INVALIDATION EXIT (the engine now re-reads its own thesis)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2137,6 +2167,9 @@ var float activeSlPx  = na
 var float activeTp1Px = na
 var float activeTp3Px = na
 var float activeEntryPx = na   // v3.5.5: needed for the breakeven move
+// v3.5.24: the trade's OWN confluence at the moment it was taken. Invalidation
+// is measured as DEGRADATION from this, never against an absolute bar.
+var int   activeEntryConf = na
 var bool  tradeBuy    = false
 var bool  activeTp1Hit = false
 var bool  activeAtBe   = false
@@ -2173,6 +2206,15 @@ timeExit = i_maxBars > 0 and not na(tradeStartBar) and not na(activeSlPx) and (b
 // own side has fallen to the ceiling or below, held for i_invalidBars consecutive
 // CLOSED bars, the setup is dead and the plan closes.
 //
+// v3.5.24: invalidation is DEGRADATION FROM ENTRY, never an absolute reading.
+// The first cut compared current confluence against a fixed bar, which broke
+// Scalp outright: Scalp bypasses the HTF/VWAP/FRVP gates on purpose
+// (modePassBull = isScalp ? notExtended : ...) and effMinConf falls to 0, so a
+// Scalp trade may legitimately enter at 0/3. Judging it later by those same
+// three legs closed trades for a thesis they never claimed — entered on a
+// sweep, killed by an HTF bias the setup never required. A trade can now only
+// be invalidated by losing confluence it actually HAD.
+//
 // The own-side ceiling matters more than it looks. buyAligned and sellAligned
 // are NOT mutually exclusive — frvpBullOk and frvpBearOk are both true while
 // price sits inside the value area — so a fully flipped market commonly reads
@@ -2191,7 +2233,9 @@ timeExit = i_maxBars > 0 and not na(tradeStartBar) and not na(activeSlPx) and (b
 // compare before trusting it.
 // ═══════════════════════════════════════════════════════════════════════════════
 var int invalidRun = 0
-invalidLive = not na(activeSlPx) and (tradeBuy ? (sellAligned >= i_invalidConf and buyAligned <= i_invalidOwn) : (buyAligned >= i_invalidConf and sellAligned <= i_invalidOwn))
+ownNow      = tradeBuy ? buyAligned  : sellAligned
+oppNow      = tradeBuy ? sellAligned : buyAligned
+invalidLive = not na(activeSlPx) and not na(activeEntryConf) and oppNow >= i_invalidConf and ownNow <= i_invalidOwn and ownNow < activeEntryConf
 if barstate.isconfirmed
     invalidRun := invalidLive ? invalidRun + 1 : 0
 invalidExit = i_invalidExit and not na(activeSlPx) and invalidRun >= i_invalidBars
@@ -2270,6 +2314,7 @@ if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or invalidExit or
     activeTp1Px  := na
     activeTp3Px  := na
     activeEntryPx := na
+    activeEntryConf := na
     activeTp1Hit := false
     activeAtBe   := false
     tradeStartBar := na
@@ -2280,6 +2325,7 @@ if buySignal
     activeTp1Px  := buyTp1
     activeTp3Px  := buyTp3
     activeEntryPx := close
+    activeEntryConf := buyAligned
     activeTp1Hit := false
     activeAtBe   := false
     tradeStartBar := bar_index
@@ -2308,6 +2354,7 @@ if sellSignal
     activeTp1Px  := sellTp1
     activeTp3Px  := sellTp3
     activeEntryPx := close
+    activeEntryConf := sellAligned
     activeTp1Hit := false
     activeAtBe   := false
     tradeStartBar := bar_index
@@ -2367,7 +2414,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.23 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.24 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -2493,6 +2540,8 @@ var float stTp2     = na
 var float stTp3     = na
 var bool  stTp1Done = false
 var int   stStartBar = na
+var int   stInvalidRun = 0
+var int   stEntryConf  = na
 
 stRiskDist = buySignal ? buyRiskDist : sellSignal ? sellRiskDist : na
 stQty      = not na(stRiskDist) and stRiskDist > 0 ? (strategy.equity * i_stRiskPct / 100.0) / stRiskDist : na
@@ -2505,6 +2554,8 @@ if buySignal and not na(stQty)
     stTp3     := buyTp3
     stTp1Done := false
     stStartBar := bar_index
+    stEntryConf := buyAligned
+    stInvalidRun := 0
     strategy.entry("Long", strategy.long, qty=stQty)
 
 if sellSignal and not na(stQty)
@@ -2515,6 +2566,8 @@ if sellSignal and not na(stQty)
     stTp3     := sellTp3
     stTp1Done := false
     stStartBar := bar_index
+    stEntryConf := sellAligned
+    stInvalidRun := 0
     strategy.entry("Short", strategy.short, qty=stQty)
 
 // Breakeven after TP1 trades — mirrors the indicator's i_beAfterTp1 behavior.
@@ -2542,8 +2595,9 @@ if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar
 // v3.5.23 invalidation exit — mirrors the indicator's rule so the backtest
 // measures the same behaviour the chart draws. Position side is read from the
 // strategy rather than the indicator's tradeBuy so the two can never drift.
-var int stInvalidRun = 0
-stInvalidLive = strategy.position_size > 0 ? (sellAligned >= i_invalidConf and buyAligned <= i_invalidOwn) : strategy.position_size < 0 ? (buyAligned >= i_invalidConf and sellAligned <= i_invalidOwn) : false
+stOwnNow  = strategy.position_size > 0 ? buyAligned  : sellAligned
+stOppNow  = strategy.position_size > 0 ? sellAligned : buyAligned
+stInvalidLive = strategy.position_size != 0 and not na(stEntryConf) and stOppNow >= i_invalidConf and stOwnNow <= i_invalidOwn and stOwnNow < stEntryConf
 if barstate.isconfirmed
     stInvalidRun := stInvalidLive ? stInvalidRun + 1 : 0
 if i_invalidExit and strategy.position_size != 0 and stInvalidRun >= i_invalidBars

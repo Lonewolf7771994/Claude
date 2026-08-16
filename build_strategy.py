@@ -54,6 +54,8 @@ var float stTp2     = na
 var float stTp3     = na
 var bool  stTp1Done = false
 var int   stStartBar = na
+var int   stInvalidRun = 0
+var int   stEntryConf  = na
 
 stRiskDist = buySignal ? buyRiskDist : sellSignal ? sellRiskDist : na
 stQty      = not na(stRiskDist) and stRiskDist > 0 ? (strategy.equity * i_stRiskPct / 100.0) / stRiskDist : na
@@ -66,6 +68,8 @@ if buySignal and not na(stQty)
     stTp3     := buyTp3
     stTp1Done := false
     stStartBar := bar_index
+    stEntryConf := buyAligned
+    stInvalidRun := 0
     strategy.entry("Long", strategy.long, qty=stQty)
 
 if sellSignal and not na(stQty)
@@ -76,6 +80,8 @@ if sellSignal and not na(stQty)
     stTp3     := sellTp3
     stTp1Done := false
     stStartBar := bar_index
+    stEntryConf := sellAligned
+    stInvalidRun := 0
     strategy.entry("Short", strategy.short, qty=stQty)
 
 // Breakeven after TP1 trades — mirrors the indicator's i_beAfterTp1 behavior.
@@ -103,8 +109,9 @@ if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar
 // v3.5.23 invalidation exit — mirrors the indicator's rule so the backtest
 // measures the same behaviour the chart draws. Position side is read from the
 // strategy rather than the indicator's tradeBuy so the two can never drift.
-var int stInvalidRun = 0
-stInvalidLive = strategy.position_size > 0 ? (sellAligned >= i_invalidConf and buyAligned <= i_invalidOwn) : strategy.position_size < 0 ? (buyAligned >= i_invalidConf and sellAligned <= i_invalidOwn) : false
+stOwnNow  = strategy.position_size > 0 ? buyAligned  : sellAligned
+stOppNow  = strategy.position_size > 0 ? sellAligned : buyAligned
+stInvalidLive = strategy.position_size != 0 and not na(stEntryConf) and stOppNow >= i_invalidConf and stOwnNow <= i_invalidOwn and stOwnNow < stEntryConf
 if barstate.isconfirmed
     stInvalidRun := stInvalidLive ? stInvalidRun + 1 : 0
 if i_invalidExit and strategy.position_size != 0 and stInvalidRun >= i_invalidBars
