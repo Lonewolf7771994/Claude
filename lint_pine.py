@@ -50,6 +50,53 @@ def logical_lines(lines):
     if start is not None:
         yield start, nums, buf
 
+def undefined_names(lines):
+    """Identifiers referenced but never assigned anywhere in the file.
+
+    Added after a clean lint on a file referencing an undefined group constant
+    (G_FILTERS), which is a hard compile error on TradingView. Scoped to the
+    prefixes this project uses for module-level constants so it stays quiet on
+    builtins and locals.
+    """
+    src = "\n".join(lines)
+    clean, i, n, in_s = [], 0, len(src), None
+    while i < n:
+        c = src[i]
+        if in_s:
+            if c == in_s: in_s = None
+            clean.append(" ")
+        elif c in "\"'":
+            in_s = c; clean.append(" ")
+        elif c == "/" and i + 1 < n and src[i+1] == "/":
+            while i < n and src[i] != "\n": i += 1
+            clean.append("\n"); continue
+        else:
+            clean.append(c)
+        i += 1
+    clean = "".join(clean)
+
+    assigned = set(re.findall(r"^\s*([A-Za-z_]\w*)\s*(?::=|=)", clean, re.M))
+    assigned |= set(re.findall(r"^\s*(?:var\s+)?(?:int|float|bool|string|color|line|label|box|table)\s+([A-Za-z_]\w*)", clean, re.M))
+    for grp in re.findall(r"\[([^\]]+)\]\s*=", clean):
+        for nm in grp.split(","):
+            assigned.add(nm.strip().split()[-1] if nm.strip() else "")
+    for params in re.findall(r"^\s*[A-Za-z_]\w*\(([^)]*)\)\s*=>", clean, re.M):
+        for prm in params.split(","):
+            prm = prm.strip()
+            if prm: assigned.add(prm.split()[-1])
+    assigned |= set(re.findall(r"^\s*for\s+([A-Za-z_]\w*)\s*=", clean, re.M))
+
+    out = []
+    for name in sorted(set(re.findall(r"\b((?:G_|i_|eff)\w*)", clean))):
+        if name in assigned: continue
+        for ln, text in enumerate(lines, 1):
+            if text.lstrip().startswith("//"): continue
+            if re.search(r"\b" + re.escape(name) + r"\b", text):
+                out.append((ln, "'%s' referenced but never assigned" % name))
+                break
+    return out
+
+
 def check(path):
     lines = open(path, encoding="utf-8").read().split("\n")
     errs = []
@@ -124,6 +171,8 @@ def check(path):
         u = first_use.get(name)
         if u and u < d and name not in KEYWORDS and name not in BARE:
             errs.append((u, "'%s' used at %d, first defined at %d" % (name, u, d)))
+
+    errs += undefined_names(lines)
 
     return sorted(set(errs))
 

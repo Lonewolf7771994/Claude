@@ -1,8 +1,47 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.24 (invalidation anchored to entry)
+// © ME Institutional — Movement Engine Pro v3.5.25 (degenerate volume detection)
 //@version=6
-strategy("ME Pro Strategy v3.5.24", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.25", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.25 CHANGELOG — DEGENERATE VOLUME DETECTION (Scalp fires nothing on a
+// broker feed)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: Scalp on BTCUSD produced no trades at all, for days, while gold on
+// the same build traded normally.
+//
+// Cause: the volume floor, not the setups. relVol is volume / 20-bar average
+// volume, and Scalp clamps the floor to min(i_volFloor, 1.0) = 1.0. A feed that
+// prints a low baseline with periodic large spikes keeps its own rolling
+// average elevated, so ordinary bars read far below 1.0 permanently and volOk
+// can essentially never be satisfied. That is not filtering — it is a standing
+// veto produced by bad data, and no other gate can compensate.
+//
+// Observed across five screenshots of the same symbol: 0.11x, 0.19x, 0.23x,
+// 0.33x, then 2.88x.
+//
+// The engine already tolerated a symbol with NO volume (volDataSeen). It had no
+// concept of volume that exists but is unusable.
+//
+// Fix: measure whether the floor is passable AT ALL — the share of the last
+// i_volSanityLen bars that could clear it. Below i_volSanityMin, the series
+// cannot support a magnitude test and the FLOOR ALONE is bypassed. The
+// dashboard shows "⚠VOL?" in amber, never green, while that is active.
+//
+// Threshold set from simulation, floor 1.0, 20-bar average, 500-bar window:
+//   healthy (lognormal)     median relVol 0.90, pass-rate 0.41
+//   spiky 1-in-20 at 100x   median relVol 0.17, pass-rate 0.05
+//   spiky 1-in-10 at 30x    median relVol 0.26, pass-rate 0.10
+//   all zero                pass-rate 0.00
+// A first attempt defaulted to 0.05 and would have caught nothing, since the
+// observed feed sits exactly there. Default is 0.15, which separates the two
+// families with margin at both ends.
+//
+// Deliberately narrow: no volume is invented and no other gate is loosened. CVD
+// and FRVP still read the same broken series, which is why the warning is
+// surfaced rather than hidden. This makes the mode usable on a bad feed; it
+// does not make the feed good. A real exchange symbol remains the better fix.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.24 CHANGELOG — INVALIDATION MEASURED AS DEGRADATION FROM ENTRY
 // ─────────────────────────────────────────────────────────────────────────────
@@ -844,6 +883,15 @@ i_volFloor   = input.float(1.2,"Min Relative Volume (× avg)",
      minval=0.5, maxval=5.0, step=0.1,
      tooltip="Signal blocked if volume < this × 20-bar average.",
      group=G_OF)
+i_volSanity  = input.bool(true, "Bypass Volume Floor On Broken Feeds",
+     tooltip="v3.5.25: if almost no recent bar could clear the Min Relative Volume floor, stop applying it.\nrelVol is volume divided by average volume. On a feed that reports near-zero size on most bars with occasional huge spikes, the spikes drag the average up and every ordinary bar reads far below 1.0 — so Scalp's 1.0 floor becomes permanently unpassable and the mode fires nothing at all. That is not filtering, it is a permanent veto caused by bad data.\nMeasured on a broker BTCUSD feed: Rel Volume 0.11x, 0.19x, 0.23x, 0.33x, then 2.88x, with zero Scalp trades for days while gold traded normally on the same build.\nThis bypasses ONLY the magnitude floor, and the dashboard shows a VOL? warning while it is active. No volume is invented and no other gate is loosened — CVD and FRVP still read the same broken series. It keeps the mode usable; it does not make the data trustworthy. Prefer a real exchange feed where you can.",
+     group=G_OF)
+i_volSanityLen = input.int(500, "Volume Sanity Window (bars)", minval=50, maxval=2000,
+     tooltip="v3.5.25: how many recent bars the pass-rate is measured over. Longer is more stable and slower to react to a feed that starts or stops working.",
+     group=G_OF)
+i_volSanityMin = input.float(0.15, "Volume Sanity Min Pass Rate", minval=0.0, maxval=0.5, step=0.01,
+     tooltip="v3.5.25: the share of recent bars that must be ABLE to clear the volume floor for the floor to keep applying. 0.15 = 15%.\nMeasured over simulated series, floor 1.0, 20-bar average, 500-bar window:\n  healthy (lognormal)      median relVol 0.90, pass-rate 0.41\n  spiky 1-in-20 at 100x    median relVol 0.17, pass-rate 0.05\n  spiky 1-in-10 at 30x     median relVol 0.26, pass-rate 0.10\n  all zero                 pass-rate 0.00\nA first cut defaulted to 0.05 and would have caught nothing — the observed broker feed sits exactly there. 0.15 separates the two families with margin at both ends.\nRaise it to bypass the floor more readily; set 0 to disable the detection entirely and always enforce the floor.",
+     group=G_OF)
 i_bodyAtr    = input.float(0.5,"Min Signal Bar Body (× ATR)",
      minval=0.2, maxval=3.0, step=0.05,
      tooltip="Signal bar's body must be at least this fraction of ATR.",
@@ -1096,7 +1144,37 @@ if nz(volume) > 0
 // lifts the divisor it is measured against).
 volAvg = ta.sma(nz(volume[1]), 20)
 relVol = volDataSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
-volOk  = not volDataSeen or relVol >= effVolFloor
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.25 DEGENERATE VOLUME DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+// The engine already tolerated a symbol with NO volume (volDataSeen). It had no
+// defence against BROKEN volume, which is a different and far more common
+// failure: a feed that reports near-zero size on almost every bar and an
+// occasional huge spike. relVol is volume / average(volume), so those rare
+// spikes drag the average up and every ordinary bar then reads far below 1.0.
+// Scalp's floor is min(i_volFloor, 1.0) = 1.0, so the gate becomes permanently
+// unpassable and the mode fires nothing at all.
+//
+// Observed on a broker BTCUSD feed across five separate screenshots: Rel Volume
+// 0.11x, 0.19x, 0.23x, 0.33x, then 2.88x. Scalp produced no trades for days
+// while gold on the same build traded normally. The setups were there; the
+// magnitude test could not be satisfied by that data.
+//
+// Rather than guess at what "bad volume" looks like, measure whether the gate
+// is passable AT ALL: track the share of recent bars that could clear the
+// floor. If almost none can, the series cannot support a magnitude test, and
+// continuing to apply one is not filtering — it is a permanent veto.
+//
+// When that happens the FLOOR is bypassed and the dashboard says so. Nothing is
+// faked: no volume is invented and no other gate is loosened. CVD and FRVP
+// still read the same broken series, which is why the warning is surfaced
+// rather than hidden — this keeps Scalp usable, it does not make the data good.
+// ═══════════════════════════════════════════════════════════════════════════════
+volPassBar   = volDataSeen and relVol >= effVolFloor ? 1.0 : 0.0
+volPassRate  = ta.sma(volPassBar, i_volSanityLen)
+volSeriesBad = i_volSanity and volDataSeen and bar_index > i_volSanityLen and volPassRate < i_volSanityMin
+volOk  = not volDataSeen or volSeriesBad or relVol >= effVolFloor
 
 // BODY CONVICTION (v3.5.4). Was 2·closePos−1, which is algebraically the same
 // test as the OF close-position threshold — the "second" order-flow gate was
@@ -2414,7 +2492,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.24 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.25 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -2459,10 +2537,11 @@ if i_dashboard and barstate.islast
     f_cell(1, 9, str.tostring(math.round(deltaRatio, 2)), deltaBullOk ? grn : dim)
     f_cell(2, 9, str.tostring(math.round(deltaRatio, 2)), deltaBearOk ? red_ : dim)
 
-    relVolTxt = volDataSeen ? str.tostring(math.round(relVol, 2)) + "×" : "N/A (no vol)"
+    relVolTxt = not volDataSeen ? "N/A (no vol)" : volSeriesBad ? str.tostring(math.round(relVol, 2)) + "× ⚠VOL?" : str.tostring(math.round(relVol, 2)) + "×"
     table.cell(dash, 0, 10, "Rel Volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 10, relVolTxt, not volDataSeen ? dim : volOk ? grn : red_)
-    f_cell(2, 10, relVolTxt, not volDataSeen ? dim : volOk ? grn : red_)
+    relVolCol = not volDataSeen ? dim : volSeriesBad ? yel : volOk ? grn : red_
+    f_cell(1, 10, relVolTxt, relVolCol)
+    f_cell(2, 10, relVolTxt, relVolCol)
 
     table.cell(dash, 0, 11, "CVD Flow", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
