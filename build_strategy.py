@@ -99,6 +99,17 @@ if strategy.position_size < 0 and not na(stSl)
 // v3.5.8 time stop — mirrors the indicator's Max Bars In Trade.
 if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar_index - stStartBar) >= i_maxBars
     strategy.close_all(comment="time stop")
+
+// v3.5.23 invalidation exit — mirrors the indicator's rule so the backtest
+// measures the same behaviour the chart draws. Position side is read from the
+// strategy rather than the indicator's tradeBuy so the two can never drift.
+var int stInvalidRun = 0
+stInvalidLive = strategy.position_size > 0 ? (sellAligned >= i_invalidConf and buyAligned <= i_invalidOwn) : strategy.position_size < 0 ? (buyAligned >= i_invalidConf and sellAligned <= i_invalidOwn) : false
+if barstate.isconfirmed
+    stInvalidRun := stInvalidLive ? stInvalidRun + 1 : 0
+if i_invalidExit and strategy.position_size != 0 and stInvalidRun >= i_invalidBars
+    strategy.close_all(comment="invalidated")
+    stInvalidRun := 0
 '''
 
 open("MovementEnginePro.strategy.pine", "w", encoding="utf-8").write(src)

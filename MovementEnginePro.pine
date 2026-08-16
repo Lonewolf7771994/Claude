@@ -1,8 +1,50 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.22 (portable spread buffer)
+// © ME Institutional — Movement Engine Pro v3.5.23 (invalidation exit)
 //@version=6
-indicator("Movement Engine Pro v3.5.22", shorttitle="ME Pro v3.5.22", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.23", shorttitle="ME Pro v3.5.23", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.23 CHANGELOG — INVALIDATION EXIT (the engine now re-reads its own thesis)
+// ─────────────────────────────────────────────────────────────────────────────
+// The engine scored its conditions once, at entry, and then stopped thinking. A
+// plan had exactly four ways out — stop, TP3, the time stop (which ships off)
+// and a new signal — so nothing closed a trade whose reason for existing had
+// gone. Frequent signals hide this: on XAUUSD 15m Scalp a new signal replaces
+// the plan every few hours. Where signals are sparse, the plan simply hangs.
+//
+// Both observed live on BTCUSD:
+//   15m  #62 open three days with no exit condition reachable
+//   1D   #10 entry 66,519, price 62,991 (-0.58R), dashboard 3/3 SELL vs 1/3
+//        BUY, TP1 still anchored to a VAH of 76,558 while the live VAH had
+//        fallen to 65,461. The structure the plan was built on no longer
+//        existed and the engine had no way to notice.
+//
+// Adds i_invalidExit: when the OPPOSITE side holds i_invalidConf confluence
+// legs and the trade's own side sits at or below i_invalidOwn, for
+// i_invalidBars consecutive CLOSED bars, the plan closes.
+//
+// The own-side ceiling is the part that decides whether this works at all.
+// buyAligned and sellAligned are NOT mutually exclusive — frvpBullOk and
+// frvpBearOk are both true whenever price is inside the value area — so a fully
+// flipped market commonly reads 3/3 against and 1/3 for. A first cut demanded
+// the own side at exactly 0 and, tested against the trade that motivated the
+// whole rule, did not fire: #10 read 1/3 BUY for weeks. Ceiling defaults to 1.
+//
+// Not treated as a stop-out: no cooldown extension, no loss streak. A trade
+// closed for a dead thesis says nothing about the next setup.
+//
+// Mirrored in the strategy build so it is measurable, reading position side
+// from strategy.position_size so chart and backtest cannot drift.
+//
+// State machine verified against 7 sequences: healthy trade, ordinary pullback,
+// 2/2 chop inside the value area, one-bar flip that recovers, the observed #10
+// reading, total collapse, and a short-side flip. All behave as specified.
+//
+// ON by default. Shipping the time stop disabled is what let these trades hang;
+// repeating that would be the same mistake twice. EFFECT ON PROFIT FACTOR IS
+// UNMEASURED — it will also close trades that would have recovered. Run one
+// range with it on and off and compare before trusting it.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.22 CHANGELOG — SPREAD BUFFER IN ATR UNITS (portability across symbols)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -872,6 +914,18 @@ i_zoneAtr    = input.float(0.1, "Zone Half-Height (× ATR)", minval=0.02, maxval
      group=G_TPSL)
 i_maxBars    = input.int(0, "Max Bars In Trade (0 = off)", minval=0, maxval=500,
      tooltip="v3.5.8: closes tracking after this many bars if neither the stop nor TP3 has been reached. Without it a trade that stalls stays 'open' forever — the runner never resolves, the post-TP1/SL bookkeeping never updates, and in the strategy build the position sits there distorting results. Counts as a neutral exit, not a loss.",
+     group=G_TPSL)
+i_invalidExit = input.bool(true, "Close Plan When Setup Invalidates",
+     tooltip="v3.5.23: closes an open plan when the setup that justified it has gone, instead of waiting for the stop.\nUntil now the engine scored its conditions once at entry and then stopped thinking. A plan had four ways out — stop, TP3, the time stop (which ships off) and a new signal — so a trade whose reason for existing had evaporated simply hung. Where signals are frequent this is invisible; where they are not it is expensive. Seen live on BTCUSD 1D: entry 66,519, price 62,991, dashboard reading 3/3 SELL and 1/3 BUY, TP1 still anchored to a VAH that had fallen 11,097 points.\nFires only when the OPPOSITE side is fully aligned AND the trade's own side has collapsed to zero, held for the confirm bars below. An ordinary pullback does not trigger it — only a regime flip.\nDoes not count as a stop-out: no cooldown extension, no loss streak.\nEFFECT ON PROFIT FACTOR IS UNMEASURED. It will also close trades that would have recovered. Run the strategy over one range with it on and off and compare.",
+     group=G_TPSL)
+i_invalidConf = input.int(3, "Invalidation Opposite Confluence", minval=1, maxval=3,
+     tooltip="v3.5.23: how many of the three confluence legs (HTF bias, VWAP side, FRVP position) the OPPOSITE direction must hold before the plan is considered invalid. 3 = all of them, the strictest and the default.\nLowering it closes trades sooner and more often.",
+     group=G_TPSL)
+i_invalidOwn  = input.int(1, "Invalidation Own-Side Ceiling", minval=0, maxval=2,
+     tooltip="v3.5.23: the trade's OWN confluence must be at or below this for the plan to be considered invalid.\nThis is not cosmetic. buyAligned and sellAligned are not mutually exclusive: frvpBullOk and frvpBearOk are BOTH true while price sits inside the value area, so a fully flipped market routinely reads 3/3 against and 1/3 for. Requiring the own side at exactly 0 therefore almost never fires whenever price is inside the value area — which is most of the time.\nThe BTCUSD 1D trade this rule was built for read 1/3 BUY against 3/3 SELL for weeks. A ceiling of 0 would have ignored it entirely; 1 closes it.\nRaise to 2 to close trades sooner and far more often; drop to 0 to require total collapse and accept that the rule will rarely fire.",
+     group=G_TPSL)
+i_invalidBars = input.int(2, "Invalidation Confirm Bars", minval=1, maxval=20,
+     tooltip="v3.5.23: the invalidation condition must hold for this many consecutive CLOSED bars before the plan closes. 1 reacts fastest and is the most easily faked out; higher values demand a sustained flip.",
      group=G_TPSL)
 
 // ── Risk Guards ──────────────────────────────────────────────────────────────
@@ -2094,6 +2148,51 @@ tp3HitNow = not na(activeTp3Px) and (tradeBuy ? high >= activeTp3Px : low  <= ac
 var int tradeStartBar = na
 timeExit = i_maxBars > 0 and not na(tradeStartBar) and not na(activeSlPx) and (bar_index - tradeStartBar) >= i_maxBars
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.23 INVALIDATION EXIT
+// ─────────────────────────────────────────────────────────────────────────────
+// The engine scored its conditions once, at entry, and then stopped thinking. A
+// plan had exactly four ways out — stop, TP3, the time stop (which ships off)
+// and a new signal — so nothing closed a trade whose reason for existing had
+// gone. Where signals are frequent this is invisible: on XAUUSD 15m Scalp a new
+// signal replaces the plan every few hours. Where they are not, the plan simply
+// hangs.
+//
+// Seen live, both on BTCUSD:
+//   15m  trade #62 open three days, no exit condition ever reachable
+//   1D   trade #10 entry 66,519, price 62,991 (-0.58R) with the dashboard
+//        reading 3/3 SELL and 1/3 BUY, TP1 still anchored to a VAH of 76,558
+//        while the live VAH had fallen to 65,461 — the structure the plan was
+//        built on no longer existed and the engine had no way to notice.
+//
+// The confluence scores are already recomputed every bar, so the fix costs
+// nothing to measure: when the OPPOSITE side is fully aligned and the trade's
+// own side has fallen to the ceiling or below, held for i_invalidBars consecutive
+// CLOSED bars, the setup is dead and the plan closes.
+//
+// The own-side ceiling matters more than it looks. buyAligned and sellAligned
+// are NOT mutually exclusive — frvpBullOk and frvpBearOk are both true while
+// price sits inside the value area — so a fully flipped market commonly reads
+// 3/3 against and 1/3 for. Demanding the own side at exactly 0 would have
+// ignored the very trade this rule was built for, which held 1/3 BUY against
+// 3/3 SELL for weeks. The ceiling defaults to 1 for that reason.
+//
+// Treated like the time stop, not like a stop-out: it does not set lastSlHit
+// and does not extend the cooldown, because a trade closed for a dead thesis is
+// not evidence that the next setup is worse.
+//
+// ON by default. Shipping the time stop disabled is what let these two trades
+// hang in the first place, and repeating that would be the same mistake twice.
+// Its effect on profit factor is UNMEASURED — it will also close trades that
+// would have recovered. Run the strategy over one range with it on and off and
+// compare before trusting it.
+// ═══════════════════════════════════════════════════════════════════════════════
+var int invalidRun = 0
+invalidLive = not na(activeSlPx) and (tradeBuy ? (sellAligned >= i_invalidConf and buyAligned <= i_invalidOwn) : (buyAligned >= i_invalidConf and sellAligned <= i_invalidOwn))
+if barstate.isconfirmed
+    invalidRun := invalidLive ? invalidRun + 1 : 0
+invalidExit = i_invalidExit and not na(activeSlPx) and invalidRun >= i_invalidBars
+
 // v3.3: TP1 counts as "de-risked" — SL after that shouldn't extend cooldown.
 // v3.5.4: when ONE bar trades through both TP1 and the SL, the intrabar order
 // is unknown. The old order credited TP1 first and cleared the SL-hit flag,
@@ -2124,7 +2223,7 @@ if barstate.isconfirmed and slHitNow and not activeTp1Hit
     lastSlHit := true
     lossStreak := math.min(lossStreak + 1, 999)
 
-if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or buySignal or sellSignal)
+if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or invalidExit or buySignal or sellSignal)
     if not na(tpsl_sl)
         line.delete(tpsl_sl)
         tpsl_sl := na
@@ -2171,6 +2270,7 @@ if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or buySignal or s
     activeTp1Hit := false
     activeAtBe   := false
     tradeStartBar := na
+    invalidRun    := 0
 
 if buySignal
     activeSlPx   := buySLpx
@@ -2180,6 +2280,7 @@ if buySignal
     activeTp1Hit := false
     activeAtBe   := false
     tradeStartBar := bar_index
+    invalidRun    := 0
     tradeBuy     := true
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
@@ -2207,6 +2308,7 @@ if sellSignal
     activeTp1Hit := false
     activeAtBe   := false
     tradeStartBar := bar_index
+    invalidRun    := 0
     tradeBuy     := false
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
@@ -2262,7 +2364,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.22 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.23 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
