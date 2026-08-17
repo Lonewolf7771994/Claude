@@ -1,8 +1,28 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.30 (scalp trigger freshness)
+// © ME Institutional — Movement Engine Pro v3.5.31 (revert freshness clamp)
 //@version=6
-indicator("Movement Engine Pro v3.5.30", shorttitle="ME Pro v3.5.30", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.31", shorttitle="ME Pro v3.5.31", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.31 CHANGELOG — REVERT v3.5.30. THE SIMULATION ASKED THE WRONG QUESTION
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.30 clamped Scalp trigger freshness from 3 to 2, on a simulation showing
+// that an entry taken at age 3 passes chase/risk/rr less often than one taken
+// at age 1. That is true and it is beside the point.
+//
+// Trade COUNT depends on whether a trigger yields an entry ANYWHERE inside its
+// freshness window, and each extra bar is another attempt:
+//   window 1  64.6%    window 2  80.4%    window 3  86.6%    window 5  91.0%
+//
+// So the clamp REDUCED Scalp conversion by roughly 7% while the reported
+// problem was that Scalp produced no trades at all. It made the complaint worse
+// and was shipped as a fix for it.
+//
+// Reverted to a passthrough. The quality effect is real — a later entry is the
+// same target at a worse price with a wider stop — so lowering i_triggerAge by
+// hand remains a legitimate quality-for-count trade. It is not something to
+// impose by default, and certainly not while the engine is silent.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.30 CHANGELOG — THREE BLOCK REASONS WERE ONE PROBLEM
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1289,13 +1309,16 @@ i_webhookSecret = input.string("", "Webhook Shared Secret",
 
 isScalp       = i_mode == "Scalp"
 effSwingLen   = isScalp ? 2 : i_swingLen
-// v3.5.30: a stale trigger contradicts the mode. Freshness exists so order
-// flow can confirm on bar N+1/N+2, but every bar of delay moves the entry away
-// from the level while the target stays put — so the entry price worsens, the
-// stop widens and the reward shrinks, and chase/risk/rr then reject exactly the
-// setups the delay created. Scalp clamps to 2, keeping one bar of confirmation
-// without the third bar that costs the most.
-effTriggerAge = isScalp ? math.min(i_triggerAge, 2) : i_triggerAge
+// v3.5.31: NO CLAMP. v3.5.30 clamped Scalp to 2 on a simulation that asked the
+// wrong question — it measured whether an entry AT AGE k passes the gates, and
+// later bars do score worse. But the number that decides trade COUNT is whether
+// a trigger produces an entry ANYWHERE in its window, and every extra bar is
+// another attempt:
+//   window 1  64.6%   window 2  80.4%   window 3  86.6%   window 5  91.0%
+// So the clamp cut Scalp's conversion by about 7% while the reported problem
+// was no trades at all. Passthrough now; lower i_triggerAge by hand to trade
+// count for entry quality.
+effTriggerAge = i_triggerAge
 effVolFloor   = isScalp ? math.min(i_volFloor,   1.0)  : i_volFloor
 effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
 effOfThresh   = isScalp ? math.min(i_ofThresh,   57.0) : i_ofThresh
@@ -2751,7 +2774,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.30 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.31 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
