@@ -2,8 +2,15 @@
 """Generate the strategy() build from the indicator so signal logic can never drift.
 Re-run after any change to MovementEnginePro.pine."""
 import re
+import sys
 
-src = open("MovementEnginePro.pine", encoding="utf-8").read()
+# Optional paths so a strategy can be generated from ANY indicator version, not
+# only the working copy — needed to build against a version the user is
+# actually running rather than the newest one.
+IN  = sys.argv[1] if len(sys.argv) > 1 else "MovementEnginePro.pine"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "MovementEnginePro.strategy.pine"
+
+src = open(IN, encoding="utf-8").read()
 
 # Derive the version from the indicator so the strategy can never advertise a
 # stale one — it did read v3.5.6 while carrying v3.5.7 logic.
@@ -160,7 +167,13 @@ if strategy.position_size != 0
 if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar_index - stStartBar) >= i_maxBars
     strategy.close_all(comment="time stop")
 
-// v3.5.23 invalidation exit — mirrors the indicator's rule so the backtest
+__INVALIDATION_BLOCK__
+'''
+
+# The invalidation mirror references inputs that only exist from v3.5.23 on.
+# Emitting it against an older indicator would reference undefined names and
+# fail to compile, so it is included only when the source actually has them.
+INV = '''// v3.5.23 invalidation exit — mirrors the indicator's rule so the backtest
 // measures the same behaviour the chart draws. Position side is read from the
 // strategy rather than the indicator's tradeBuy so the two can never drift.
 stOwnNow  = strategy.position_size > 0 ? buyAligned  : sellAligned
@@ -170,8 +183,8 @@ if barstate.isconfirmed
     stInvalidRun := stInvalidLive ? stInvalidRun + 1 : 0
 if i_invalidExit and strategy.position_size != 0 and stInvalidRun >= i_invalidBars
     strategy.close_all(comment="invalidated")
-    stInvalidRun := 0
-'''
+    stInvalidRun := 0'''
+src = src.replace("__INVALIDATION_BLOCK__", INV if "i_invalidExit" in src else "// (invalidation exit not present in this indicator version)")
 
-open("MovementEnginePro.strategy.pine", "w", encoding="utf-8").write(src)
-print("wrote MovementEnginePro.strategy.pine")
+open(OUT, "w", encoding="utf-8").write(src)
+print("wrote %s from %s" % (OUT, IN))

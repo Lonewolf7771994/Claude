@@ -1,0 +1,2374 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © ME Institutional — Movement Engine Pro v3.5.19 (bar_index stride repaint fix)
+//@version=6
+strategy("ME Pro Strategy v3.5.19", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.19 CHANGELOG — THIRD REPAINT SOURCE (FRVP stride keyed to bar_index)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "I did take the third TP, then it changed to TP3 4399." The v3.5.18
+// note below blamed this on a second trade being drawn. That was wrong. The
+// chart settled it: ONE plan, entry 4343.830, TP1 4357.822 (1.5R) and TP2
+// 4362.486 (2R) identical across both renders — while TP3, tagged VAH, read
+// 4395.110 on one and 4399.366 on the next. A second trade would have moved the
+// entry and all three targets. Only the structure-anchored one moved.
+//
+// Cause: the volume profile rebuilt on `bar_index % i_frvpEvery == 0`.
+// bar_index is counted from the first bar the CHART HAS LOADED, not from a
+// fixed origin, so a different history depth — scrolling back, a reload, a
+// settings change — shifts every index by a constant and the modulo then picks
+// a DIFFERENT set of bars to snapshot the profile on. POC/VAH/VAL at any given
+// bar therefore differ between two renders of the same chart, and any target
+// anchored to them moves with it. TP1/TP2 are pure R-multiples off entry and
+// stop and were never exposed; only VAH/VAL-tagged targets were.
+//
+// This is the third repaint source found in this engine, after the FRVP
+// `barstate.islast` rebuild (v3.5.11) and the HTF `request.security` returning
+// the developing bar (v3.5.17). It survived v3.5.11 because the fix's own
+// comment asserted "the stride alone is deterministic" without checking what
+// bar_index is anchored to.
+//
+// Fix: the stride is now keyed to the bar's open time divided by the timeframe
+// — an absolute quantity identical on every render — so the same bars always
+// carry the rebuild no matter how much history is loaded.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.18 CHANGELOG — LEVELS CARRY THEIR TRADE NUMBER (display only)
+// ─────────────────────────────────────────────────────────────────────────────
+// Added while diagnosing the report that v3.5.19 above actually fixes. The
+// diagnosis in this entry was wrong — see v3.5.19 — but the change stands on
+// its own: every TP/SL/BE label and every BUY/SELL arrow now carries the signal
+// number (" TP3 #12 4399.00 VAH", "BUY #12"), so two plans can never be
+// confused for one moving plan. The number is the same monotonic counter the
+// alert payload already sends as "seq", so chart and webhook agree on identity.
+//
+// Display only — no gate, level or signal changes.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.17 CHANGELOG — SECOND REPAINT SOURCE (HTF security)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: a live Scalp 15m signal vanished — on v3.5.9 AND on v3.5.14. Two
+// separate causes, both mine. v3.5.9 was the FRVP live-bar rebuild (fixed in
+// v3.5.11). v3.5.14 already had that fix, so the disappearance there was this:
+//
+// The HTF request used [close, ema] with lookahead_off. On a live chart bar
+// inside a still-forming HTF bar, that returns the DEVELOPING higher-timeframe
+// close, updating tick by tick. After a reload the same bar is historical and
+// gets the last CLOSED HTF bar instead. Different values, so htfBull could flip
+// between what was watched and what is redrawn.
+//
+// It reached the signals through the confluence score: buyAligned/sellAligned
+// count htfBull, and v3.5.13 gave Scalp a confluence floor of 1. A Scalp entry
+// scoring 1/3 live could score 0/3 on reload and cease to exist. In Balanced
+// and Strict it also feeds htfOkBull and the structural bias directly.
+//
+// Now requests close[1] with lookahead_on — the standard stable idiom, giving
+// the last CLOSED HTF bar, identical live and historical. The offset is what
+// makes lookahead_on safe: without it lookahead_on WOULD leak future data.
+// Cost: the HTF view lags by up to one HTF bar. That is the honest price of a
+// value that does not change after the fact.
+//
+// Note on the claim in the v3.5 header. "It does NOT repaint" has now been
+// wrong twice — the FRVP path from v3.5.1, and this one since v3.5 shipped,
+// reaching signals from v3.5.13. Both are fixed and the repaint surface has
+// been re-audited, but the claim was made before it had been earned.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.16 CHANGELOG — SPREAD-AWARE STOPS, TP/SL ZONES, TRACKER TYPO
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NOTHING EVER MODELLED SPREAD. The stop sat exactly on the structural
+//    level, so on any symbol with a spread the level could be taken out by the
+//    quote while the traded price never reached it — a loss the chart says
+//    never happened. On XAUUSD a 0.30 spread against a 9-point scalp stop is
+//    ~3% of risk, and worse on a tighter stop. New "Spread + Slippage Buffer"
+//    (price units, default 0 = unchanged) pushes the stop further out and lets
+//    the reported R grow to match; an honest R beats a flattering one.
+//    Only the STOP is buffered. Buffering the targets would move them closer
+//    in effective terms and make the plan look better than it fills.
+//    The clamped/structural flag is evaluated BEFORE the buffer, since spread
+//    is a broker cost rather than an engine decision.
+//
+// 2. TP/SL AS ZONES (display only). A hairline implies a precision the fill
+//    will not honour — spread, slippage and the tick you actually get all sit
+//    around the level, not on it. Optional bands, height in ATR. Changes no
+//    signal and no level.
+//
+// 3. BLOCK-REASON TRACKER TESTED THE WRONG SIGNAL. The sell branch read
+//    "not buySignal" where it meant "not sellSignal" — my typo from the v3.5.8
+//    restructure. It was masked by the empty-reason guard (a valid SELL passes
+//    every gate, so the reason string came out empty and nothing was written),
+//    so it never produced a wrong message. It would have started lying the
+//    moment any gate was added that a passing SELL does not satisfy.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.15 CHANGELOG — TARGETS WERE NOT IN ORDER (present since v3.4.1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported from a live XAUUSD chart: TP1 4395.11, TP2 4357.82, TP3 4362.49 on a
+// LONG. TP1 was the furthest target, not the nearest.
+//
+// f_tpLevels fills the three slots from structure levels first, then pads any
+// remainder with R-multiple fallbacks — but it never sorted the two sets
+// TOGETHER. With exactly one qualifying structure level (here the VAH at 5.5R)
+// that level took TP1, and the 1.5R and 2R fallbacks landed below it as TP2 and
+// TP3. Any signal with one or two structure candidates could invert this way.
+//
+// Consequences beyond a confusing chart:
+//   • The scale-out plan was backwards — a third of the position sized for the
+//     nearest target was actually assigned the furthest.
+//   • The breakeven move keys off TP1. With TP1 at 5.5R it would essentially
+//     never arm, so the de-risk the engine advertises never happened.
+//   • activeTp3Px sat NEARER than activeTp1Px, so tracking closed on the 2R
+//     level while TP1 was still unreached — the trade silently resolved on what
+//     the chart called TP3.
+//   • The strategy build issued its three exits in the wrong sequence.
+//
+// The three are now sorted in the trade's direction with their tags following
+// them. Which levels get chosen is unchanged; only their order is fixed.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.14 CHANGELOG — FREQUENCY IS NOW A DIAL, NOT A SIDE EFFECT
+// ─────────────────────────────────────────────────────────────────────────────
+// Asked for a higher win rate, then for at least 4 signals a day. Those pull in
+// opposite directions: win rate comes from fewer/better trades, frequency from
+// looser ones. Rather than quietly re-tune and pretend both were delivered, the
+// trade-off is now a single Scalp-only control with its cost documented.
+//
+//   SELECTIVE (default) cooldown 5, full Min TP1 Reward, confluence floor 1
+//                       — byte-for-byte the v3.5.13 behavior.
+//   STANDARD            cooldown 4, TP1 reward capped 0.9R, confluence floor 1
+//   HIGH                cooldown 2, TP1 reward capped 0.7R, no confluence floor
+//
+// The cooldown is the cheap part: shortening it does not lower the bar for any
+// individual setup, it just lets qualifying setups sit closer together. The
+// other two are not cheap. A 0.7R first target means TP1 sits nearer than the
+// stop, and since TP1 also triggers the breakeven move, more trades will end as
+// scratches — the exact failure mode v3.5.8's reward gate was built to stop.
+// Dropping the confluence floor removes the only trend context Scalp has left.
+//
+// Sweep Pivot Length is deliberately NOT touched by the preset: lowering it back
+// toward 2 re-creates the v3.5.13 defect where sweeps hunted 5-bar wiggles. Set
+// it to 3 or 4 by hand if you want more sweeps and accept shallower liquidity.
+//
+// SIGNALS PER DAY IS A PROPERTY OF THE MARKET, NOT THIS SETTING. Nothing here
+// guarantees 4/day. Measure the real rate in the strategy tester.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.13 CHANGELOG — SCALP SWEEPS WERE HUNTING NOISE
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. SWEEP LEVELS INHERITED THE ENTRY PIVOT LENGTH. Sweep levels came from
+//    lastPH/lastPL, which use effSwingLen — and Scalp clamps that to 2 bars
+//    per side. A 2-bar swing on a 15m chart is a 5-bar wiggle, not a liquidity
+//    pool: nobody has stops resting under it, so violating it and closing back
+//    is not a stop run, it is noise with a setup's name on it. Scalp leans on
+//    the sweep trigger harder than any other mode (v3.5.1 even exempted sweep
+//    scalps from the CVD and momentum gates to get them firing), so the mode
+//    that depends on sweeps most was aiming them at the shallowest structure
+//    on the chart.
+//    Sweeps now use their OWN pivot series at a dedicated length (default 5 =
+//    an 11-bar swing), independent of the entry pivots and not overridden by
+//    any mode. Entry structure stays fast; the liquidity being hunted is real.
+//
+// 2. SCALP NOW REQUIRES AT LEAST 1 OF 3 CONFLUENCE. Scalp bypasses the HTF
+//    gate, the structural bias, and for sweeps the CVD and momentum gates too.
+//    That is most of the engine's context switched off, which is what lets it
+//    trade both directions. Requiring one of the three directional alignments
+//    (HTF side / VWAP side / value-area side) puts a floor under that without
+//    reverting Scalp into Balanced. Clamped upward like every other Scalp
+//    setting, so 2 or 3 is respected if you set it.
+//    UNMEASURED judgment, unlike (1) which is a defect. Set Min Confluence
+//    higher to test, or use another mode if you want it off entirely.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.12 CHANGELOG — SELECTIVITY LEVERS (asked for: higher Scalp win rate)
+// ─────────────────────────────────────────────────────────────────────────────
+// Win rate is trivially gameable — move TP1 closer and it rises while
+// expectancy falls. Everything here therefore takes FEWER, BETTER trades
+// rather than banking sooner. All three default to permissive, so the engine
+// is unchanged until one is deliberately switched on, and each can be A/B
+// tested alone.
+//
+// 1. TRADING SESSION FILTER. The engine had a news blackout but no session
+//    filter at all — it would take a 15m Scalp in the Asian session, where
+//    gold ranges without follow-through and a continuation engine bleeds.
+//    Probably the highest-value single lever on an intraday chart.
+// 2. MIN CONFLUENCE GATE. buyAligned/sellAligned (HTF side + VWAP side +
+//    value-area side) have been computed since v3.3 and, until v3.5.5, never
+//    even read. Now they can gate. This matters most in Scalp, which bypasses
+//    the HTF and structural-bias gates by design: requiring 1 or 2 restores
+//    some trend context without collapsing Scalp back into Balanced.
+// 3. VOLATILITY REGIME FILTER. volRegime has likewise been computed and
+//    displayed for nine versions while gating nothing. "Skip chop" avoids
+//    compression where breakouts fail; "Skip expansion" avoids entering after
+//    the move is spent.
+//
+// Which of these helps is symbol-dependent and UNMEASURED. Enable one at a
+// time and compare profit factor, not win rate.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.11 CHANGELOG — REPAINT FIX (the engine did repaint; it does not now)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "the indicator draws different signals". It did, and this was why.
+//
+// The FRVP refresh condition carried an "or barstate.islast" term, added in
+// v3.5.1 alongside the load-time work. It gave the LIVE bar a profile rebuild
+// that the same bar no longer received once it scrolled into history, so with
+// the default stride of 5 roughly four bars in five held different POC/VAH/VAL
+// in real time than on reload.
+//
+// That leaked into signals by two paths:
+//   • VAH and VAL are TP candidates, so TP1 could differ — and since v3.5.8 the
+//     reward gate decides the signal FROM TP1. A signal could therefore appear
+//     live and be gone on reload, in EVERY mode.
+//   • Strict gates on frvpBullOk/frvpBearOk directly.
+//
+// The header has claimed "100% bar-close confirmed — it does NOT repaint" since
+// v3.5. From v3.5.1 that was untrue for anything downstream of the profile, and
+// from v3.5.8 it was untrue for the signals themselves. Removing the islast term
+// makes the rebuild purely a function of bar_index: identical live and on
+// reload. The cost is the disclosed one — the profile can lag up to
+// i_frvpEvery-1 bars. Set the input to 1 for fresh-every-bar; that is equally
+// deterministic, just slower to load.
+//
+// Drawing still happens on the last bar only (rendering is not state, and
+// redrawing a line does not change a signal).
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.10 CHANGELOG — FVG TRACKING HOLDS MULTIPLE GAPS
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. ONE GAP PER DIRECTION WAS ALL THAT SURVIVED. lBullTop/lBullBot were single
+//    slots: every new FVG overwrote the previous one, so an older gap that
+//    price had not yet returned to was discarded the moment another formed.
+//    In a fast impulsive leg — which is precisely what stacks FVGs — only the
+//    newest was kept, and the newest sits FURTHEST from price, i.e. is the one
+//    least likely to be retested. The engine was throwing away its best
+//    candidates and keeping its worst.
+//    Gaps now live in parallel arrays (new input "Max Gaps Tracked Per
+//    Direction", default 5). Each expires on its own age and invalidates on
+//    its own level, independently of the others.
+//
+// 2. THE RETEST NOW REPORTS *WHICH* GAP IT HIT. The scan walks newest-to-oldest
+//    and stops at the first qualifying gap, recording that gap's edges. This
+//    matters beyond bookkeeping: v3.5.7 anchors the stop to the retested gap's
+//    far edge and v3.5.6 measures the chase cap from its near edge. With one
+//    slot those were whatever gap happened to be stored; they are now the gap
+//    price actually touched.
+//
+// VERIFIED BY SIMULATION, not by backtest: replaying both algorithms over
+// 160,000 synthetic bars, the new one caught every retest the old one caught
+// (zero regressions) plus ~25% more that the single slot had discarded.
+// EXPECT MORE FVG SIGNALS in Balanced, Aggressive and Scalp. Strict disables
+// the FVG trigger, so Strict is unaffected.
+//
+// Minor: gap expiry is now evaluated on confirmed bars only, consistent with
+// invalidation, which was already gated that way. Signals only ever fire on
+// confirmed bars, so this changes no signal.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.9 CHANGELOG — WEBHOOK AUTHENTICATION
+// ─────────────────────────────────────────────────────────────────────────────
+// A TradingView webhook URL is an unauthenticated public endpoint: anyone who
+// learns it can POST a fabricated signal straight into your automation, and
+// nothing in the payload previously let a receiver tell a real alert from a
+// forged one. New "Webhook Shared Secret" (Alerts group) emits a "secret"
+// field as the first key of the JSON object; the companion n8n workflow in
+// n8n/ rejects any payload whose secret does not match. Leave it empty to
+// omit the field entirely and keep the old payload shape.
+// This is a shared secret in cleartext, not a signature — it stops casual
+// forgery by someone who has the URL, not an attacker who can read the alert
+// configuration or intercept the request. Use HTTPS and a long random string.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.8 CHANGELOG — THE ENGINE FINALLY LOOKS AT REWARD
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NO REWARD CHECK EXISTED — AT ALL. Every version since v3.3 bounded RISK
+//    (min/max ATR window, cap, clamp, buffers) and never once asked what a
+//    trade could MAKE. TP1 is just the nearest structure level above entry, so
+//    it can sit a small fraction of the stop distance away. That interacts
+//    badly with the v3.5.5 breakeven rule: TP1 fires almost immediately, a
+//    third comes off for a few ticks, the stop jumps to entry, and the rest is
+//    brushed out on noise. The result is a stream of scratches and small wins
+//    punctuated by full-size losses — which reads on a chart exactly as
+//    "lacks accuracy", because it is negative expectancy dressed as a decent
+//    hit rate. New "Min TP1 Reward (× risk)", default 1.0, rejects setups
+//    whose first target is closer than the stop; 0 restores old behavior.
+//    Reports as "rr" in Last Block. This WILL reduce signal count.
+//    Consequence: TP selection now runs on the pre-signal, since the gate has
+//    to know where TP1 is before the signal can be confirmed.
+//
+// 2. TRADES COULD STAY OPEN FOREVER. Tracking only ever released on a stop, on
+//    TP3, or when a new signal replaced it. A trade that stalled between the
+//    two simply stayed active: the runner never resolved, the TP1/SL
+//    bookkeeping that feeds the cooldown and loss-streak guards froze, and in
+//    the strategy build the position sat on the books distorting the numbers.
+//    New "Max Bars In Trade" (0 = off) closes it out as a neutral exit —
+//    neither a win nor a loss for the streak guard.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.7 CHANGELOG — THE STOP NOW MATCHES WHAT TRIGGERED THE TRADE
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: Scalp trades lack accuracy. Scalp leans on the sweep trigger more
+// than any other mode (it is the only mode besides Aggressive that enables
+// sweeps, and v3.5.1 exempted sweep scalps from the CVD and momentum gates),
+// so a defect in sweep handling shows up there first and worst.
+//
+// 1. THE SWEEP STOP WAS INSIDE THE SWEEP. The stop was ALWAYS derived from the
+//    last pivot, regardless of which trigger fired. Work the arithmetic for a
+//    bullish sweep:
+//        entry requires   low ≤ pivotLow − 0.4 ATR   (i_sweepWick)
+//        stop was placed at pivotLow − 0.3 ATR       (slBuf, Scalp)
+//    so the stop sat ABOVE the low of the very bar that defined the setup.
+//    Price retesting the sweep low — the single most ordinary thing it can do
+//    after a sweep — stopped the trade out before the idea had failed. Every
+//    sweep scalp carried a stop pre-placed inside its own noise.
+//    Each trigger now stops beyond ITS OWN invalidation:
+//      • Sweep → beyond the sweep bar's extreme (the wick is the invalidation)
+//      • FVG   → beyond the far edge of the gap
+//      • MSS   → the last pivot, unchanged (correct for a continuation trade)
+//    This required hoisting the trigger flags above the stop block, which is
+//    also why the stop can finally know what it is protecting.
+//
+// 2. ANTI-CHASE NOW COVERS SWEEP AND FVG. v3.5.6 capped extension for MSS only,
+//    reasoning that sweep/FVG entries occur AT a level. That holds on the
+//    trigger bar, but the freshness window lets them fire up to i_triggerAge
+//    bars later — by then price has left the level and the reclaim edge with
+//    it. Each trigger is now measured against its own reference level.
+//
+// 3. SCALP NO LONGER CLAMPS THE FAR STOP. v3.5.6 removed far-side clamping for
+//    every mode except Scalp, where it was kept on the argument that a tight
+//    volatility stop IS the scalp design. With sweep stops now anchored to the
+//    wick, Scalp stops are naturally tight and the clamp rarely binds — and
+//    where it would have, it was doing the same harmful thing it did in
+//    Strict/Balanced: pulling the stop inside the structure. If a setup's
+//    invalidation sits beyond the scalp risk cap, it is not a scalp.
+//
+// UNMEASURED: like every version here, this is reasoning about the code, not a
+// backtest. Fix 1 is arithmetically provable; 2 and 3 are judgment.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.6 CHANGELOG — STOPS BACK INSIDE STRUCTURE + ANTI-CHASE
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: Strict and Balanced entries were reaching their stops. Both fixes
+// below target the two ways this engine manufactures a losing stop.
+//
+// 1. THE FAR-SIDE CLAMP WAS UNSOUND — REGRESSION FROM v3.5.4. That version
+//    clamped a structural stop into BOTH ends of the risk window rather than
+//    skipping the setup. The near end is harmless (the stop moves FURTHER
+//    from price, still beyond the invalidation level). The far end is not:
+//    it drags the stop INSIDE the structure that defines the trade, so price
+//    can take it out while the setup remains valid. That converted setups
+//    the max-risk cap was correctly refusing into trades with stops that
+//    were pre-positioned to be hit — and Strict/Balanced, being the
+//    structure-led modes, are where the damage lands.
+//    Clamping is now a 3-way choice, defaulting to NEAR SIDE ONLY:
+//      • Off (block instead) — pre-v3.5.4 behavior, both ends gate.
+//      • Near side only (default) — widen a too-tight stop; SKIP a setup
+//        whose real invalidation sits beyond the max-risk cap.
+//      • Both sides — the v3.5.4/v3.5.5 behavior, kept for anyone who wants
+//        a pure volatility stop.
+//    Scalp still clamps the far side under the default, because a tight
+//    volatility stop IS the scalp design (unchanged since v3.5.1); the other
+//    three modes now refuse the trade instead of faking the stop.
+//
+// 2. NO UPPER BOUND ON ENTRY EXTENSION (pre-existing, all versions). MSS
+//    required the close to clear the pivot by at least i_mssFollow, but
+//    NOTHING capped how far past it the entry could be — and the freshness
+//    window lets the entry land up to i_triggerAge bars later, by which time
+//    price may have run much further. Combined with an order-flow gate that
+//    by design demands a close near the bar's high, entries could be taken
+//    1-3 ATR above the level they broke, with the stop still under the swing
+//    low: a textbook chase, and a textbook stop-out. New "Max Entry
+//    Extension Past Trigger" (default 1.0 ATR) rejects those. It applies
+//    ONLY when the breakout is the sole trigger — sweep and FVG-retest
+//    entries happen AT a level, so they are untouched — and reports as
+//    "chase" in the Last Block row.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.5 CHANGELOG — PRICE PRECISION + TRADE MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. PRICE PRECISION BUG — CRITICAL ON FX AND LOW-PRICED SYMBOLS. Every price
+//    in the chart labels and the JSON alert payload was hard-rounded to TWO
+//    decimals (math.round(x, 2)). On EURUSD an SL of 1.09345 was published as
+//    1.09 — a 34-pip error in a webhook order; on a sub-dollar crypto TP1/2/3
+//    could collapse to the same number. Gold and indices happened to be fine,
+//    which is why this survived. All prices now format at the symbol's own
+//    tick size (format.mintick).
+// 2. BREAKEVEN STOP AFTER TP1 (new input, ON). The engine already treated TP1
+//    as "de-risked" for cooldown purposes but never moved the stop, so a
+//    trade could tag TP1 and still run all the way back to a full loss. The
+//    tracked SL now moves to entry when TP1 trades, and the drawn SL line and
+//    label move with it.
+// 3. CONSECUTIVE-LOSS CIRCUIT BREAKER (new input, default 0 = off). Pauses
+//    new signals after N stop-outs in a row; the streak resets on any TP1.
+//    A cooldown measured in bars does not help when the regime itself has
+//    turned against the setup type.
+// 4. CONFLUENCE SCORE WAS COMPUTED AND THROWN AWAY. buyAligned/sellAligned
+//    have existed for versions without ever being read. They also counted
+//    disabled filters as alignment (htfOkBull is true when the HTF filter is
+//    off), which would have inflated the score. Now computed from the raw
+//    directional facts (HTF side, VWAP side, value-area side), shown on the
+//    dashboard and sent in the alert payload as "confluence": 0-3.
+// 5. ALERT DEDUPE METADATA. Payloads now carry "seq" (monotonic signal
+//    counter) and "bar_time" (bar open, epoch ms) so a webhook receiver can
+//    reject duplicates and out-of-order deliveries.
+// 6. FVG BOXES IGNORED THEIR OWN RIGHT EDGE. box.new got both an explicit
+//    right edge and extend=extend.right; the extend wins, so boxes ran to
+//    the edge of the chart forever, contradicting v3.4's bounded rendering.
+//    They now end at the age limit that invalidates them (i_fvgMaxAge).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.4 CHANGELOG — ACCURACY AUDIT (six measurement bugs)
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. WICK FILTER VETOED THE SWEEP TRIGGER'S OWN SIGNATURE. notWeak blocked any
+//    bar whose COMBINED wicks exceed body × 2. A liquidity sweep is BY
+//    DEFINITION a long-rejection-wick bar (wick ≥ 0.4 ATR beyond the level,
+//    body ≥ 0.3-0.5 ATR ⇒ ratio typically 2-4), so the filter rejected the
+//    very bars the sweep and FVG-midpoint triggers select — undoing much of
+//    the v3.5.1 sweep fix. Rejection-based triggers are now judged on the
+//    OPPOSING wick only: for a BUY the upper wick is supply (weakness), the
+//    lower wick is the rejection you are trading. MSS (continuation) keeps
+//    the original combined test.
+// 2. MIN-RISK FLOOR WAS UNREACHABLE. The SL floor (close ± 0.5 ATR) sat BELOW
+//    the min-risk requirement (1.0 ATR), so any setup with a near pivot
+//    produced a stop the engine then rejected — a dead zone between 0.5 and
+//    1.0 ATR that silently discarded valid setups. Stops are now clamped into
+//    BOTH ends of the risk window (new "Clamp SL Into Risk Window" input, ON
+//    by default; turn it off to restore blocking). Generalizes the Scalp-only
+//    max-side clamp from v3.5.1 to both bounds and all modes.
+// 3. DELTA GATE WAS A DUPLICATE OF THE OF GATE. v3.5.2 defined deltaRatio as
+//    2·closePos−1, which makes "delta ≥ 0.20" and "close position ≥ 60%"
+//    THE SAME TEST — the order-flow stack was one measurement counted twice
+//    (the exact redundancy v3.3 set out to remove). Delta is now body
+//    conviction, (close−open)/range: a bar can close at its high with a
+//    doji body and now correctly fails delta while passing close position.
+//    Two genuinely independent bar-shape measures again.
+// 4. VWAP WAS NEAR-MEANINGLESS ON 4H. ta.vwap anchors to the session, so a 4H
+//    chart averages ~6 bars — noise that the distance guard then gates on.
+//    New anchor input (Auto/Session/Week/Month); Auto uses the session below
+//    1H and the week at 1H and above.
+// 5. SAME-BAR SL + TP1 WAS RESOLVED OPTIMISTICALLY. When one bar traded
+//    through both levels the code credited TP1 and cleared the SL-hit flag,
+//    disabling the post-SL cooldown after what may have been a loss. Now
+//    resolved conservatively (SL first) — the standard assumption when
+//    intrabar order is unknown.
+// 6. REL VOLUME COMPARED A BAR TO AN AVERAGE CONTAINING ITSELF. The 20-bar
+//    SMA included the current bar, damping exactly the spikes the floor is
+//    meant to detect. Now averages the PRIOR 20 bars.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.3 CHANGELOG — NEWS BLACKOUT WINDOWS + TP DE-DUPLICATION
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NEWS BLACKOUT WINDOWS (built for oil, useful on any scheduled-news
+//    symbol). Optional filter blocks NEW signals during up to two weekly
+//    windows (session syntax, own timezone), with a background tint while
+//    active and "news" reported in the Last Block row. Defaults are
+//    preloaded for WTI crude: EIA inventories (Wed 10:15-11:30 ET) and API
+//    (Tue 16:15-17:45 ET). Release spike bars score as perfect order-flow
+//    confluence (huge volume, strong delta, big body) right before they
+//    mean-revert — exactly the bars to skip. OFF by default. Most effective
+//    on intraday charts, where bars actually open inside the window.
+// 2. TP DE-DUPLICATION. A double top/bottom put two pivot candidates a few
+//    points apart and the TP selector assigned BOTH as TP1 and TP2 (seen
+//    live on XAUUSD: TP1 ~4118 / TP2 4120.5), collapsing the plan into one
+//    target zone. Structure candidates closer than max(0.5 ATR, 0.25R) to
+//    the previously kept target are now merged, so TP2/TP3 promote to the
+//    next real level or the R-multiple fallback.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.2 CHANGELOG — ALL MODES FIRE AGAIN + BLOCK-REASON DEBUGGING
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.1 fixed Scalp; this pass fixes the gates that starved EVERY mode.
+// 1. NO-VOLUME BLACKOUT. On symbols with no volume feed (many indices, FX and
+//    CFD tickers) volOk, deltaRatio and the CVD gate were all na/false — no
+//    signal could EVER fire in any mode, silently. Volume-dependent gates
+//    (rel-vol floor, CVD) now self-disable on such symbols (the dashboard
+//    says so) while bar-shape gates stay active. Also: relVol divided by
+//    max(avg, 1.0), which distorted the ratio on low-nominal-volume symbols;
+//    the floor is now epsilon-only.
+// 2. RISK WINDOW IN WRONG UNITS (all modes). Same class of bug fixed for
+//    Scalp in v3.5.1: the SL is built from atrBase = max(atr14, atr50) but
+//    the min/max risk window was judged in atr14. In chop (atr50 > atr14)
+//    the structural stop routinely overflowed the cap and silently blocked
+//    the trade. The window is now measured in the same ATR the SL is built
+//    from. Dashboard and JSON "risk_atr" use the same reference.
+// 3. DELTA FLOOR SILENTLY OVERRODE THE OF THRESHOLD. With bar-shape
+//    estimation deltaRatio is mathematically 2·closePos−1 — the same scale
+//    as the OF %. The 0.30 default therefore demanded a 65% close position,
+//    overriding the advertised 60% threshold. New default 0.20 (⇔ 60%) so
+//    the two gates agree; raise it back if you want the stricter behavior.
+// 4. RSI CEILING CLIPPED BREAKOUT BARS. MSS fires on strong breakout closes,
+//    exactly where RSI(14) runs above the old 72 ceiling — the band vetoed
+//    the very bars the trigger selects. Defaults widened: BUY max 72→78,
+//    SELL min 28→22. Retune to taste; the inputs are unchanged in range.
+// 5. AGGRESSIVE WAS STILL HTF-GATED. Its mode gate was open, but the HTF
+//    check baked inside the FVG/Sweep trigger construction still applied —
+//    contradicting "structure + OF only". Aggressive now bypasses it there
+//    too (Balanced/Strict unchanged).
+// 6. "LAST BLOCK" DEBUGGING. New dashboard row names the exact gates that
+//    vetoed the most recent trigger (e.g. "BUY ✕ of% rsi"), plus an optional
+//    on-chart ✕ label on every blocked trigger bar — no more blind tuning.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.1 CHANGELOG — SCALP MODE ACTUALLY FIRES + PERFORMANCE PASS
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY SCALP NEVER FIRED (all fixed):
+// 1. RISK-CAP MISMATCH. The SL was built from atrBase = max(atr14, atr50),
+//    widened ×1.2 in chop — but the Scalp risk window (0.5-2.0) was measured
+//    in plain atr14. In chop (where scalps live) the structural stop routinely
+//    exceeded 2× atr14 and the signal was silently blocked. Scalp now builds
+//    its SL from atr14 with a tight ≤0.3-ATR buffer, no regime widening, and
+//    clamps a too-far structural stop to the max-risk cap (volatility stop)
+//    instead of blocking the trade. Other modes unchanged.
+// 2. COUNTER-TREND VETO. Scalp enabled sweep triggers "in both directions",
+//    but rawBuy still hard-required cvdBull AND EMA 8>21. A bullish sweep at
+//    a low happens AFTER a decline — CVD and momentum are still bearish at
+//    that moment, so sweep scalps were vetoed essentially 100% of the time.
+//    Sweep-triggered scalps are now exempt from the CVD and momentum trend
+//    gates (the sweep's own rejection close, delta floor, OF threshold and
+//    volume floor still gate the entry). MSS/FVG scalps keep both gates.
+// 3. CHOP THRESHOLD OVERRIDE. The adaptive OF gate added +5% in chop, pushing
+//    Scalp's 57% floor back up to 62% — above even the Balanced base. Scalp
+//    now uses its flat threshold; other modes keep the adaptive tightening.
+//
+// PERFORMANCE ("slow to load" fixes — no signal-logic impact except where noted):
+// 4. FRVP THROTTLE. The profile (lookback × bin-overlap loops) rebuilt on
+//    EVERY historical bar. New input "FRVP Refresh Every N Bars" (default 5,
+//    set 1 for the old exact behavior) rebuilds on a stride + always on the
+//    last bar. POC/VAH/VAL can be up to N-1 bars stale intrabar — an accepted
+//    tradeoff, disclosed here and in the tooltip.
+// 5. FRVP RENDER ON LAST BAR ONLY. Lines/zone/labels were deleted and redrawn
+//    on every confirmed bar across all of history; now drawn only on the last
+//    bar (identical final visual).
+// 6. SINGLE request.security CALL. HTF close and HTF EMA now come from one
+//    tuple request instead of two separate HTF requests.
+// 7. LAZY TP SELECTION. f_tpLevels (array build + sort, ×2) ran on every bar;
+//    now runs only on signal bars. Identical levels on signal bars.
+// 8. LAZY ALERT JSON. Both ~30-field JSON strings were concatenated on every
+//    bar; now built only on the signal bar that sends them.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5 CHANGELOG — SCALP MODE (new 4th engine mode; other modes unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Scalp" trades structure + order flow in BOTH directions with the lag
+// stripped out. Still 100% bar-close confirmed — it does NOT repaint.
+// Selecting Scalp clamps settings toward the fast preset (a user input that
+// is already faster/looser than the preset is kept as-is):
+//
+//   • Pivots confirm with 2 bars per side (vs 3) — structure seen 1 bar sooner
+//   • Momentum: current-bar EMA 8>21 only — no 2-bar persistence, no slope
+//   • CVD gate uses faster EMAs 3/10 (vs 5/20)
+//   • HTF 4H gate fully bypassed (in the mode gate AND inside the FVG/Sweep
+//     trigger construction, where it was silently baked in for all modes)
+//   • Structural HTF-locked bias bypassed — scalps take both directions
+//   • Mode gate reduced to the VWAP overextension guard only (never chase)
+//   • Sweep AND FVG triggers both enabled
+//   • OF floors softened: threshold ≤57%, delta ≤0.15, rel-vol ≤1.0×,
+//     body ≤0.3 ATR
+//   • RSI band widened: BUY 35-80, SELL 20-65
+//   • Cooldown ≤5 bars (post-SL doubling still applies)
+//   • Risk window tightened to 0.5-2.0 ATR (scalp stops are close)
+//   • TP fallbacks tightened to 1R / 1.5R / 2R (structure targets still first)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.4.1 CHANGELOG — zero-error pass (compile + runtime + trade-logic fixes)
+// ─────────────────────────────────────────────────────────────────────────────
+// FRVP early-bar crash guard; SL/TP tracking independent of display toggle;
+// unified TP levels for chart + labels + JSON alerts; trigger names respect
+// mode gating; sweep ta.highest/lowest hoisted out of ternaries; RSI SELL
+// dashboard cell dim when OUT; age counters capped at 999; dashboard redraw
+// only on last bar; nz()-guarded profile volume.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.4 CHANGELOG — FRVP / VAH / VAL accuracy + rendering rebuild
+// ─────────────────────────────────────────────────────────────────────────────
+// Proportional volume distribution across overlapped bins; classic two-bin
+// Market Profile VA expansion; default 32 bins (max 64); bounded rendering;
+// optional POC/VAH/VAL price labels; numeric poc/vah/val in JSON alerts;
+// dashboard FRVP row shows live POC.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.3 CHANGELOG — accuracy fixes (unchanged in v3.4.x)
+// ─────────────────────────────────────────────────────────────────────────────
+// Max-risk cap; VWAP overextension guard; RSI sanity band; trigger freshness
+// window (MSS/Sweep valid for N bars); FVG expiration; slow-EMA slope
+// confirmation; real net-delta-ratio OF gate; doji-neutral CVD; HTF-checked
+// structural bias; TP1 clears SL-cooldown flag; rejection-wick FVG retests.
+// Tuning: cooldown 15→12, OF base threshold 62→60.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT GROUPS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string G_ENGINE = "══ Engine Mode ══"
+var string G_STRUCT = "══ Market Structure ══"
+var string G_FVG    = "══ Fair Value Gaps ══"
+var string G_SWEEP  = "══ Liquidity Sweeps ══"
+var string G_OF     = "══ Order Flow ══"
+var string G_MOM    = "══ Momentum Stack ══"
+var string G_HTF    = "══ HTF Trend Filter ══"
+var string G_VWAP   = "══ VWAP Filter ══"
+var string G_FRVP   = "══ Fixed-Range Volume Profile ══"
+var string G_RSI    = "══ RSI Sanity Filter ══"
+var string G_TPSL   = "══ TP / SL Projection ══"
+var string G_RISK   = "══ Risk Guards ══"
+var string G_NEWS   = "══ Time Filters + News ══"
+var string G_VIS    = "══ Visuals ══"
+var string G_ALERT  = "══ Alerts ══"
+
+i_scalpFreq  = input.string("Selective", "Scalp Signal Frequency",
+     options=["Selective","Standard","High"],
+     tooltip="v3.5.14: Scalp only. Trades signal COUNT against signal QUALITY, explicitly, so the cost of each step is visible instead of buried.\n\nSELECTIVE (default) — cooldown 5 bars, TP1 must reach the full Min TP1 Reward, confluence floor 1. Identical to v3.5.13.\nSTANDARD — cooldown 4, TP1 reward capped at 0.9R, confluence floor 1.\nHIGH — cooldown 2, TP1 reward capped at 0.7R, confluence floor removed.\n\nHIGH raises the rate mainly by letting good setups sit closer together (cooldown), which costs least, but it also accepts nearer first targets and drops the trend-context floor, which costs real quality. A closer TP1 also fires the breakeven move sooner, so more trades end as scratches.\nSignals per day depend on the market, not the setting — measure the actual rate in the strategy tester.",
+     group=G_ENGINE)
+i_mode       = input.string("Balanced", "Engine Mode",
+     options=["Scalp","Aggressive","Balanced","Strict"],
+     tooltip="Scalp: fastest non-repainting preset — 2-bar pivots, 1-bar momentum, fast CVD, no HTF/bias gate, both directions, cooldown 5, tight 0.5-2 ATR risk window, atr14-based clamped stops, sweep entries exempt from CVD/momentum trend gates (v3.5.1).\nAggressive: structure + OF only (no HTF/VWAP gate).\nBalanced: requires HTF trend + VWAP alignment.\nStrict: requires HTF + VWAP + FRVP value area.",
+     group=G_ENGINE)
+
+// ── Market Structure ─────────────────────────────────────────────────────────
+i_swingLen   = input.int(3,   "Pivot Confirmation (bars each side)",
+     minval=2, maxval=20,
+     tooltip="Bars required on EACH side of a pivot to confirm it as a real swing.\n3 = 7-bar window (balance of speed vs. reliability).\nRaise to 5+ on lower timeframes to filter noise.",
+     group=G_STRUCT)
+i_mssFollow  = input.float(0.1,"MSS Follow-Through (× ATR)",
+     minval=0.0, maxval=1.0, step=0.05,
+     tooltip="Close must break the pivot level by this many ATRs. Prevents 1-tick stop-run 'breaks' that reverse next bar.",
+     group=G_STRUCT)
+i_slAtr      = input.float(0.5,"SL Buffer Below/Above Pivot (× ATR)",
+     minval=0.1, maxval=3.0, step=0.1,
+     tooltip="SL is placed at last pivot ± this ATR buffer.\nAuto-scales UP in chop (×1.2) and expansion (×1.3) — never tightens below 1.0×.\nScalp mode: buffer clamped to ≤0.3 and based on atr14 with no regime scaling (v3.5.1).",
+     group=G_STRUCT)
+i_triggerAge = input.int(3, "Trigger Max Age (bars)",
+     minval=1, maxval=10,
+     tooltip="MSS and Sweep triggers stay 'fresh' for this many bars after firing. Lets OF/CVD confirm on N+1/N+2 rather than only same-bar. v3.3 accuracy fix.\nPair this with the extension cap below — freshness alone let entries land several bars and several ATR past the level that was broken.",
+     group=G_STRUCT)
+i_maxChase   = input.float(1.0, "Max Entry Extension Past Trigger (× ATR)",
+     minval=0.1, maxval=5.0, step=0.1,
+     tooltip="v3.5.6: rejects a breakout entry taken more than this far ABOVE the broken pivot (below it, for shorts). i_mssFollow sets the MINIMUM break distance; nothing set a maximum, so with the freshness window an entry could land 1-3 ATR past the level with the stop still under the swing low — a chase, and the most reliable way to be stopped out.\nApplies only when the breakout is the sole trigger; sweep and FVG-retest entries occur AT a level and are unaffected.\nRaise it to allow more momentum continuation; lower it to demand entries close to structure.",
+     group=G_STRUCT)
+
+// ── Fair Value Gaps ──────────────────────────────────────────────────────────
+i_fvgMinAtr  = input.float(0.35,"Min FVG Size (× ATR)", minval=0.1, maxval=5.0, step=0.05, group=G_FVG)
+i_fvgMaxAge  = input.int(30, "FVG Max Age (bars)",
+     minval=5, maxval=500,
+     tooltip="FVG is invalidated if not retested within this many bars. Stops stale gaps from firing. v3.3 accuracy fix.",
+     group=G_FVG)
+i_fvgMax     = input.int(5, "Max Gaps Tracked Per Direction", minval=1, maxval=20,
+     tooltip="v3.5.10: how many unfilled FVGs to keep per side. Before this, exactly ONE gap per direction was retained — a new gap overwrote the previous one, so an older gap price had not yet returned to was silently discarded. In a fast leg that stacks several gaps only the newest survived, and the newest is usually the FURTHEST from price, i.e. the least likely to be retested.\nEach tracked gap expires and invalidates independently. Higher values retain more history at a small drawing cost.",
+     group=G_FVG)
+i_fvgMidTrig = input.bool(true, "Trigger on 50% Midpoint Touch (with rejection)",
+     tooltip="Fires retest when price wicks into FVG midpoint AND closes with rejection (upper 60% of bar for bull, lower 40% for bear). Earlier than full-fill retest, without accepting weak touches.",
+     group=G_FVG)
+i_fvgShow    = input.bool(true, "Show FVG Boxes", group=G_FVG)
+i_fvgBullCol = input.color(color.new(#00E5FF, 80), "Bull FVG Color", group=G_FVG)
+i_fvgBearCol = input.color(color.new(#FF3366, 80), "Bear FVG Color", group=G_FVG)
+i_fvgLabel   = input.bool(true, "Show FVG Labels", group=G_FVG)
+
+// ── Sweep ────────────────────────────────────────────────────────────────────
+i_sweepUsePivot = input.bool(true, "Sweep Uses Pivot Levels (not range high/low)",
+     tooltip="ON = sweeps must violate an actual confirmed swing high/low (real liquidity). OFF = legacy N-bar high/low sweep.",
+     group=G_SWEEP)
+i_sweepPivotLen = input.int(5, "Sweep Pivot Length (bars each side)", minval=2, maxval=20,
+     tooltip="v3.5.13: sweeps now target their OWN pivots at this depth, independent of the entry pivot length and NOT overridden by any mode.\nScalp clamps the entry pivot to 2 bars per side for responsiveness — fine for spotting a break, but a 2-bar swing is not a liquidity pool, and a sweep of one is noise wearing the name of a setup. Scalp leans on sweeps more than any other mode, so it was aiming its main trigger at the shallowest structure on the chart.\n5 = an 11-bar swing, a level with orders resting under it. Raise for fewer, more significant sweeps.",
+     group=G_SWEEP)
+i_sweepLook  = input.int(10, "Sweep Lookback (bars, legacy mode)", minval=3, maxval=100, group=G_SWEEP)
+i_sweepWick  = input.float(0.4, "Min Sweep Wick (× ATR)", minval=0.1, maxval=2.0, step=0.05,
+     tooltip="Wick must extend at least this far beyond the liquidity level. v3.2 default raised to 0.4 to filter near-misses.",
+     group=G_SWEEP)
+
+// ── Order Flow ───────────────────────────────────────────────────────────────
+i_ofThresh   = input.float(60.0,"OF Pressure Threshold (%)",
+     minval=55.0, maxval=90.0, step=0.5,
+     tooltip="Base close-position (%) required. v3.3 relaxed 62→60 because a real delta-ratio gate now sits alongside this — buyPct becomes the coarse floor.",
+     group=G_OF)
+i_deltaFloor = input.float(0.20,"Min Body Conviction (Δ)",
+     minval=0.0, maxval=1.0, step=0.05,
+     tooltip="(close − open) / bar range must exceed this. v3.5.4: this is now BODY CONVICTION, a measure independent of the OF threshold. Previously it was 2×closePos−1, i.e. mathematically the same test as the OF close-position threshold — the order-flow stack was one measurement counted twice.\nTogether the two gates now require: closed near the extreme (OF %) AND real directional body (Δ). A doji closing at its high passes the first and correctly fails the second.\nWithout tick data neither is true exchange delta; both are bar-shape estimates.",
+     group=G_OF)
+i_ofAdaptive = input.bool(true, "Adaptive OF Threshold (tighten in chop)",
+     tooltip="Raises threshold by +5% in chop regime. Never LOWERS the threshold.\nScalp mode ignores the chop tightening — it would override the scalp 57% floor (v3.5.1).",
+     group=G_OF)
+i_volFloor   = input.float(1.2,"Min Relative Volume (× avg)",
+     minval=0.5, maxval=5.0, step=0.1,
+     tooltip="Signal blocked if volume < this × 20-bar average.",
+     group=G_OF)
+i_bodyAtr    = input.float(0.5,"Min Signal Bar Body (× ATR)",
+     minval=0.2, maxval=3.0, step=0.05,
+     tooltip="Signal bar's body must be at least this fraction of ATR.",
+     group=G_OF)
+i_wickMax    = input.float(2.0,"Max Wick/Body Ratio",
+     minval=0.5, maxval=10.0, step=0.1,
+     tooltip="Blocks bars where wicks exceed body × this ratio. Filters doji/indecision candles.\nv3.5.4: MSS (continuation) entries are judged on COMBINED wicks as before. Sweep and FVG-retest entries are judged on the OPPOSING wick only — a sweep bar's long rejection wick is the setup, not weakness, and the combined test was vetoing the trigger's own signature.",
+     group=G_OF)
+i_cvdReset   = input.bool(false, "Reset CVD Each Session (daily anchor)",
+     tooltip="Anchors CVD to session open. Default OFF because reset creates 20-bar noisy EMA readings.",
+     group=G_OF)
+
+// ── Momentum Stack ───────────────────────────────────────────────────────────
+i_momFilter  = input.bool(true, "Enable EMA Momentum Filter (8/21)",
+     tooltip="Blocks BUY when fast EMA < slow EMA (and reverse for SELL). Requires 2-bar persistence AND slow-EMA slope in trigger direction.",
+     group=G_MOM)
+i_momFast    = input.int(8,  "Fast EMA", minval=2, maxval=50, group=G_MOM)
+i_momSlow    = input.int(21, "Slow EMA", minval=5, maxval=200, group=G_MOM)
+i_emaSlope   = input.bool(true, "Require Slow-EMA Slope Confirmation",
+     tooltip="Slow EMA must slope in trigger direction (>3 bars). Kills entries when both EMAs are flat and fast just brushes slow. v3.3 accuracy fix.",
+     group=G_MOM)
+
+// ── HTF Trend ────────────────────────────────────────────────────────────────
+i_htfTf      = input.timeframe("240","HTF Timeframe", group=G_HTF)
+i_htfEmaLen  = input.int(50, "HTF EMA Length", minval=5, maxval=500, group=G_HTF)
+i_htfFilter  = input.bool(true, "Enforce HTF Direction (strict)", group=G_HTF)
+
+// ── VWAP ─────────────────────────────────────────────────────────────────────
+i_vwapFilter = input.bool(true, "Enable VWAP Filter", group=G_VWAP)
+i_vwapAnchor = input.string("Auto", "VWAP Anchor", options=["Auto","Session","Week","Month"],
+     tooltip="v3.5.4: ta.vwap anchors to the SESSION by default, which on a 4H chart averages only ~6 bars — too few to be a meaningful mean, yet the distance guard still gated on it. Auto uses Session below 1H and Week at 1H and above.",
+     group=G_VWAP)
+i_vwapMaxDist= input.float(3.0, "Max Distance From VWAP (× ATR)",
+     minval=0.5, maxval=20.0, step=0.25,
+     tooltip="Signal blocked if |close - VWAP| > this × ATR. Prevents chasing extended moves. v3.3 accuracy fix.",
+     group=G_VWAP)
+i_vwapShow   = input.bool(true, "Show VWAP Line", group=G_VWAP)
+i_vwapCol    = input.color(color.new(#FFD700, 60), "VWAP Color", group=G_VWAP)
+
+// ── FRVP ─────────────────────────────────────────────────────────────────────
+i_frvpLen    = input.int(100, "FRVP Lookback (bars)", minval=20, maxval=500, group=G_FRVP)
+i_frvpBins   = input.int(32,  "FRVP Bins", minval=8, maxval=64,
+     tooltip="v3.4: default 24→32, max 48→64. Finer bins = tighter, more accurate VAH/VAL. With proportional volume distribution (v3.4), higher bin counts no longer create noisy profiles.",
+     group=G_FRVP)
+i_frvpEvery  = input.int(5, "FRVP Refresh Every N Bars", minval=1, maxval=50,
+     tooltip="v3.5.1 performance fix: rebuild the profile every N bars (plus always on the last bar) instead of every bar. The lookback×bins rebuild was the main reason the script loaded slowly. POC/VAH/VAL can be up to N-1 bars stale between refreshes. Set 1 for the exact v3.4 every-bar behavior.",
+     group=G_FRVP)
+i_frvpShow   = input.bool(true, "Show FRVP (POC/VAH/VAL)", group=G_FRVP)
+i_vaWidth    = input.float(0.7,"Value Area Width", minval=0.5, maxval=0.95, step=0.01, group=G_FRVP)
+i_frvpExtend = input.int(20, "Right Extension (bars)", minval=0, maxval=200,
+     tooltip="v3.4: POC/VAH/VAL lines and the VA zone end this many bars right of the current bar instead of extending infinitely across the chart.",
+     group=G_FRVP)
+i_frvpLevels = input.bool(true, "Show POC/VAH/VAL Price Labels",
+     tooltip="v3.4: small price tags at the right edge of the profile.",
+     group=G_FRVP)
+i_pocCol     = input.color(color.new(#FFD700, 0),  "POC Color", group=G_FRVP)
+i_vahCol     = input.color(color.new(#00E5FF, 40), "VAH Color", group=G_FRVP)
+i_valCol     = input.color(color.new(#00E5FF, 40), "VAL Color", group=G_FRVP)
+i_vaFill     = input.bool(true, "Fill Value Area", group=G_FRVP)
+
+// ── RSI Sanity ───────────────────────────────────────────────────────────────
+i_rsiFilter  = input.bool(true, "Enable RSI Sanity Filter",
+     tooltip="Blocks entries in overbought/oversold zones. v3.3 accuracy fix.",
+     group=G_RSI)
+i_rsiLen     = input.int(14, "RSI Length", minval=2, maxval=100, group=G_RSI)
+i_rsiBuyLo   = input.int(40, "BUY min RSI", minval=10, maxval=60, group=G_RSI)
+i_rsiBuyHi   = input.int(78, "BUY max RSI", minval=55, maxval=90,
+     tooltip="v3.5.2 default 72→78: MSS fires on strong breakout closes, exactly where RSI runs hot — 72 vetoed the very bars the trigger selects.", group=G_RSI)
+i_rsiSellLo  = input.int(22, "SELL min RSI", minval=10, maxval=45,
+     tooltip="v3.5.2 default 28→22 (mirror of the BUY-side fix).", group=G_RSI)
+i_rsiSellHi  = input.int(60, "SELL max RSI", minval=40, maxval=90, group=G_RSI)
+
+// ── TP / SL ──────────────────────────────────────────────────────────────────
+i_tpslShow   = input.bool(true, "Show TP / SL Lines",
+     tooltip="v3.4.1: display only. SL/TP tracking (post-SL cooldown, TP1 de-risk) now runs whether or not lines are shown.",
+     group=G_TPSL)
+i_tp1R       = input.float(1.5, "TP1 (R-multiple fallback)", minval=0.5, maxval=10.0, step=0.5, group=G_TPSL)
+i_tp2R       = input.float(2.5, "TP2 (R-multiple fallback)", minval=0.5, maxval=20.0, step=0.5, group=G_TPSL)
+i_tp3R       = input.float(4.0, "TP3 (R-multiple fallback)", minval=0.5, maxval=30.0, step=0.5, group=G_TPSL)
+i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200, group=G_TPSL)
+i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5.0, step=0.1,
+     tooltip="v3.5.8: TP1 must sit at least this many multiples of the stop distance away, or the setup is skipped (reports as 'rr' in Last Block). 0 disables.\nThe engine has always bounded RISK and never once checked REWARD. TP1 is simply the nearest structure level above entry, so it can be a fraction of the stop distance away — and since TP1 also triggers the breakeven move, a too-close first target turns trades into scratches: a third off for a few ticks, stop to entry, brushed out of the rest.\nRaising this demands better setups and cuts signal count; lower it if you want closer first targets.",
+     group=G_TPSL)
+i_spreadBuf  = input.float(0.0, "Spread + Slippage Buffer (price)", minval=0.0, step=0.01,
+     tooltip="v3.5.16: pushes the stop this far FURTHER from entry, in price units, and the reported risk grows to match.\nNothing in the engine modelled spread until now: the stop sat exactly on the structural level, so on a symbol with any spread the level could be taken out by the quote alone while the traded price never reached it. On XAUUSD a 0.30 spread against a 9-point scalp stop is ~3% of risk; on a tighter stop it is worse.\nSet it to your broker's typical spread plus expected slippage (gold ~0.20-0.50, majors ~0.00010-0.00020). 0 = off, and the engine behaves exactly as before.\nOnly the STOP is buffered. Targets are left alone: widening them would flatter the plan rather than protect it.",
+     group=G_TPSL)
+i_zoneShow   = input.bool(false, "Draw TP / SL As Zones",
+     tooltip="v3.5.16: renders a band around each level instead of a bare line. A price level is never exact in practice — spread, slippage and the tick you actually get all sit around it — and a hairline encourages precision the fill will not honour.\nBand height is set below. Display only; it changes no signal and no level.",
+     group=G_TPSL)
+i_zoneAtr    = input.float(0.1, "Zone Half-Height (× ATR)", minval=0.02, maxval=1.0, step=0.02,
+     tooltip="Half-height of each TP/SL band, in ATR. 0.1 = a band one fifth of an ATR tall centred on the level.",
+     group=G_TPSL)
+i_maxBars    = input.int(0, "Max Bars In Trade (0 = off)", minval=0, maxval=500,
+     tooltip="v3.5.8: closes tracking after this many bars if neither the stop nor TP3 has been reached. Without it a trade that stalls stays 'open' forever — the runner never resolves, the post-TP1/SL bookkeeping never updates, and in the strategy build the position sits there distorting results. Counts as a neutral exit, not a loss.",
+     group=G_TPSL)
+
+// ── Risk Guards ──────────────────────────────────────────────────────────────
+i_minRisk    = input.float(1.0,"Min Risk Required (× ATR)",
+     minval=0.5, maxval=5.0, step=0.25,
+     tooltip="Signal blocked if entry-to-SL distance < this many ATRs.",
+     group=G_RISK)
+i_maxRisk    = input.float(3.0,"Max Risk Cap (× ATR)",
+     minval=1.0, maxval=10.0, step=0.25,
+     tooltip="Signal blocked if entry-to-SL distance > this many ATRs. Kills setups where the pivot is too far away. v3.3 accuracy fix.\nScalp mode: a structural stop beyond the cap is clamped to the cap (volatility stop) instead of blocking (v3.5.1).",
+     group=G_RISK)
+i_riskClampMode = input.string("Near side only", "Stop Clamping",
+     options=["Off (block instead)","Near side only","Both sides"],
+     tooltip="What to do when the structural stop falls outside the min/max risk window.\n\nNEAR SIDE ONLY (default, v3.5.6): a too-TIGHT stop is widened to the min-risk floor — safe, because the stop only moves further from price and stays beyond the invalidation level. A setup whose real invalidation lies beyond the max-risk cap is SKIPPED, not clamped.\n\nBOTH SIDES (v3.5.4/v3.5.5 behavior): also drags a too-far stop IN to the cap, placing it inside the structure that defines the trade, so price can hit it while the setup is still valid — the cause of the Strict/Balanced stop-outs reported against v3.5.5. Choose it only if you want a pure volatility stop.\n\nOFF: both ends gate the signal (pre-v3.5.4).\n\nv3.5.7: Scalp uses the same near-side-only default as every other mode. Its sweep stops are now anchored to the sweep wick rather than the pivot, so they are naturally tight and the far clamp rarely binds; when it would, the invalidation is too far away to be a scalp.",
+     group=G_RISK)
+i_minConf    = input.int(0, "Min Confluence Required (0-3)", minval=0, maxval=3,
+     tooltip="v3.5.12: requires this many of the three directional alignments — HTF side, VWAP side, value-area side. The score has been computed since v3.3 and only ever displayed; this makes it a gate.\nUseful in Scalp specifically, which bypasses the HTF and bias gates entirely: setting 1 or 2 restores some trend context WITHOUT reverting Scalp into Balanced. 0 = off.\nExpect materially fewer signals at 2, very few at 3.",
+     group=G_RISK)
+i_regimeFilter = input.string("Any", "Volatility Regime Filter", options=["Any","Skip chop","Skip expansion"],
+     tooltip="v3.5.12: volRegime (atr14/atr50) has been computed and displayed since v3.3 without ever gating anything.\nSkip chop: no signals when atr14 <= 0.85x atr50 — breakouts fail most in compression.\nSkip expansion: no signals when atr14 >= 1.15x atr50 — avoids entering after the move has already gone.\nWhich helps is symbol-dependent and unmeasured; test one at a time.",
+     group=G_RISK)
+i_stRiskPct  = input.float(1.0, "STRATEGY: Risk Per Trade (% equity)", minval=0.05, maxval=10.0, step=0.05,
+     tooltip="Position size is derived from this and the entry-to-stop distance, so a wide-stop trade takes a smaller position and every trade risks the same fraction of equity. Without this, results would just measure stop width.",
+     group=G_RISK)
+i_stMaxLev   = input.float(5.0, "STRATEGY: Max Notional (x equity, 0 = uncapped)", minval=0.0, maxval=100.0, step=0.5,
+     tooltip="Caps position size at this multiple of equity. Risk-normalised sizing divides by stop distance, so a very tight stop yields an enormous position — at 1% risk and a 1-point gold stop that is roughly 44x equity in notional. Without a cap, a few tight-stop trades dominate the whole equity curve and the test stops measuring the engine.\n0 disables the cap.",
+     group=G_RISK)
+i_cooldown   = input.int(12,   "Signal Cooldown (bars)", minval=0, maxval=100,
+     tooltip="Minimum bars between any two signals. v3.3 relaxed 15→12; all other filters compensate.",
+     group=G_RISK)
+i_postSlCd   = input.bool(true, "Double Cooldown After SL Hit",
+     tooltip="If the prior trade hit its SL before any TP, the next signal is blocked for 2× cooldown.",
+     group=G_RISK)
+i_beAfterTp1 = input.bool(true, "Move SL To Breakeven After TP1",
+     tooltip="v3.5.5: when TP1 trades, move the tracked stop to the entry price. The engine already treated TP1 as 'de-risked' for the cooldown guard but left the stop where it was, so a trade could tag TP1 and still return a full loss. The drawn SL line and label move with it.",
+     group=G_RISK)
+i_maxLossStreak = input.int(0, "Pause After N Consecutive Losses", minval=0, maxval=20,
+     tooltip="v3.5.5: after N stop-outs in a row (none of which reached TP1), block new signals until a trade reaches TP1 again. 0 = disabled. A bar-count cooldown does not help when the regime has turned against the setup type.",
+     group=G_RISK)
+
+// ── News Blackout ────────────────────────────────────────────────────────────
+i_newsFilter = input.bool(false, "Enable News Blackout Windows",
+     tooltip="v3.5.3: blocks new signals during the windows below (background tinted while active). Built for oil — EIA/API/OPEC releases produce spike bars that score as perfect order-flow confluence right before they mean-revert. Enable on USOIL/UKOIL/CL; harmless to leave off elsewhere.",
+     group=G_NEWS)
+i_newsSess1  = input.session("1015-1130:4", "Blackout Window 1",
+     tooltip="Session syntax HHMM-HHMM:days, days 1=Sun…7=Sat. Default: EIA crude inventories, Wednesday 10:15-11:30 (in the timezone below).",
+     group=G_NEWS)
+i_newsSess2  = input.session("1615-1745:3", "Blackout Window 2",
+     tooltip="Default: API crude report, Tuesday 16:15-17:45 (in the timezone below).",
+     group=G_NEWS)
+i_sessFilter = input.bool(false, "Restrict To Trading Session",
+     tooltip="v3.5.12: only allow signals inside this window. The most reliable win-rate lever on a 15m intraday chart and the one the engine never had — gold in the Asian session ranges without follow-through, and a continuation engine bleeds there. Default window is the London open through the New York session, weekdays.\nUses the timezone below.",
+     group=G_NEWS)
+i_sessWindow = input.session("0300-1700:23456", "Trading Session",
+     tooltip="Session syntax HHMM-HHMM:days, days 1=Sun…7=Sat. Default 0300-1700 Mon-Fri in the timezone below = London open through the NY session in New York time.",
+     group=G_NEWS)
+i_newsTz     = input.string("America/New_York", "Blackout Timezone",
+     tooltip="IANA timezone the windows are evaluated in, e.g. America/New_York, UTC, Europe/London.",
+     group=G_NEWS)
+
+// ── Visuals ──────────────────────────────────────────────────────────────────
+i_buyCol     = input.color(color.new(#00E5FF, 0),  "BUY Color",  group=G_VIS)
+i_sellCol    = input.color(color.new(#FF3366, 0),  "SELL Color", group=G_VIS)
+i_barTint    = input.bool(true, "Tint bars on OF signal", group=G_VIS)
+i_dashboard  = input.bool(true, "Show Confluence Dashboard", group=G_VIS)
+i_dashPos    = input.string("Top Right","Dashboard Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=G_VIS)
+i_debugLabels = input.bool(false, "Show Block-Reason Labels (✕)",
+     tooltip="v3.5.2: prints a small ✕ label on every trigger bar that was vetoed, listing the gates that blocked it (body, wick, vol, of%, delta, cvd, mom, mode, bias, cooldown, risk, rsi). The dashboard 'Last Block' row always shows the most recent one regardless of this toggle.",
+     group=G_VIS)
+i_jsonAlerts = input.bool(true, "JSON Push Alerts", group=G_ALERT)
+i_webhookSecret = input.string("", "Webhook Shared Secret",
+     tooltip="v3.5.9: when set, every JSON payload carries a \"secret\" field and the n8n workflow rejects anything that does not match. A TradingView webhook URL is a public endpoint — without this, anyone who learns the URL can post a fake signal into your automation. Use a long random string. Leave empty to omit the field.",
+     group=G_ALERT)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCALP MODE — EFFECTIVE (MODE-ADJUSTED) SETTINGS (v3.5)
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalp clamps each setting TOWARD the fast preset via min/max, so a user
+// input that is already faster/looser than the preset is respected. All other
+// modes pass the raw inputs through unchanged.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+isScalp       = i_mode == "Scalp"
+effSwingLen   = isScalp ? 2 : i_swingLen
+effVolFloor   = isScalp ? math.min(i_volFloor,   1.0)  : i_volFloor
+effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
+effOfThresh   = isScalp ? math.min(i_ofThresh,   57.0) : i_ofThresh
+effBodyAtr    = isScalp ? math.min(i_bodyAtr,    0.3)  : i_bodyAtr
+// v3.5.14: the frequency preset moves three dials, all Scalp-only.
+scalpHigh     = isScalp and i_scalpFreq == "High"
+scalpStd      = isScalp and i_scalpFreq == "Standard"
+effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 2 : scalpStd ? 4 : 5) : i_cooldown
+effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
+effMaxRisk    = isScalp ? math.min(i_maxRisk,    2.0)  : i_maxRisk
+effTp1R       = isScalp ? math.min(i_tp1R,       1.0)  : i_tp1R
+effTp2R       = isScalp ? math.min(i_tp2R,       1.5)  : i_tp2R
+effTp3R       = isScalp ? math.min(i_tp3R,       2.0)  : i_tp3R
+effRsiBuyLo   = isScalp ? math.min(i_rsiBuyLo,  35)    : i_rsiBuyLo
+effRsiBuyHi   = isScalp ? math.max(i_rsiBuyHi,  80)    : i_rsiBuyHi
+effRsiSellLo  = isScalp ? math.min(i_rsiSellLo, 20)    : i_rsiSellLo
+effRsiSellHi  = isScalp ? math.max(i_rsiSellHi, 65)    : i_rsiSellHi
+// v3.5.13: Scalp bypasses the HTF gate AND the structural bias AND (for
+// sweeps) the CVD and momentum gates. That is a lot of context removed, and
+// it is why Scalp fires in both directions. Requiring at least ONE of the
+// three directional alignments puts a floor under that without turning Scalp
+// back into Balanced. A user asking for 2 or 3 keeps their stricter setting.
+effMinConf    = isScalp ? (scalpHigh ? i_minConf : math.max(i_minConf, 1)) : i_minConf
+effMinRR      = isScalp ? math.min(i_minRR, scalpHigh ? 0.7 : scalpStd ? 0.9 : 99.0) : i_minRR
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ATR + VOLATILITY REGIME
+// ═══════════════════════════════════════════════════════════════════════════════
+
+atr14 = ta.atr(14)
+atr50 = ta.atr(50)
+volRegime = atr50 > 0 ? atr14 / atr50 : 1.0
+volExpand = volRegime >= 1.15
+volChop   = volRegime <= 0.85
+
+atrBase   = math.max(atr14, atr50)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORDER FLOW — v3.3 replaces redundant closePos gate with real delta ratio
+// ═══════════════════════════════════════════════════════════════════════════════
+
+range_   = math.max(high - low, 1e-9)
+closePos = (close - low) / range_
+buyPct   = closePos * 100.0
+
+// v3.5.2: symbols with no volume feed (many indices / FX / CFD tickers)
+// previously produced volOk=false, deltaRatio=na and a flat CVD — no mode
+// could EVER fire on them, silently. Volume-dependent gates self-disable
+// when the symbol has never reported volume; bar-shape gates stay active.
+var bool volDataSeen = false
+if nz(volume) > 0
+    volDataSeen := true
+
+// v3.5.4: average the PRIOR 20 bars. Including the current bar in its own
+// benchmark damps exactly the spikes this floor exists to detect (a 3× bar
+// lifts the divisor it is measured against).
+volAvg = ta.sma(nz(volume[1]), 20)
+relVol = volDataSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
+volOk  = not volDataSeen or relVol >= effVolFloor
+
+// BODY CONVICTION (v3.5.4). Was 2·closePos−1, which is algebraically the same
+// test as the OF close-position threshold — the "second" order-flow gate was
+// the first one restated, so the stack had one measurement, not two.
+// (close−open)/range is independent of where in the range the bar closed:
+// a doji closing at its high scores ~0 here and is correctly rejected.
+deltaRatio    = (close - open) / range_
+deltaBullOk   = deltaRatio >=  effDeltaFloor
+deltaBearOk   = deltaRatio <= -effDeltaFloor
+
+// v3.5.1: Scalp ignores the chop tightening — +5% pushed the scalp floor from
+// 57% back to 62%, silently overriding the mode preset exactly where scalps
+// trade most (chop). Other modes keep the adaptive behavior.
+adaptThresh = i_ofAdaptive and volChop and not isScalp ? effOfThresh + 5.0 : effOfThresh
+
+// v3.3: doji contributes zero to CVD (was volume*(2*closePos-1) which drifted EMAs)
+sessionChange = ta.change(time("D")) != 0
+cvdVol = close > open ? nz(volume) : close < open ? -nz(volume) : 0.0
+var float cvd = 0.0
+if i_cvdReset and sessionChange
+    cvd := 0.0
+cvd := cvd + cvdVol
+// v3.5: Scalp uses faster CVD EMAs (3/10). All four EMAs are computed
+// unconditionally so their series stay consistent; the mode only selects.
+cvdEmaF  = ta.ema(cvd, 5)
+cvdEmaS  = ta.ema(cvd, 20)
+cvdEmaF2 = ta.ema(cvd, 3)
+cvdEmaS2 = ta.ema(cvd, 10)
+cvdBull  = isScalp ? cvdEmaF2 > cvdEmaS2 : cvdEmaF > cvdEmaS
+cvdBear  = isScalp ? cvdEmaF2 < cvdEmaS2 : cvdEmaF < cvdEmaS
+
+bodySize  = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+wickRatio = bodySize > 0 ? (upperWick + lowerWick) / bodySize : 999.0
+notWeak   = wickRatio <= i_wickMax
+
+// v3.5.4: directional wick tests for REJECTION-based triggers (sweep, FVG
+// retest). Those setups are long-wick bars by construction — a sweep must
+// spear ≥0.4 ATR through the level and close back — so the combined-wick
+// test above rejected the exact bars the trigger selects. For a BUY only the
+// UPPER wick is supply/weakness; the lower wick is the rejection being
+// traded. Selection happens at signal time, where the trigger flags exist.
+wickRatioBuy   = bodySize > 0 ? upperWick / bodySize : 999.0
+wickRatioSell  = bodySize > 0 ? lowerWick / bodySize : 999.0
+notWeakRejBuy  = wickRatioBuy  <= i_wickMax
+notWeakRejSell = wickRatioSell <= i_wickMax
+
+// v3.3: replaced redundant `closePos >= 0.55` with `deltaBullOk` (real second signal)
+ofBull = volOk and buyPct          >= adaptThresh and deltaBullOk
+ofBear = volOk and (100.0 - buyPct) >= adaptThresh and deltaBearOk
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MOMENTUM STACK — 2-bar persistence + slope confirmation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+emaFast = ta.ema(close, i_momFast)
+emaSlow = ta.ema(close, i_momSlow)
+momBullNow = emaFast > emaSlow
+momBearNow = emaFast < emaSlow
+momBull2   = momBullNow and momBullNow[1]
+momBear2   = momBearNow and momBearNow[1]
+
+emaSlopeBull = emaSlow > emaSlow[3]
+emaSlopeBear = emaSlow < emaSlow[3]
+
+momBull = momBull2 and (not i_emaSlope or emaSlopeBull)
+momBear = momBear2 and (not i_emaSlope or emaSlopeBear)
+
+// v3.5: Scalp requires only the current-bar EMA relation — no 2-bar
+// persistence, no slope. Momentum confirms direction, not maturity.
+momBullEff = isScalp ? momBullNow : momBull
+momBearEff = isScalp ? momBearNow : momBear
+
+momOkBuy  = not i_momFilter or momBullEff
+momOkSell = not i_momFilter or momBearEff
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HTF TREND — v3.5.1: single tuple request instead of two HTF calls
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.5.17 SECOND REPAINT FIX. This previously requested [close, ema] with
+// lookahead_off. On a LIVE chart bar sitting inside a still-forming HTF bar
+// that returns the DEVELOPING higher-timeframe close, updating tick by tick.
+// After a reload the same chart bar is historical and receives the last
+// CLOSED HTF bar instead — a different number, so htfBull could flip between
+// what you watched and what the chart redraws.
+// It reached the signals because buyAligned/sellAligned count htfBull, and
+// since v3.5.13 Scalp enforces a confluence floor of 1: a Scalp entry that
+// scored 1/3 live could score 0/3 on reload and simply cease to exist.
+// Requesting close[1] with lookahead_on is the standard stable idiom — it
+// returns the last CLOSED HTF bar, identical live and historical, and does
+// NOT look ahead (the offset is what makes lookahead_on safe here). Cost: the
+// HTF view lags by up to one HTF bar, which is the honest price of a value
+// that does not change after the fact.
+[htfClose, htfEma] = request.security(syminfo.tickerid, i_htfTf, [close[1], ta.ema(close, i_htfEmaLen)[1]], lookahead=barmerge.lookahead_on)
+htfBull  = htfClose > htfEma
+htfBear  = htfClose < htfEma
+htfLabel = htfBull ? "BULL" : "BEAR"
+
+htfOkBull = not i_htfFilter or htfBull
+htfOkBear = not i_htfFilter or htfBear
+
+// v3.5: Scalp bypasses the HTF gate everywhere — including inside the
+// FVG-retest and Sweep trigger construction, where it was baked in for all
+// modes. v3.5.2: Aggressive bypasses it there too — its description says
+// "structure + OF only (no HTF gate)" but this trigger-level check still
+// applied, quietly delaying or blocking Aggressive entries.
+trigHtfBull = isScalp or i_mode == "Aggressive" or htfOkBull
+trigHtfBear = isScalp or i_mode == "Aggressive" or htfOkBear
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VWAP + overextension guard (v3.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.5.4: anchor is selectable. Session-anchored VWAP on a 4H chart averages
+// ~6 bars — not a mean the distance guard can meaningfully gate on.
+vwapUseWeek  = i_vwapAnchor == "Week" or (i_vwapAnchor == "Auto" and timeframe.in_seconds() >= 3600)
+vwapUseMonth = i_vwapAnchor == "Month"
+// The three ta.change() calls are UNCONDITIONAL — stateful builtins placed in
+// ternary branches execute inconsistently and corrupt their own history (the
+// same defect fixed for ta.highest/ta.lowest in v3.4.1). Select afterwards.
+newDay    = ta.change(time("D")) != 0
+newWeek   = ta.change(time("W")) != 0
+newMonth  = ta.change(time("M")) != 0
+vwapAnchor = vwapUseMonth ? newMonth : vwapUseWeek ? newWeek : newDay
+vwapVal   = ta.vwap(hlc3, vwapAnchor)
+aboveVwap = close > vwapVal
+belowVwap = close < vwapVal
+vwapLabel = aboveVwap ? "ABOVE" : "BELOW"
+plot(i_vwapShow ? vwapVal : na, "VWAP", color=i_vwapCol, linewidth=1)
+
+vwapDistAtr = atr14 > 0 ? math.abs(close - vwapVal) / atr14 : 0.0
+notExtended = vwapDistAtr <= i_vwapMaxDist
+
+vwapOkBull = (not i_vwapFilter or aboveVwap) and notExtended
+vwapOkBear = (not i_vwapFilter or belowVwap) and notExtended
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RSI SANITY (v3.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+rsi     = ta.rsi(close, i_rsiLen)
+rsiOkBuy  = not i_rsiFilter or (rsi >= effRsiBuyLo  and rsi <= effRsiBuyHi)
+rsiOkSell = not i_rsiFilter or (rsi >= effRsiSellLo and rsi <= effRsiSellHi)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEWS BLACKOUT WINDOWS (v3.5.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+inNews1 = i_newsFilter and not na(time(timeframe.period, i_newsSess1, i_newsTz))
+inNews2 = i_newsFilter and not na(time(timeframe.period, i_newsSess2, i_newsTz))
+inNewsWindow = inNews1 or inNews2
+newsOk = not inNewsWindow
+
+// v3.5.12: session + regime gates. Both default to permissive so the baseline
+// engine is unchanged until deliberately switched on.
+inSession    = not i_sessFilter or not na(time(timeframe.period, i_sessWindow, i_newsTz))
+regimeOk     = i_regimeFilter == "Any" or (i_regimeFilter == "Skip chop" ? not volChop : not volExpand)
+bgcolor(inNewsWindow ? color.new(#FF3366, 94) : na, title="News Blackout Tint")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIVOTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.5: Scalp confirms pivots with 2 bars per side (structure seen 1 bar sooner)
+ph = ta.pivothigh(high, effSwingLen, effSwingLen)
+pl = ta.pivotlow(low,   effSwingLen, effSwingLen)
+
+var float ph1 = na
+var float ph2 = na
+var float ph3 = na
+var float pl1 = na
+var float pl2 = na
+var float pl3 = na
+
+if not na(ph)
+    ph3 := ph2
+    ph2 := ph1
+    ph1 := ph
+
+if not na(pl)
+    pl3 := pl2
+    pl2 := pl1
+    pl1 := pl
+
+lastPH = ph1
+lastPL = pl1
+
+// v3.5.13: a SECOND, deeper pivot series used only for sweep levels, so the
+// liquidity a sweep targets does not shrink to noise when a mode speeds the
+// entry pivots up.
+phSweep = ta.pivothigh(high, i_sweepPivotLen, i_sweepPivotLen)
+plSweep = ta.pivotlow(low,   i_sweepPivotLen, i_sweepPivotLen)
+var float sweepPH = na
+var float sweepPL = na
+if not na(phSweep)
+    sweepPH := phSweep
+if not na(plSweep)
+    sweepPL := plSweep
+
+plotshape(not na(ph), style=shape.triangledown, location=location.abovebar, color=color.new(#FF3366, 60), size=size.tiny, offset=-effSwingLen, title="Pivot High")
+plotshape(not na(pl), style=shape.triangleup,   location=location.belowbar, color=color.new(#00E5FF, 60), size=size.tiny, offset=-effSwingLen, title="Pivot Low")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MSS + trigger freshness (v3.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+mssFollowPts = atr14 * i_mssFollow
+mssUpEvent   = barstate.isconfirmed and not na(lastPH) and close >= lastPH + mssFollowPts and close[1] < lastPH
+mssDownEvent = barstate.isconfirmed and not na(lastPL) and close <= lastPL - mssFollowPts and close[1] > lastPL
+
+// Track how many bars since the last MSS event, invalidated by opposite side.
+// v3.4.1: counters capped at 999 so they never grow unbounded.
+var int mssUpAge = 999
+var int mssDnAge = 999
+mssUpAge := mssUpEvent ? 0 : math.min(mssUpAge + 1, 999)
+mssDnAge := mssDownEvent ? 0 : math.min(mssDnAge + 1, 999)
+if mssUpEvent
+    mssDnAge := 999   // reset opposite
+if mssDownEvent
+    mssUpAge := 999
+mssUp   = mssUpAge <= i_triggerAge
+mssDown = mssDnAge <= i_triggerAge
+
+// ── STRUCTURAL BIAS (v3.3: cross-checked with HTF) ───────────────────────────
+var bool structBull = false
+var bool structInit = false
+
+if mssUpEvent and htfBull   // only lock bull bias when HTF also bull
+    structBull := true
+    structInit := true
+if mssDownEvent and htfBear
+    structBull := false
+    structInit := true
+
+// v3.5: Scalp trades both directions — the HTF-locked structural bias would
+// block half the scalps, so it is bypassed in Scalp mode only.
+biasOkBuy  = isScalp or not structInit or structBull == true
+biasOkSell = isScalp or not structInit or structBull == false
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FVGs — with expiration (v3.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fvgMinPts    = atr14 * i_fvgMinAtr
+bullFvgTop   = low
+bullFvgBot   = high[2]
+bullFvgValid = barstate.isconfirmed and bullFvgBot < bullFvgTop and (bullFvgTop - bullFvgBot) >= fvgMinPts and close[1] > open[1]
+bearFvgBot   = high
+bearFvgTop   = low[2]
+bearFvgValid = barstate.isconfirmed and bearFvgTop > bearFvgBot and (bearFvgTop - bearFvgBot) >= fvgMinPts and close[1] < open[1]
+
+// ── MULTI-GAP STORAGE (v3.5.10) ─────────────────────────────────────────────
+// Parallel arrays, one entry per unfilled gap. Each expires and invalidates on
+// its own; previously a single slot per direction meant a new gap silently
+// discarded an older, untested one.
+var float[] bullTops  = array.new_float(0)
+var float[] bullBots  = array.new_float(0)
+var int[]   bullBars  = array.new_int(0)
+var box[]   bullBoxes = array.new_box(0)
+var float[] bearTops  = array.new_float(0)
+var float[] bearBots  = array.new_float(0)
+var int[]   bearBars  = array.new_int(0)
+var box[]   bearBoxes = array.new_box(0)
+
+// ── RECORD NEW GAPS ─────────────────────────────────────────────────────────
+// At most one gap per side per bar, so a single shift is enough to hold the cap.
+if bullFvgValid
+    array.push(bullTops, bullFvgTop)
+    array.push(bullBots, bullFvgBot)
+    array.push(bullBars, bar_index)
+    box nbx = na
+    if i_fvgShow
+        nbx := box.new(bar_index - 2, bullFvgTop, bar_index + i_fvgMaxAge, bullFvgBot, border_color=color.new(i_fvgBullCol, 30), bgcolor=i_fvgBullCol, border_width=1)
+        if i_fvgLabel
+            label.new(bar_index, (bullFvgTop + bullFvgBot) / 2.0, "FVG", color=color.new(i_fvgBullCol, 60), textcolor=color.new(i_buyCol, 0), style=label.style_label_right, size=size.tiny)
+    array.push(bullBoxes, nbx)
+    if array.size(bullTops) > i_fvgMax
+        array.shift(bullTops)
+        array.shift(bullBots)
+        array.shift(bullBars)
+        box obx = array.shift(bullBoxes)
+        if not na(obx)
+            box.delete(obx)
+
+if bearFvgValid
+    array.push(bearTops, bearFvgTop)
+    array.push(bearBots, bearFvgBot)
+    array.push(bearBars, bar_index)
+    box nbx2 = na
+    if i_fvgShow
+        nbx2 := box.new(bar_index - 2, bearFvgTop, bar_index + i_fvgMaxAge, bearFvgBot, border_color=color.new(i_fvgBearCol, 30), bgcolor=i_fvgBearCol, border_width=1)
+        if i_fvgLabel
+            label.new(bar_index, (bearFvgTop + bearFvgBot) / 2.0, "FVG", color=color.new(i_fvgBearCol, 60), textcolor=color.new(i_sellCol, 0), style=label.style_label_right, size=size.tiny)
+    array.push(bearBoxes, nbx2)
+    if array.size(bearTops) > i_fvgMax
+        array.shift(bearTops)
+        array.shift(bearBots)
+        array.shift(bearBars)
+        box obx2 = array.shift(bearBoxes)
+        if not na(obx2)
+            box.delete(obx2)
+
+// ── EXPIRY + INVALIDATION, PER GAP ──────────────────────────────────────────
+// Walk newest-to-oldest so a removal never shifts an index still to be visited.
+// A bar can never both retest and invalidate the same gap: a bull retest needs
+// close >= bot, invalidation needs close < bot.
+if barstate.isconfirmed and array.size(bullTops) > 0
+    for i = array.size(bullTops) - 1 to 0
+        if (bar_index - array.get(bullBars, i)) > i_fvgMaxAge or close < array.get(bullBots, i)
+            array.remove(bullTops, i)
+            array.remove(bullBots, i)
+            array.remove(bullBars, i)
+            box dbx = array.remove(bullBoxes, i)
+            if not na(dbx)
+                box.delete(dbx)
+
+if barstate.isconfirmed and array.size(bearTops) > 0
+    for i = array.size(bearTops) - 1 to 0
+        if (bar_index - array.get(bearBars, i)) > i_fvgMaxAge or close > array.get(bearTops, i)
+            array.remove(bearTops, i)
+            array.remove(bearBots, i)
+            array.remove(bearBars, i)
+            box dbx2 = array.remove(bearBoxes, i)
+            if not na(dbx2)
+                box.delete(dbx2)
+
+// ── RETEST SCAN ─────────────────────────────────────────────────────────────
+// Newest gap first, take the first that qualifies, and remember WHICH gap it
+// was: v3.5.7 anchors the stop to the retested gap's far edge and measures the
+// chase cap from its near edge, so it must be that gap and not merely the most
+// recent one.
+float hitBullTop = na
+float hitBullBot = na
+bool  bullRetestHit = false
+if array.size(bullTops) > 0
+    for i = array.size(bullTops) - 1 to 0
+        if not bullRetestHit
+            gTopB = array.get(bullTops, i)
+            gBotB = array.get(bullBots, i)
+            gMidB = (gTopB + gBotB) / 2.0
+            if (low <= gTopB and close >= gBotB and closePos >= 0.6) or (i_fvgMidTrig and low <= gMidB and close > gMidB and closePos >= 0.6)
+                bullRetestHit := true
+                hitBullTop := gTopB
+                hitBullBot := gBotB
+
+float hitBearTop = na
+float hitBearBot = na
+bool  bearRetestHit = false
+if array.size(bearTops) > 0
+    for i = array.size(bearTops) - 1 to 0
+        if not bearRetestHit
+            gTopS = array.get(bearTops, i)
+            gBotS = array.get(bearBots, i)
+            gMidS = (gTopS + gBotS) / 2.0
+            if (high >= gBotS and close <= gTopS and closePos <= 0.4) or (i_fvgMidTrig and high >= gMidS and close < gMidS and closePos <= 0.4)
+                bearRetestHit := true
+                hitBearTop := gTopS
+                hitBearBot := gBotS
+
+// Exposed under the historical names so the stop anchor and chase reference
+// downstream keep working — now carrying the gap that was actually retested.
+lBullTop = hitBullTop
+lBullBot = hitBullBot
+lBearTop = hitBearTop
+lBearBot = hitBearBot
+
+fvgRetestBull = barstate.isconfirmed and bullRetestHit and trigHtfBull
+fvgRetestBear = barstate.isconfirmed and bearRetestHit and trigHtfBear
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SWEEP — with trigger-age (same policy as MSS) — v3.3
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.4.1: ta.highest/ta.lowest hoisted OUT of the ternary. Called inside a
+// conditional branch they execute inconsistently and corrupt their window.
+legacySweepHi = ta.highest(high[1], i_sweepLook)
+legacySweepLo = ta.lowest(low[1],   i_sweepLook)
+sweepLevelHi  = i_sweepUsePivot and not na(sweepPH) ? sweepPH : legacySweepHi
+sweepLevelLo  = i_sweepUsePivot and not na(sweepPL) ? sweepPL : legacySweepLo
+
+sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
+sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
+
+var int sweepBullAge = 999
+var int sweepBearAge = 999
+sweepBullAge := sweepBullEvent ? 0 : math.min(sweepBullAge + 1, 999)
+sweepBearAge := sweepBearEvent ? 0 : math.min(sweepBearAge + 1, 999)
+if sweepBullEvent
+    sweepBearAge := 999
+if sweepBearEvent
+    sweepBullAge := 999
+sweepBull = sweepBullAge <= i_triggerAge
+sweepBear = sweepBearAge <= i_triggerAge
+
+// v3.5.7: remember the sweep bar's OWN extreme and the level it violated.
+// The stop for a sweep entry belongs below that wick — see the SL section.
+var float sweepBullLow  = na
+var float sweepBullLvl  = na
+var float sweepBearHigh = na
+var float sweepBearLvl  = na
+if sweepBullEvent
+    sweepBullLow := low
+    sweepBullLvl := sweepLevelLo
+if sweepBearEvent
+    sweepBearHigh := high
+    sweepBearLvl  := sweepLevelHi
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FRVP — v3.4 ACCURACY REBUILD (v3.5.1 adds the refresh stride)
+// ─────────────────────────────────────────────────────────────────────────────
+// (1) PROPORTIONAL DISTRIBUTION: each bar's volume is spread across every bin
+//     its high-low range overlaps, weighted by overlap fraction.
+// (2) CLASSIC VA EXPANSION: value area grows by comparing the sum of the next
+//     TWO bins above vs the next TWO below (standard Market Profile method).
+// (3) BOUNDED RENDERING: lines/zone end at a configurable right offset.
+// (4) v3.4.1: profile only builds once a full lookback window exists —
+//     referencing high[i]/low[i] before that produced na bin indices and a
+//     runtime error on the first bars of the chart.
+// (5) v3.5.1: rebuild throttled to every i_frvpEvery bars (+ last bar) — this
+//     loop was the dominant load-time cost. Levels persist between rebuilds.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+frvpHigh = ta.highest(high, i_frvpLen)
+frvpLow  = ta.lowest(low,   i_frvpLen)
+binSize  = math.max(frvpHigh - frvpLow, 1e-9) / i_frvpBins
+
+var float[] volBins = array.new_float(0)
+
+frvpReady  = bar_index >= i_frvpLen and not na(frvpHigh) and not na(frvpLow)
+// v3.5.11 REPAINT FIX. This previously read
+//   (bar_index % i_frvpEvery == 0 or barstate.islast)
+// The islast term gave the LIVE bar an extra profile rebuild that it lost the
+// moment it became historical, so POC/VAH/VAL differed between what you saw in
+// real time and what the chart redrew on reload. VAH/VAL are TP candidates, and
+// since v3.5.8 the reward gate decides the signal from TP1 — so a signal could
+// appear live and disappear on reload. That is repainting, in a script that
+// claims not to.
+//
+// v3.5.19 THIRD REPAINT FIX. The v3.5.11 note above went on to claim "the
+// stride alone is deterministic: identical live and on reload". It is not, and
+// this is the bug that claim hid. bar_index counts from the FIRST BAR THE CHART
+// HAS LOADED — not from any fixed origin. Scrolling back, reloading, changing a
+// setting or simply getting a different history depth shifts every bar's index
+// by the same offset, so bar_index % i_frvpEvery == 0 selects an entirely
+// DIFFERENT set of bars to rebuild the profile on. POC/VAH/VAL at any given bar
+// then differ between two renders of the same chart.
+//
+// Seen live on XAUUSD 15m: one trade, entry 4343.830, TP1 4357.822 (1.5R) and
+// TP2 4362.486 (2R) identical across both renders because they are pure
+// arithmetic off entry and stop — while TP3, tagged VAH, read 4395.110 on one
+// render and 4399.366 on the next. Only the structure-anchored target moved,
+// which is the signature of this bug.
+//
+// The stride is now keyed to the bar's OPEN TIME divided by the timeframe —
+// an absolute quantity that is the same on every render regardless of how much
+// history is loaded — so the same bars always carry the rebuild.
+frvpBarNo  = int(time / (math.max(timeframe.in_seconds(), 1) * 1000))
+frvpRecalc = barstate.isconfirmed and frvpReady and frvpBarNo % i_frvpEvery == 0
+
+if frvpRecalc
+    array.clear(volBins)
+    for b = 0 to i_frvpBins - 1
+        array.push(volBins, 0.0)
+    for i = 0 to i_frvpLen - 1
+        barHi    = high[i]
+        barLo    = low[i]
+        barVol   = nz(volume[i])
+        barRange = barHi - barLo
+        if barRange <= 0
+            // zero-range bar: all volume at its single price level
+            oneIdx = int(math.floor((barHi - frvpLow) / binSize))
+            oneIdx := math.max(0, math.min(oneIdx, i_frvpBins - 1))
+            array.set(volBins, oneIdx, array.get(volBins, oneIdx) + barVol)
+        else
+            // v3.4: distribute volume proportionally across overlapped bins
+            loIdx = int(math.floor((barLo - frvpLow) / binSize))
+            hiIdx = int(math.floor((barHi - frvpLow) / binSize))
+            loIdx := math.max(0, math.min(loIdx, i_frvpBins - 1))
+            hiIdx := math.max(0, math.min(hiIdx, i_frvpBins - 1))
+            for b2 = loIdx to hiIdx
+                binBot  = frvpLow + b2 * binSize
+                binTop  = binBot + binSize
+                overlap = math.min(binTop, barHi) - math.max(binBot, barLo)
+                if overlap > 0
+                    array.set(volBins, b2, array.get(volBins, b2) + barVol * (overlap / barRange))
+
+pocBin   = 0
+pocVol   = 0.0
+totalVol = 0.0
+
+if frvpRecalc and array.size(volBins) == i_frvpBins
+    totalVol := array.sum(volBins)
+    for b = 0 to i_frvpBins - 1
+        bv = array.get(volBins, b)
+        if bv > pocVol
+            pocVol := bv
+            pocBin := b
+
+var float pocPrice = na
+var float vahPrice = na
+var float valPrice = na
+
+if frvpRecalc and array.size(volBins) == i_frvpBins and totalVol > 0
+    pocPrice := frvpLow + (pocBin + 0.5) * binSize
+    // v3.4: classic Market Profile VA — extend toward the larger PAIR of bins
+    vaTarget  = totalVol * i_vaWidth
+    vaVol     = pocVol
+    upperIdx  = pocBin
+    lowerIdx  = pocBin
+    maxIter   = i_frvpBins * 2
+    iter      = 0
+    while vaVol < vaTarget and iter < maxIter
+        // sum of next two bins above the current VA
+        upVol   = 0.0
+        upSteps = 0
+        if upperIdx < i_frvpBins - 1
+            upVol   += array.get(volBins, upperIdx + 1)
+            upSteps := 1
+            if upperIdx < i_frvpBins - 2
+                upVol   += array.get(volBins, upperIdx + 2)
+                upSteps := 2
+        // sum of next two bins below the current VA
+        dnVol   = 0.0
+        dnSteps = 0
+        if lowerIdx > 0
+            dnVol   += array.get(volBins, lowerIdx - 1)
+            dnSteps := 1
+            if lowerIdx > 1
+                dnVol   += array.get(volBins, lowerIdx - 2)
+                dnSteps := 2
+        if upSteps == 0 and dnSteps == 0
+            break
+        takeUp = upSteps > 0 and (dnSteps == 0 or upVol >= dnVol)
+        if takeUp
+            upperIdx += upSteps
+            vaVol    += upVol
+        else
+            lowerIdx -= dnSteps
+            vaVol    += dnVol
+        iter += 1
+    vahPrice := frvpLow + (upperIdx + 1) * binSize
+    valPrice := frvpLow + lowerIdx       * binSize
+
+frvpPosStr = na(pocPrice) ? "N/A" : close > vahPrice ? "ABOVE VA" : close < valPrice ? "BELOW VA" : close > pocPrice ? "IN VA+" : "IN VA-"
+frvpBullOk = na(vahPrice) or close >= valPrice
+frvpBearOk = na(valPrice) or close <= vahPrice
+
+// v3.4: bounded rendering — no infinite extend.right, VA fill is a clean box
+// v3.5.1: drawn only on the LAST bar. Deleting + recreating 3 lines, a box and
+// 3 labels on every confirmed bar across all of history was pure load-time
+// waste — the final visual is identical.
+var line  pocLine = na
+var line  vahLine = na
+var line  valLine = na
+var box   vaZone  = na
+var label pocLab  = na
+var label vahLab  = na
+var label valLab  = na
+
+if i_frvpShow and barstate.islast and not na(pocPrice)
+    if not na(pocLine)
+        line.delete(pocLine)
+    if not na(vahLine)
+        line.delete(vahLine)
+    if not na(valLine)
+        line.delete(valLine)
+    if not na(vaZone)
+        box.delete(vaZone)
+    if not na(pocLab)
+        label.delete(pocLab)
+    if not na(vahLab)
+        label.delete(vahLab)
+    if not na(valLab)
+        label.delete(valLab)
+    xL = bar_index - i_frvpLen
+    xR = bar_index + i_frvpExtend
+    if i_vaFill
+        vaZone := box.new(xL, vahPrice, xR, valPrice, bgcolor=color.new(i_vahCol, 92), border_color=color.new(i_vahCol, 100))
+    pocLine := line.new(xL, pocPrice, xR, pocPrice, color=i_pocCol, width=2, style=line.style_solid)
+    vahLine := line.new(xL, vahPrice, xR, vahPrice, color=i_vahCol, width=1, style=line.style_dashed)
+    valLine := line.new(xL, valPrice, xR, valPrice, color=i_valCol, width=1, style=line.style_dashed)
+    if i_frvpLevels
+        pocLab := label.new(xR, pocPrice, "POC " + str.tostring(pocPrice, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=i_pocCol, size=size.tiny)
+        vahLab := label.new(xR, vahPrice, "VAH " + str.tostring(vahPrice, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(i_vahCol, 0), size=size.tiny)
+        valLab := label.new(xR, valPrice, "VAL " + str.tostring(valPrice, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(i_valCol, 0), size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODE GATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.5: Scalp gates only on the VWAP overextension guard (never chase an
+// extended move); Aggressive remains fully ungated.
+modePassBull = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBull and vwapOkBull and (i_mode != "Strict" or frvpBullOk))
+modePassBear = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBear and vwapOkBear and (i_mode != "Strict" or frvpBearOk))
+
+// v3.5.5: confluence score, 0-3. Was computed from the *Ok flags, which are
+// true whenever their filter is switched OFF — a disabled filter counted as
+// alignment and inflated the score. Built from raw directional facts now, and
+// actually surfaced (dashboard row + "confluence" in the alert payload);
+// previously these two values were computed every bar and never read.
+buyAligned  = (htfBull ? 1 : 0) + (aboveVwap ? 1 : 0) + (frvpBullOk ? 1 : 0)
+sellAligned = (htfBear ? 1 : 0) + (belowVwap ? 1 : 0) + (frvpBearOk ? 1 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADAPTIVE SL — never tightens (non-Scalp modes)
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.1 SCALP FIX. The SL was built from atrBase = max(atr14, atr50) and
+// widened ×1.2 in chop, while the risk window was measured in atr14 — so in
+// chop the structural stop routinely exceeded Scalp's 2× atr14 cap and the
+// signal was blocked. This mismatch is why Scalp mode "did nothing".
+// Scalp now: (a) builds the SL from atr14 (the same ATR the risk window
+// uses), (b) clamps the pivot buffer to ≤0.3 ATR with no regime widening,
+// (c) clamps a structural stop that lands beyond the max-risk cap TO the cap
+// (volatility stop) instead of blocking the trade. Other modes are unchanged.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.5.2/v3.5.4: ONE ATR reference — the stop is built, judged, displayed and
+// reported in the same units. Mixing atr14 and atrBase across those four
+// places is what silently blocked entries in every mode before v3.5.2.
+// v3.4.1: mode-gated trigger flags computed once, reused by trigger AND label
+buyTrigFvg   = i_mode != "Strict"     and fvgRetestBull
+sellTrigFvg  = i_mode != "Strict"     and fvgRetestBear
+buyTrigSweep = (i_mode == "Aggressive" or isScalp) and sweepBull
+sellTrigSweep= (i_mode == "Aggressive" or isScalp) and sweepBear
+
+buyTrigger  = mssUp   or buyTrigFvg  or buyTrigSweep
+sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
+
+riskAtrRef = isScalp ? atr14 : atrBase
+
+slMult    = volExpand ? 1.3 : volChop ? 1.2 : 1.0
+slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, 0.3) : riskAtrRef * i_slAtr * slMult
+
+// v3.5.7 TRIGGER-AWARE INVALIDATION. The stop was ALWAYS built from the last
+// pivot, whatever fired the entry. For a sweep that is provably wrong: the
+// sweep is DEFINED by price trading at least i_sweepWick (0.4 ATR) BELOW the
+// pivot, while the stop was placed only slBuf (≤0.3 ATR in Scalp) below the
+// same pivot — so the stop sat ABOVE the sweep's own wick, inside the move
+// that created the setup. An ordinary retest of the sweep low took it out.
+// Each trigger now stops beyond its own invalidation:
+//   sweep → beyond the sweep bar's extreme (the wick IS the invalidation)
+//   FVG   → beyond the far edge of the gap
+//   MSS   → the last pivot, as before (correct for continuation)
+buySlAnchor  = buyTrigSweep  and not na(sweepBullLow)  ? sweepBullLow  : buyTrigFvg  and not na(lBullBot) ? lBullBot : lastPL
+sellSlAnchor = sellTrigSweep and not na(sweepBearHigh) ? sweepBearHigh : sellTrigFvg and not na(lBearTop) ? lBearTop : lastPH
+
+buySLraw  = not na(buySlAnchor)  ? math.min(buySlAnchor - slBuf,  close - riskAtrRef * 0.5) : close - riskAtrRef * 1.5
+sellSLraw = not na(sellSlAnchor) ? math.max(sellSlAnchor + slBuf, close + riskAtrRef * 0.5) : close + riskAtrRef * 1.5
+
+// v3.5.4 DEAD-ZONE FIX. The structural stop was floored at 0.5 ATR from
+// price while the min-risk gate demanded 1.0 ATR — so a near pivot produced
+// a stop the engine then rejected, discarding the setup instead of using a
+// stop it would accept. Clamp into BOTH ends of the window (all modes;
+// v3.5.1 already did the max side for Scalp). Turning the clamp off restores
+// the old block-instead-of-clamp behavior.
+slFar     = riskAtrRef * effMaxRisk
+slNear    = riskAtrRef * effMinRisk
+clampOn   = i_riskClampMode != "Off (block instead)"
+// v3.5.6: the FAR side is the unsound one — it pulls the stop inside the
+// structure that defines the trade. Only Scalp (whose design IS a tight
+// volatility stop) or an explicit "Both sides" choice gets it.
+clampFar  = clampOn and i_riskClampMode == "Both sides"
+clampNear = clampOn
+buySLfar  = clampFar  ? math.max(buySLraw,  close - slFar) : buySLraw
+sellSLfar = clampFar  ? math.min(sellSLraw, close + slFar) : sellSLraw
+buySLbase  = clampNear ? math.min(buySLfar,  close - slNear) : buySLfar
+sellSLbase = clampNear ? math.max(sellSLfar, close + slNear) : sellSLfar
+
+// v3.5.6: is the stop the real structural level, or one we moved? Shown on
+// the SL label, the dashboard and in the alert payload, so a synthetic stop
+// is never mistaken for a structural one. Compared BEFORE the spread buffer,
+// which is a broker cost rather than an engine decision.
+buyClamped   = buySLbase  != buySLraw
+sellClamped  = sellSLbase != sellSLraw
+
+// v3.5.16 SPREAD BUFFER. The stop previously sat exactly on the structural
+// level, so on any symbol with a spread the level could be taken out by the
+// quote while the traded price never reached it. Push the stop out by the
+// buffer and let the reported risk grow to match — an honest R beats a
+// flattering one. Targets are deliberately NOT buffered.
+buySLpx   = buySLbase  - i_spreadBuf
+sellSLpx  = sellSLbase + i_spreadBuf
+buyStopTxt   = buyClamped  ? " SL~ " : " SL  "
+sellStopTxt  = sellClamped ? " SL~ " : " SL  "
+
+buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
+sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
+
+// v3.3: both a floor AND a cap. With the clamp ON these always pass (the stop
+// was moved into the window); they still gate when the clamp is OFF.
+riskOkBuy  = buyRiskDist  >= riskAtrRef * effMinRisk and buyRiskDist  <= riskAtrRef * effMaxRisk
+riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk and sellRiskDist <= riskAtrRef * effMaxRisk
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNIFIED TP SELECTION (v3.4.1; v3.5.1 computes it lazily on signal bars)
+// ─────────────────────────────────────────────────────────────────────────────
+// One function picks TP1/2/3 from structure (pivots + VAH/VAL) with R-multiple
+// fallbacks. The SAME levels feed the chart lines, the labels AND the JSON
+// alert — v3.4 alerts sent raw R-multiples while the chart showed pivot
+// targets, so webhook fills never matched the displayed plan.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_tpLevels(bool _isBuy, float _entry, float _risk) =>
+    float[] raw = array.new_float(0)
+    if _isBuy
+        if not na(ph1) and ph1 > _entry
+            array.push(raw, ph1)
+        if not na(ph2) and ph2 > _entry
+            array.push(raw, ph2)
+        if not na(ph3) and ph3 > _entry
+            array.push(raw, ph3)
+        if not na(vahPrice) and vahPrice > _entry
+            array.push(raw, vahPrice)
+        if array.size(raw) > 1
+            array.sort(raw, order.ascending)
+    else
+        if not na(pl1) and pl1 < _entry
+            array.push(raw, pl1)
+        if not na(pl2) and pl2 < _entry
+            array.push(raw, pl2)
+        if not na(pl3) and pl3 < _entry
+            array.push(raw, pl3)
+        if not na(valPrice) and valPrice < _entry
+            array.push(raw, valPrice)
+        if array.size(raw) > 1
+            array.sort(raw, order.descending)
+    // v3.5.3: merge structure candidates closer than max(0.5 ATR, 0.25R) to
+    // the previously kept one — a double top/bottom otherwise fills TWO TP
+    // slots with near-identical prices and the plan loses a real target.
+    float minGap = math.max(atr14 * 0.5, _risk * 0.25)
+    float[] cands = array.new_float(0)
+    if array.size(raw) > 0
+        for i = 0 to array.size(raw) - 1
+            c = array.get(raw, i)
+            if array.size(cands) == 0 or math.abs(c - array.get(cands, array.size(cands) - 1)) >= minGap
+                array.push(cands, c)
+    int n     = array.size(cands)
+    float lvl = _isBuy ? vahPrice : valPrice
+    string lt = _isBuy ? " VAH" : " VAL"
+    float dir = _isBuy ? 1.0 : -1.0
+    tp1 = n >= 1 ? array.get(cands, 0) : _entry + dir * _risk * effTp1R
+    tp2 = n >= 2 ? array.get(cands, 1) : _entry + dir * _risk * effTp2R
+    tp3 = n >= 3 ? array.get(cands, 2) : _entry + dir * _risk * effTp3R
+    tag1 = n >= 1 ? (not na(lvl) and array.get(cands, 0) == lvl ? lt : " Pivot") : " " + str.tostring(effTp1R) + "R"
+    tag2 = n >= 2 ? (not na(lvl) and array.get(cands, 1) == lvl ? lt : " Pivot") : " " + str.tostring(effTp2R) + "R"
+    tag3 = n >= 3 ? (not na(lvl) and array.get(cands, 2) == lvl ? lt : " Pivot") : " " + str.tostring(effTp3R) + "R"
+    // v3.5.15 ORDERING FIX. Structure candidates fill the slots first and any
+    // remainder falls back to R-multiples — but the two sets were never sorted
+    // TOGETHER, so a lone distant structure level took TP1 while the nearer
+    // R-multiples sat below it. Seen live on XAUUSD: TP1 4395.11 (VAH, 5.5R),
+    // TP2 4357.82 (1.5R), TP3 4362.49 (2R) — the scale-out plan inverted, and
+    // because the breakeven move keys off TP1 it would essentially never arm.
+    // Order the final three in the trade's direction, tags following values.
+    float[]  tpV = array.from(tp1, tp2, tp3)
+    string[] tpT = array.from(tag1, tag2, tag3)
+    for a = 0 to 1
+        for b = a + 1 to 2
+            vA = array.get(tpV, a)
+            vB = array.get(tpV, b)
+            if _isBuy ? vB < vA : vB > vA
+                array.set(tpV, a, vB)
+                array.set(tpV, b, vA)
+                tmpT = array.get(tpT, a)
+                array.set(tpT, a, array.get(tpT, b))
+                array.set(tpT, b, tmpT)
+    [array.get(tpV, 0), array.get(tpV, 1), array.get(tpV, 2), array.get(tpT, 0), array.get(tpT, 1), array.get(tpT, 2)]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var int  lastSigBar   = 0
+var bool lastTradeBuy = false
+var bool lastSlHit    = false
+effCd = i_postSlCd and lastSlHit ? effCooldown * 2 : effCooldown
+coolOk = bar_index - lastSigBar >= effCd
+
+// v3.5.5: consecutive-loss circuit breaker. Declared here (before the signal
+// gates read it) but UPDATED in the TP/SL tracking section further down, so
+// on any bar it holds the streak as of that bar's open — the same pattern
+// lastSlHit already uses.
+var int lossStreak = 0
+breakerOk = i_maxLossStreak == 0 or lossStreak < i_maxLossStreak
+
+// v3.5.1 SCALP FIX. A bullish sweep happens at the END of a decline — CVD and
+// EMA momentum are still bearish on that bar by construction, so requiring
+// cvdBull + momOkBuy vetoed every sweep-reversal scalp. Sweep-triggered
+// scalps are exempt from both trend gates; the sweep's own rejection close
+// (closePos ≥ 0.6 back above the level), the delta floor, the OF threshold
+// and the volume floor still gate the entry. MSS/FVG scalps (continuation
+// setups) keep both gates. Non-Scalp modes are unchanged.
+// v3.5.2: CVD gate also self-disables on symbols with no volume feed —
+// with volume permanently na the CVD was flat and vetoed everything.
+cvdOkBuy   = not volDataSeen or cvdBull  or (isScalp and buyTrigSweep)
+cvdOkSell  = not volDataSeen or cvdBear  or (isScalp and sellTrigSweep)
+momOkBuyEff  = momOkBuy  or (isScalp and buyTrigSweep)
+momOkSellEff = momOkSell or (isScalp and sellTrigSweep)
+
+// v3.5.4: rejection-based entries (sweep, FVG retest) are judged on the
+// opposing wick only — see the wickRatioBuy/Sell definitions. MSS entries
+// keep the combined-wick test. Without this the wick filter cancelled the
+// sweep trigger it was paired with.
+notWeakBuy  = (buyTrigSweep  or buyTrigFvg)  ? notWeakRejBuy  : notWeak
+notWeakSell = (sellTrigSweep or sellTrigFvg) ? notWeakRejSell : notWeak
+
+// v3.5.6 ANTI-CHASE. i_mssFollow sets a MINIMUM break distance past the pivot;
+// nothing ever set a maximum. With the freshness window the entry could land
+// several bars and several ATR beyond the level that was broken, while the
+// stop still sat under the swing low — the widest-risk, worst-price version
+// of the trade. Only gate this when the breakout is the SOLE trigger: sweep
+// and FVG-retest entries occur AT a level and are never "extended".
+// v3.5.7: extended to sweep and FVG entries, each measured from its own
+// reference. v3.5.6 only capped MSS, on the reasoning that sweep/FVG entries
+// occur AT a level — true on the trigger bar, but the freshness window lets
+// them fire up to i_triggerAge bars later, by which time price has left the
+// level and the reclaim edge is gone.
+buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
+sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
+chaseOkBuy   = na(buyChaseRef)  or (close - buyChaseRef)  <= atr14 * i_maxChase
+chaseOkSell  = na(sellChaseRef) or (sellChaseRef - close) <= atr14 * i_maxChase
+
+barBull = close > open
+barBear = close < open
+
+strongBull = bodySize >= atr14 * effBodyAtr
+strongBear = bodySize >= atr14 * effBodyAtr
+
+rawBuyPre  = barstate.isconfirmed and buyTrigger  and barBull and strongBull and notWeakBuy  and ofBull and cvdOkBuy  and momOkBuyEff  and modePassBull and biasOkBuy  and coolOk and riskOkBuy  and rsiOkBuy  and newsOk and breakerOk and chaseOkBuy  and inSession and regimeOk
+rawSellPre = barstate.isconfirmed and sellTrigger and barBear and strongBear and notWeakSell and ofBear and cvdOkSell and momOkSellEff and modePassBear and biasOkSell and coolOk and riskOkSell and rsiOkSell and newsOk and breakerOk and chaseOkSell and inSession and regimeOk
+
+// v3.5.1: TP selection ran on EVERY bar; it is only consumed on signal bars.
+// v3.5.8: it now runs on the PRE-signal, because the reward gate below has
+// to know where TP1 is before the signal can be confirmed. Still rare.
+float  buyTp1  = na
+float  buyTp2  = na
+float  buyTp3  = na
+string buyTag1 = na
+string buyTag2 = na
+string buyTag3 = na
+float  sellTp1  = na
+float  sellTp2  = na
+float  sellTp3  = na
+string sellTag1 = na
+string sellTag2 = na
+string sellTag3 = na
+
+if rawBuyPre
+    [t1, t2, t3, g1, g2, g3] = f_tpLevels(true, close, buyRiskDist)
+    buyTp1  := t1
+    buyTp2  := t2
+    buyTp3  := t3
+    buyTag1 := g1
+    buyTag2 := g2
+    buyTag3 := g3
+if rawSellPre
+    [t1, t2, t3, g1, g2, g3] = f_tpLevels(false, close, sellRiskDist)
+    sellTp1  := t1
+    sellTp2  := t2
+    sellTp3  := t3
+    sellTag1 := g1
+    sellTag2 := g2
+    sellTag3 := g3
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.8 REWARD GATE. The engine bounded RISK from the start (min/max ATR
+// window) but never once checked what the trade could MAKE. TP1 is the
+// nearest structure level above entry, so it can sit a fraction of the stop
+// distance away — and because TP1 also triggers the breakeven move, a
+// too-close first target systematically converts trades into scratches:
+// take a third off for a few ticks, pull the stop to entry, get brushed out
+// of the rest. Many tiny wins and scratches with occasional full losses is
+// exactly what "lacks accuracy" feels like on a chart.
+// TP1 must now be at least i_minRR × the risk. 0 disables the gate.
+// ═══════════════════════════════════════════════════════════════════════════════
+rrBuy    = not na(buyTp1)  ? (buyTp1 - close)  / math.max(buyRiskDist,  1e-9) : na
+rrSell   = not na(sellTp1) ? (close - sellTp1) / math.max(sellRiskDist, 1e-9) : na
+rrOkBuy  = effMinRR <= 0 or (not na(rrBuy)  and rrBuy  >= effMinRR)
+rrOkSell = effMinRR <= 0 or (not na(rrSell) and rrSell >= effMinRR)
+
+// v3.5.12: confluence gate reads the score computed above; 0 disables it.
+confOkBuy  = buyAligned  >= effMinConf
+confOkSell = sellAligned >= effMinConf
+
+buySignal  = rawBuyPre  and rrOkBuy  and confOkBuy
+sellSignal = rawSellPre and rrOkSell and confOkSell
+// v3.4.1: names respect mode gating — previously "FVG"/"SWEEP" could be
+// reported in modes where those triggers are disabled.
+buyType    = mssUp   ? "MSS" : buyTrigFvg   ? "FVG" : buyTrigSweep  ? "SWEEP" : "MSS"
+sellType   = mssDown ? "MSS" : sellTrigFvg  ? "FVG" : sellTrigSweep ? "SWEEP" : "MSS"
+
+if buySignal
+    lastSigBar := bar_index
+    lastTradeBuy := true
+    lastSlHit := false
+if sellSignal
+    lastSigBar := bar_index
+    lastTradeBuy := false
+    lastSlHit := false
+
+// v3.5.2: name the gates that vetoed the most recent trigger — shown in the
+// dashboard "Last Block" row and (optionally) as on-chart ✕ labels.
+var string lastBlockReason = "—"
+if barstate.isconfirmed and buyTrigger and barBull and not buySignal
+    string r = ""
+    r += strongBull ? "" : "body "
+    r += notWeakBuy ? "" : "wick "
+    r += volOk ? "" : "vol "
+    r += buyPct >= adaptThresh ? "" : "of% "
+    r += deltaBullOk ? "" : "delta "
+    r += cvdOkBuy ? "" : "cvd "
+    r += momOkBuyEff ? "" : "mom "
+    r += modePassBull ? "" : "mode "
+    r += biasOkBuy ? "" : "bias "
+    r += coolOk ? "" : "cooldown "
+    r += riskOkBuy ? "" : "risk "
+    r += rsiOkBuy ? "" : "rsi "
+    r += newsOk ? "" : "news "
+    r += breakerOk ? "" : "lossbreak "
+    r += chaseOkBuy ? "" : "chase "
+    r += rrOkBuy ? "" : "rr "
+    r += confOkBuy ? "" : "confluence "
+    r += inSession ? "" : "session "
+    r += regimeOk ? "" : "regime "
+    if r != ""
+        lastBlockReason := "BUY ✕ " + r
+        if i_debugLabels
+            label.new(bar_index, low - atr14 * 0.4, "✕ " + r, style=label.style_label_up, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
+if barstate.isconfirmed and sellTrigger and barBear and not sellSignal
+    string r = ""
+    r += strongBear ? "" : "body "
+    r += notWeakSell ? "" : "wick "
+    r += volOk ? "" : "vol "
+    r += (100.0 - buyPct) >= adaptThresh ? "" : "of% "
+    r += deltaBearOk ? "" : "delta "
+    r += cvdOkSell ? "" : "cvd "
+    r += momOkSellEff ? "" : "mom "
+    r += modePassBear ? "" : "mode "
+    r += biasOkSell ? "" : "bias "
+    r += coolOk ? "" : "cooldown "
+    r += riskOkSell ? "" : "risk "
+    r += rsiOkSell ? "" : "rsi "
+    r += newsOk ? "" : "news "
+    r += breakerOk ? "" : "lossbreak "
+    r += chaseOkSell ? "" : "chase "
+    r += rrOkSell ? "" : "rr "
+    r += confOkSell ? "" : "confluence "
+    r += inSession ? "" : "session "
+    r += regimeOk ? "" : "regime "
+    if r != ""
+        lastBlockReason := "SELL ✕ " + r
+        if i_debugLabels
+            label.new(bar_index, high + atr14 * 0.4, "✕ " + r, style=label.style_label_down, color=color.new(#888888, 70), textcolor=color.new(#AAAAAA, 0), size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string lastSigMemory = "—"
+// v3.5.5: monotonic signal counter — sent as "seq" so a webhook receiver can
+// dedupe retries and reject out-of-order deliveries.
+var int sigSeq = 0
+if buySignal
+    lastSigMemory := "BUY (" + buyType + ")"
+    sigSeq += 1
+if sellSignal
+    lastSigMemory := "SELL (" + sellType + ")"
+    sigSeq += 1
+
+var string lastMssDir   = "—"
+var string lastFvgDir   = "—"
+var string lastSweepDir = "—"
+if barstate.isconfirmed
+    if mssUpEvent
+        lastMssDir := "BULL"
+    if mssDownEvent
+        lastMssDir := "BEAR"
+    if fvgRetestBull
+        lastFvgDir := "BULL"
+    if fvgRetestBear
+        lastFvgDir := "BEAR"
+    if sweepBullEvent
+        lastSweepDir := "BULL"
+    if sweepBearEvent
+        lastSweepDir := "BEAR"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TP / SL TRACKING + PROJECTION
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.4.1: tracking (activeSlPx / activeTp1Px / activeTp3Px, SL-hit cooldown,
+// TP1 de-risk) now runs on EVERY signal regardless of i_tpslShow. Previously
+// hiding the lines silently disabled the post-SL double-cooldown risk guard.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var line  tpsl_sl   = na
+var line  tpsl_ent  = na
+var line  tpsl_tp1  = na
+var line  tpsl_tp2  = na
+var line  tpsl_tp3  = na
+var label tpsl_slL  = na
+var label tpsl_tp1L = na
+var label tpsl_tp2L = na
+var label tpsl_tp3L = na
+// v3.5.16: optional bands around each level (display only).
+var box   tpsl_slZ  = na
+var box   tpsl_tp1Z = na
+var box   tpsl_tp2Z = na
+var box   tpsl_tp3Z = na
+
+// v3.5.18: every TP/SL label carries the signal number. When a trade closes
+// at TP3 and a fresh signal opens moments later, its targets are recomputed
+// from the CURRENT profile — so a VAH-based TP can land a few points from the
+// old one and look exactly like a target that moved. It never moves; only the
+// SL does, and only to breakeven. The number makes a new plan unmistakable.
+sigTag = " #" + str.tostring(sigSeq) + " "
+
+var float activeSlPx  = na
+var float activeTp1Px = na
+var float activeTp3Px = na
+var float activeEntryPx = na   // v3.5.5: needed for the breakeven move
+var bool  tradeBuy    = false
+var bool  activeTp1Hit = false
+var bool  activeAtBe   = false
+
+slHitNow  = not na(activeSlPx)  and (tradeBuy ? low  <= activeSlPx  : high >= activeSlPx)
+tp1HitNow = not na(activeTp1Px) and (tradeBuy ? high >= activeTp1Px : low  <= activeTp1Px)
+tp3HitNow = not na(activeTp3Px) and (tradeBuy ? high >= activeTp3Px : low  <= activeTp3Px)
+
+// v3.5.8 TIME STOP. A trade that reaches neither its stop nor TP3 previously
+// stayed active indefinitely: the runner never resolved and the SL/TP1
+// bookkeeping stayed frozen on a position that had long stopped mattering.
+var int tradeStartBar = na
+timeExit = i_maxBars > 0 and not na(tradeStartBar) and not na(activeSlPx) and (bar_index - tradeStartBar) >= i_maxBars
+
+// v3.3: TP1 counts as "de-risked" — SL after that shouldn't extend cooldown.
+// v3.5.4: when ONE bar trades through both TP1 and the SL, the intrabar order
+// is unknown. The old order credited TP1 first and cleared the SL-hit flag,
+// so a bar that may have stopped out disabled the post-SL cooldown. Resolve
+// conservatively: SL first when both are touched on the same bar.
+slFirstAmbiguous = slHitNow and tp1HitNow and not activeTp1Hit
+
+if barstate.isconfirmed and tp1HitNow and not slFirstAmbiguous
+    activeTp1Hit := true
+    lastSlHit := false
+    lossStreak := 0   // v3.5.5: a trade that reached TP1 breaks the streak
+    // v3.5.5 BREAKEVEN. TP1 was already treated as "de-risked" for the
+    // cooldown guard, but the stop never moved — so a trade could tag TP1
+    // and still come back for a full loss. Move the tracked stop to entry
+    // and drag the drawn line/label with it.
+    if i_beAfterTp1 and not na(activeEntryPx) and not activeAtBe
+        activeSlPx := activeEntryPx
+        activeAtBe := true
+        if not na(tpsl_sl)
+            line.set_y1(tpsl_sl, activeEntryPx)
+            line.set_y2(tpsl_sl, activeEntryPx)
+        if not na(tpsl_slL)
+            label.set_y(tpsl_slL, activeEntryPx)
+            label.set_text(tpsl_slL, " BE  " + sigTag + str.tostring(activeEntryPx, format.mintick))
+if barstate.isconfirmed and tp3HitNow and not slHitNow
+    lastSlHit := false
+if barstate.isconfirmed and slHitNow and not activeTp1Hit
+    lastSlHit := true
+    lossStreak := math.min(lossStreak + 1, 999)
+
+if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or buySignal or sellSignal)
+    if not na(tpsl_sl)
+        line.delete(tpsl_sl)
+        tpsl_sl := na
+    if not na(tpsl_ent)
+        line.delete(tpsl_ent)
+        tpsl_ent := na
+    if not na(tpsl_tp1)
+        line.delete(tpsl_tp1)
+        tpsl_tp1 := na
+    if not na(tpsl_tp2)
+        line.delete(tpsl_tp2)
+        tpsl_tp2 := na
+    if not na(tpsl_tp3)
+        line.delete(tpsl_tp3)
+        tpsl_tp3 := na
+    if not na(tpsl_slL)
+        label.delete(tpsl_slL)
+        tpsl_slL := na
+    if not na(tpsl_tp1L)
+        label.delete(tpsl_tp1L)
+        tpsl_tp1L := na
+    if not na(tpsl_tp2L)
+        label.delete(tpsl_tp2L)
+        tpsl_tp2L := na
+    if not na(tpsl_tp3L)
+        label.delete(tpsl_tp3L)
+        tpsl_tp3L := na
+    if not na(tpsl_slZ)
+        box.delete(tpsl_slZ)
+        tpsl_slZ := na
+    if not na(tpsl_tp1Z)
+        box.delete(tpsl_tp1Z)
+        tpsl_tp1Z := na
+    if not na(tpsl_tp2Z)
+        box.delete(tpsl_tp2Z)
+        tpsl_tp2Z := na
+    if not na(tpsl_tp3Z)
+        box.delete(tpsl_tp3Z)
+        tpsl_tp3Z := na
+    activeSlPx   := na
+    activeTp1Px  := na
+    activeTp3Px  := na
+    activeEntryPx := na
+    activeTp1Hit := false
+    activeAtBe   := false
+    tradeStartBar := na
+
+if buySignal
+    activeSlPx   := buySLpx
+    activeTp1Px  := buyTp1
+    activeTp3Px  := buyTp3
+    activeEntryPx := close
+    activeTp1Hit := false
+    activeAtBe   := false
+    tradeStartBar := bar_index
+    tradeBuy     := true
+    if i_tpslShow
+        endBar = bar_index + i_tpLineLen
+        tpsl_sl   := line.new(bar_index, buySLpx, endBar, buySLpx, color=color.new(#FF3366,  0), width=2, style=line.style_dashed)
+        tpsl_ent  := line.new(bar_index, close,   endBar, close,   color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
+        tpsl_tp1  := line.new(bar_index, buyTp1,  endBar, buyTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
+        tpsl_tp2  := line.new(bar_index, buyTp2,  endBar, buyTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
+        tpsl_tp3  := line.new(bar_index, buyTp3,  endBar, buyTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
+        tpsl_slL  := label.new(endBar, buySLpx, buyStopTxt  + sigTag + str.tostring(buySLpx, format.mintick),           style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_tp1L := label.new(endBar, buyTp1,  " TP1" + sigTag + str.tostring(buyTp1, format.mintick) + buyTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp2L := label.new(endBar, buyTp2,  " TP2" + sigTag + str.tostring(buyTp2, format.mintick) + buyTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp3L := label.new(endBar, buyTp3,  " TP3" + sigTag + str.tostring(buyTp3, format.mintick) + buyTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        if i_zoneShow
+            zh = atr14 * i_zoneAtr
+            tpsl_slZ  := box.new(bar_index, buySLpx + zh, endBar, buySLpx - zh, bgcolor=color.new(#FF3366, 85), border_color=color.new(#FF3366, 60))
+            tpsl_tp1Z := box.new(bar_index, buyTp1 + zh, endBar, buyTp1 - zh, bgcolor=color.new(#00FF88, 85), border_color=color.new(#00FF88, 60))
+            tpsl_tp2Z := box.new(bar_index, buyTp2 + zh, endBar, buyTp2 - zh, bgcolor=color.new(#FFD700, 85), border_color=color.new(#FFD700, 60))
+            tpsl_tp3Z := box.new(bar_index, buyTp3 + zh, endBar, buyTp3 - zh, bgcolor=color.new(#FF9500, 85), border_color=color.new(#FF9500, 60))
+
+if sellSignal
+    activeSlPx   := sellSLpx
+    activeTp1Px  := sellTp1
+    activeTp3Px  := sellTp3
+    activeEntryPx := close
+    activeTp1Hit := false
+    activeAtBe   := false
+    tradeStartBar := bar_index
+    tradeBuy     := false
+    if i_tpslShow
+        endBar = bar_index + i_tpLineLen
+        tpsl_sl   := line.new(bar_index, sellSLpx, endBar, sellSLpx, color=color.new(#FF3366,  0), width=2, style=line.style_dashed)
+        tpsl_ent  := line.new(bar_index, close,    endBar, close,    color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
+        tpsl_tp1  := line.new(bar_index, sellTp1,  endBar, sellTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
+        tpsl_tp2  := line.new(bar_index, sellTp2,  endBar, sellTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
+        tpsl_tp3  := line.new(bar_index, sellTp3,  endBar, sellTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
+        tpsl_slL  := label.new(endBar, sellSLpx, sellStopTxt + sigTag + str.tostring(sellSLpx, format.mintick),            style=label.style_label_left, color=color.new(#FF3366, 0), textcolor=color.white, size=size.normal)
+        tpsl_tp1L := label.new(endBar, sellTp1,  " TP1" + sigTag + str.tostring(sellTp1, format.mintick) + sellTag1, style=label.style_label_left, color=color.new(#00FF88, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp2L := label.new(endBar, sellTp2,  " TP2" + sigTag + str.tostring(sellTp2, format.mintick) + sellTag2, style=label.style_label_left, color=color.new(#FFD700, 0), textcolor=color.black, size=size.normal)
+        tpsl_tp3L := label.new(endBar, sellTp3,  " TP3" + sigTag + str.tostring(sellTp3, format.mintick) + sellTag3, style=label.style_label_left, color=color.new(#FF9500, 0), textcolor=color.black, size=size.normal)
+        if i_zoneShow
+            zh = atr14 * i_zoneAtr
+            tpsl_slZ  := box.new(bar_index, sellSLpx + zh, endBar, sellSLpx - zh, bgcolor=color.new(#FF3366, 85), border_color=color.new(#FF3366, 60))
+            tpsl_tp1Z := box.new(bar_index, sellTp1 + zh, endBar, sellTp1 - zh, bgcolor=color.new(#00FF88, 85), border_color=color.new(#00FF88, 60))
+            tpsl_tp2Z := box.new(bar_index, sellTp2 + zh, endBar, sellTp2 - zh, bgcolor=color.new(#FFD700, 85), border_color=color.new(#FFD700, 60))
+            tpsl_tp3Z := box.new(bar_index, sellTp3 + zh, endBar, sellTp3 - zh, bgcolor=color.new(#FF9500, 85), border_color=color.new(#FF9500, 60))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL LABELS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if buySignal
+    label.new(bar_index, low - atr14 * 0.8, "BUY #" + str.tostring(sigSeq), style=label.style_label_up, color=color.new(i_buyCol, 5), textcolor=color.rgb(0, 0, 0), size=size.normal)
+if sellSignal
+    label.new(bar_index, high + atr14 * 0.8, "SELL #" + str.tostring(sigSeq), style=label.style_label_down, color=color.new(i_sellCol, 5), textcolor=color.white, size=size.normal)
+
+barcolor(i_barTint and ofBull ? color.new(i_buyCol, 80) : i_barTint and ofBear ? color.new(i_sellCol, 80) : na)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD — v3.4.1: cells refresh only on the last bar (same visuals, faster)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var table dash = na
+
+f_cell(col, row, txt, clr) =>
+    table.cell(dash, col, row, txt, text_color=clr, text_size=size.tiny, text_halign=text.align_center, bgcolor=color.rgb(12, 12, 18))
+
+if i_dashboard and barstate.islast
+    tPos = (i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left)
+
+    if na(dash)
+        dash := table.new(tPos, 3, 18, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
+        table.merge_cells(dash, 1, 16, 2, 16)
+        table.merge_cells(dash, 1, 17, 2, 17)
+
+    grn  = color.new(#00FF88, 0)
+    red_ = color.new(#FF3366, 0)
+    dim  = color.new(#888888, 0)
+    wht  = color.new(#FFFFFF, 0)
+    yel  = color.new(#FFD700, 0)
+    grn2 = color.new(#00FF88, 50)
+    red2 = color.new(#FF3366, 50)
+
+    table.cell(dash, 0, 0, "ME PRO v3.5.19 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
+    table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
+
+    // v3.5: in Scalp the HTF gate is bypassed — show direction as info, never "BLOCKED"
+    htfGateOn = i_htfFilter and not isScalp
+    table.cell(dash, 0, 1, "HTF " + i_htfTf + (isScalp ? " (off)" : ""), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 1, htfBull ? "BULL ✓" : htfGateOn ? "BLOCKED" : "BEAR",   htfBull ? grn : htfGateOn ? red_ : dim)
+    f_cell(2, 1, htfBear ? "BEAR ✓" : htfGateOn ? "BLOCKED" : "BULL",   htfBear ? red_ : htfGateOn ? red_ : dim)
+
+    vwapAnchTxt = vwapUseMonth ? "M" : vwapUseWeek ? "W" : "D"
+    table.cell(dash, 0, 2, "VWAP (" + vwapAnchTxt + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 2, aboveVwap ? (notExtended ? "ABOVE ✓" : "EXTENDED") : i_vwapFilter ? "BLOCKED" : "BELOW", aboveVwap and notExtended ? grn : aboveVwap and not notExtended ? yel : i_vwapFilter ? red_ : dim)
+    f_cell(2, 2, belowVwap ? (notExtended ? "BELOW ✓" : "EXTENDED") : i_vwapFilter ? "BLOCKED" : "ABOVE", belowVwap and notExtended ? red_ : belowVwap and not notExtended ? yel : i_vwapFilter ? red_ : dim)
+
+    table.cell(dash, 0, 3, isScalp ? "Momentum (fast)" : "Momentum + Slope", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 3, momBullEff ? "BULL ✓" : i_momFilter ? "BLOCKED" : "BEAR", momBullEff ? grn : i_momFilter ? red_ : dim)
+    f_cell(2, 3, momBearEff ? "BEAR ✓" : i_momFilter ? "BLOCKED" : "BULL", momBearEff ? red_ : i_momFilter ? red_ : dim)
+
+    table.cell(dash, 0, 4, "RSI " + str.tostring(math.round(rsi, 1)), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 4, rsiOkBuy  ? "OK" : "OUT",  rsiOkBuy  ? grn  : dim)
+    f_cell(2, 4, rsiOkSell ? "OK" : "OUT",  rsiOkSell ? red_ : dim)
+
+    table.cell(dash, 0, 5, "MSS (fresh " + str.tostring(math.min(math.min(mssUpAge, mssDnAge), 99)) + "b)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 5, mssUp   ? "▲ FRESH" : lastMssDir == "BULL" ? "BULL" : lastMssDir == "BEAR" ? "bear" : "—", mssUp   ? grn  : lastMssDir == "BULL" ? grn2 : dim)
+    f_cell(2, 5, mssDown ? "▼ FRESH" : lastMssDir == "BEAR" ? "BEAR" : lastMssDir == "BULL" ? "bull" : "—", mssDown ? red_ : lastMssDir == "BEAR" ? red2 : dim)
+
+    table.cell(dash, 0, 6, "FVG Retest", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 6, fvgRetestBull ? "▲ NOW" : lastFvgDir == "BULL" ? "BULL" : lastFvgDir == "BEAR" ? "bear" : "—", fvgRetestBull ? grn  : lastFvgDir == "BULL" ? grn2 : dim)
+    f_cell(2, 6, fvgRetestBear ? "▼ NOW" : lastFvgDir == "BEAR" ? "BEAR" : lastFvgDir == "BULL" ? "bull" : "—", fvgRetestBear ? red_ : lastFvgDir == "BEAR" ? red2 : dim)
+
+    table.cell(dash, 0, 7, "Sweep (fresh)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 7, sweepBull ? "▲ FRESH" : lastSweepDir == "BULL" ? "BULL" : lastSweepDir == "BEAR" ? "bear" : "—", sweepBull ? grn  : lastSweepDir == "BULL" ? grn2 : dim)
+    f_cell(2, 7, sweepBear ? "▼ FRESH" : lastSweepDir == "BEAR" ? "BEAR" : lastSweepDir == "BULL" ? "bull" : "—", sweepBear ? red_ : lastSweepDir == "BEAR" ? red2 : dim)
+
+    ofBuyTxt  = str.tostring(math.round(buyPct,         1)) + "% / " + str.tostring(math.round(adaptThresh, 0)) + "%"
+    ofSellTxt = str.tostring(math.round(100.0 - buyPct, 1)) + "% / " + str.tostring(math.round(adaptThresh, 0)) + "%"
+    table.cell(dash, 0, 8, "OF (adaptive)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 8, ofBuyTxt,  ofBull ? grn : buyPct  > 50 ? wht : dim)
+    f_cell(2, 8, ofSellTxt, ofBear ? red_ : buyPct < 50 ? wht : dim)
+
+    table.cell(dash, 0, 9, "Δ Body", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 9, str.tostring(math.round(deltaRatio, 2)), deltaBullOk ? grn : dim)
+    f_cell(2, 9, str.tostring(math.round(deltaRatio, 2)), deltaBearOk ? red_ : dim)
+
+    relVolTxt = volDataSeen ? str.tostring(math.round(relVol, 2)) + "×" : "N/A (no vol)"
+    table.cell(dash, 0, 10, "Rel Volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 10, relVolTxt, not volDataSeen ? dim : volOk ? grn : red_)
+    f_cell(2, 10, relVolTxt, not volDataSeen ? dim : volOk ? grn : red_)
+
+    table.cell(dash, 0, 11, "CVD Flow", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
+    f_cell(2, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
+
+    // v3.4: FRVP row shows live POC price
+    table.cell(dash, 0, 12, "FRVP" + (na(pocPrice) ? "" : " @ " + str.tostring(pocPrice, format.mintick)), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 12, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "ABOVE") ? grn : dim)
+    f_cell(2, 12, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "BELOW") ? red_ : dim)
+
+    regTxt = volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL"
+    regCol = volExpand ? grn : volChop ? yel : wht
+    table.cell(dash, 0, 13, "Vol Regime", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 13, regTxt + " " + str.tostring(math.round(volRegime, 2)) + "×", regCol)
+    f_cell(2, 13, regTxt + " " + str.tostring(math.round(volRegime, 2)) + "×", regCol)
+
+    // v3.5.2: shown in the SAME ATR units the risk window is judged in, and
+    // the SELL cell now dims when blocked (was red for OK and blocked alike)
+    buyRatioStr  = str.tostring(math.round(buyRiskDist  / riskAtrRef, 2)) + "× ATR"
+    sellRatioStr = str.tostring(math.round(sellRiskDist / riskAtrRef, 2)) + "× ATR"
+    table.cell(dash, 0, 14, "Risk Dist", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 14, buyRatioStr,  riskOkBuy  ? grn : dim)
+    f_cell(2, 14, sellRatioStr, riskOkSell ? red_ : dim)
+
+    // v3.5.5: confluence 0-3 (HTF side + VWAP side + value-area side).
+    // These two values were computed every bar since v3.3 and never read.
+    table.cell(dash, 0, 15, "Confluence", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 15, str.tostring(buyAligned)  + "/3", buyAligned  == 3 ? grn  : buyAligned  == 2 ? grn2 : dim)
+    f_cell(2, 15, str.tostring(sellAligned) + "/3", sellAligned == 3 ? red_ : sellAligned == 2 ? red2 : dim)
+
+    lastSigCol = str.contains(lastSigMemory, "BUY") ? grn : str.contains(lastSigMemory, "SELL") ? red_ : dim
+    sigSuffix  = activeAtBe ? "  · SL@BE" : lossStreak > 0 ? "  · " + str.tostring(lossStreak) + "L streak" : ""
+    table.cell(dash, 0, 16, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 16, lastSigMemory + sigSuffix, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
+
+    // v3.5.2: which gates vetoed the most recent trigger
+    table.cell(dash, 0, 17, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 17, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON ALERTS — v3.4.1: TPs are the SAME structure-based levels shown on chart
+// v3.5.1: both message strings are now built ONLY on the signal bar that sends
+// them — previously ~60 str.tostring concatenations ran on every single bar.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_, stopType_) =>
+    // v3.5.9: optional shared secret, emitted as the FIRST field INSIDE the
+    // object so a receiver can reject an unauthenticated payload early.
+    '{' + (i_webhookSecret == "" ? "" : '"secret":"' + i_webhookSecret + '",') + '"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","stop_type":"' + stopType_ + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
+
+
+if buySignal
+    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3,  buyAligned,  buyClamped  ? "clamped" : "structural")  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
+if sellSignal
+    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3, sellAligned, sellClamped ? "clamped" : "structural") : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRATEGY EXECUTION (generated by build_strategy.py — do not hand-edit)
+// ─────────────────────────────────────────────────────────────────────────────
+// Entries/exits use the SAME buySignal/sellSignal and the SAME TP/SL levels the
+// indicator draws, so the tester measures the engine rather than a re-statement
+// of it. Scale-out is 33/33/34 across TP1/TP2/TP3, with the stop moved to
+// breakeven after TP1 when that option is enabled.
+//
+// Fills are bar-close (process_orders_on_close), commission 0.02% and 2 ticks of
+// slippage are charged. Intrabar order between stop and target is unknown to
+// the tester on any bar that spans both — treat single-bar round trips with
+// suspicion, and prefer results over many trades.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var float stEntry   = na
+var float stSl      = na
+var float stTp1     = na
+var float stTp2     = na
+var float stTp3     = na
+var bool  stTp1Done = false
+var int   stStartBar = na
+// v3.5.27: absolute leg quantities fixed at ENTRY, plus a filled flag per leg.
+// qty_percent is a percentage of the CURRENT position, and these exits were
+// re-issued every bar — so after TP1 filled, L1 was recreated as 33% of what
+// REMAINED, at a limit price the market had already passed, and filled again
+// immediately. The position bled out at TP1's price bar after bar while TP2 and
+// TP3 barely participated. Winners were capped at TP1 and losers took full
+// size: a structural deletion of the right tail, and the direct cause of the
+// large backtest loss.
+var float stQ1 = na
+var float stQ2 = na
+var float stQ3 = na
+var bool  stL1 = false
+var bool  stL2 = false
+var bool  stL3 = false
+var int   stInvalidRun = 0
+var int   stEntryConf  = na
+
+stRiskDist = buySignal ? buyRiskDist : sellSignal ? sellRiskDist : na
+stQtyRaw   = not na(stRiskDist) and stRiskDist > 0 ? (strategy.equity * i_stRiskPct / 100.0) / stRiskDist : na
+// v3.5.27: cap notional exposure. Risk-normalised sizing divides by the stop
+// distance, so a very tight stop produced an enormous position — at 1% risk and
+// a 1-point stop on gold that is ~44x equity in notional. Unrealistic, and it
+// makes a handful of tight-stop trades dominate the entire equity curve.
+stQtyCap   = i_stMaxLev > 0 ? (strategy.equity * i_stMaxLev) / math.max(close, 1e-9) : na
+stQty      = na(stQtyRaw) ? na : na(stQtyCap) ? stQtyRaw : math.min(stQtyRaw, stQtyCap)
+
+if buySignal and not na(stQty)
+    stEntry   := close
+    stSl      := buySLpx
+    stTp1     := buyTp1
+    stTp2     := buyTp2
+    stTp3     := buyTp3
+    stTp1Done := false
+    stStartBar := bar_index
+    stEntryConf := buyAligned
+    stInvalidRun := 0
+    stQ1 := stQty * 0.33
+    stQ2 := stQty * 0.33
+    stQ3 := stQty - stQ1 - stQ2
+    stL1 := false
+    stL2 := false
+    stL3 := false
+    strategy.entry("Long", strategy.long, qty=stQty)
+
+if sellSignal and not na(stQty)
+    stEntry   := close
+    stSl      := sellSLpx
+    stTp1     := sellTp1
+    stTp2     := sellTp2
+    stTp3     := sellTp3
+    stTp1Done := false
+    stStartBar := bar_index
+    stEntryConf := sellAligned
+    stInvalidRun := 0
+    stQ1 := stQty * 0.33
+    stQ2 := stQty * 0.33
+    stQ3 := stQty - stQ1 - stQ2
+    stL1 := false
+    stL2 := false
+    stL3 := false
+    strategy.entry("Short", strategy.short, qty=stQty)
+
+// Breakeven after TP1 trades — mirrors the indicator's i_beAfterTp1 behavior.
+if i_beAfterTp1 and not stTp1Done and strategy.position_size != 0 and not na(stTp1)
+    tp1Touched = strategy.position_size > 0 ? high >= stTp1 : low <= stTp1
+    if tp1Touched
+        stTp1Done := true
+        stSl      := stEntry
+
+// v3.5.27: absolute quantities, and a leg is never re-issued once its target
+// has traded. Re-issuing is still needed so a breakeven move reaches the live
+// orders, but only for legs that are genuinely still open.
+if strategy.position_size > 0 and not na(stSl)
+    if not stL1
+        strategy.exit("L1", from_entry="Long", qty=stQ1, limit=stTp1, stop=stSl)
+    if not stL2
+        strategy.exit("L2", from_entry="Long", qty=stQ2, limit=stTp2, stop=stSl)
+    if not stL3
+        strategy.exit("L3", from_entry="Long", qty=stQ3, limit=stTp3, stop=stSl)
+
+if strategy.position_size < 0 and not na(stSl)
+    if not stL1
+        strategy.exit("S1", from_entry="Short", qty=stQ1, limit=stTp1, stop=stSl)
+    if not stL2
+        strategy.exit("S2", from_entry="Short", qty=stQ2, limit=stTp2, stop=stSl)
+    if not stL3
+        strategy.exit("S3", from_entry="Short", qty=stQ3, limit=stTp3, stop=stSl)
+
+// Mark a leg filled once its target has traded, so the block above stops
+// re-creating it. Evaluated after the orders are placed for this bar.
+if strategy.position_size != 0
+    stIsLong = strategy.position_size > 0
+    if not stL1 and not na(stTp1) and (stIsLong ? high >= stTp1 : low <= stTp1)
+        stL1 := true
+    if not stL2 and not na(stTp2) and (stIsLong ? high >= stTp2 : low <= stTp2)
+        stL2 := true
+    if not stL3 and not na(stTp3) and (stIsLong ? high >= stTp3 : low <= stTp3)
+        stL3 := true
+
+// v3.5.8 time stop — mirrors the indicator's Max Bars In Trade.
+if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar_index - stStartBar) >= i_maxBars
+    strategy.close_all(comment="time stop")
+
+// (invalidation exit not present in this indicator version)
