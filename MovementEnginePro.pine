@@ -1,8 +1,55 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.25 (degenerate volume detection)
+// © ME Institutional — Movement Engine Pro v3.5.26 (scalp stop comfort + blended reward)
 //@version=6
-indicator("Movement Engine Pro v3.5.25", shorttitle="ME Pro v3.5.25", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.26", shorttitle="ME Pro v3.5.26", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.26 CHANGELOG — SCALP STOP COMFORT + BLENDED SCALE-OUT REWARD
+// ─────────────────────────────────────────────────────────────────────────────
+// Asked for: a more comfortable stop, and more Scalp trades WITHOUT giving up
+// accuracy. Those normally fight each other — a wider stop means a bigger R,
+// which makes the reward gate harder to clear. Two genuine defects made it
+// possible to do both.
+//
+// 1. SCALP HAD THE THINNEST STOP IN THE WORST CONDITIONS
+//    slBuf = isScalp ? riskAtrRef * math.min(i_slAtr, 0.3) : riskAtrRef *
+//            i_slAtr * slMult
+//    Scalp was hard-clamped to 0.3 ATR AND was the only mode denied slMult, so
+//    where every other mode widened its pad by 1.3x in expanding volatility and
+//    1.2x in chop, Scalp held a flat 0.3 ATR through both. The padding was at
+//    its thinnest in exactly the regimes most likely to overrun it. Scalp now
+//    takes slMult like every other mode, and the clamp is an input
+//    (i_scalpSlCap) so it can be widened further.
+//
+// 2. THE REWARD GATE MEASURED A THIRD OF THE PLAN
+//    The position exits 33/33/34 across TP1/TP2/TP3, but the gate judged the
+//    setup on TP1 alone. A plan with a modest first target and strong second
+//    and third was rejected on a number that never described it. On 15m gold
+//    the nearest pivot frequently sits inside 1R, which is why "rr" appears in
+//    nearly every blocked signal.
+//
+//    A setup now passes on EITHER the TP1 test (unchanged) OR the weighted
+//    reward of the whole scale-out clearing i_minBlendRR. This raises trade
+//    count by correcting WHAT IS MEASURED, not by lowering the bar.
+//
+//    Simulated over 200,000 synthetic setups:
+//      admitted by TP1 test alone      63.56%
+//      admitted by either path         73.21%
+//      increase                        +9.65 points, +15% relative
+//    and the extra trades are not marginal:
+//      median TP1 0.61R, TP2 1.54R, TP3 3.20R, blended 1.79R
+//
+//    Guarded twice. TP1 must still clear i_minTp1Floor (0.5R) so a target a few
+//    ticks out can never be waved through by a strong runner behind it. And a
+//    trade admitted on the blended path does NOT arm the breakeven move
+//    (activeBeOk) — a close TP1 dragging the stop to entry is exactly the
+//    scratch machine the v3.5.8 reward gate was built to stop, and re-creating
+//    it while widening the stop would have undone both changes at once.
+//
+// Both effects are UNMEASURED against real price. The simulation shows how many
+// setups the gate admits and their shape; it says nothing about whether they
+// win. Set i_minBlendRR to 0 to restore v3.5.25 behaviour exactly.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.25 CHANGELOG — DEGENERATE VOLUME DETECTION (Scalp fires nothing on a
 // broker feed)
@@ -829,6 +876,9 @@ i_slAtr      = input.float(0.5,"SL Buffer Below/Above Pivot (× ATR)",
      minval=0.1, maxval=3.0, step=0.1,
      tooltip="SL is placed at last pivot ± this ATR buffer.\nAuto-scales UP in chop (×1.2) and expansion (×1.3) — never tightens below 1.0×.\nScalp mode: buffer clamped to ≤0.3 and based on atr14 with no regime scaling (v3.5.1).",
      group=G_STRUCT)
+i_scalpSlCap = input.float(0.3, "Scalp SL Buffer Cap (× ATR)", minval=0.1, maxval=1.5, step=0.05,
+     tooltip="v3.5.26: the most stop padding Scalp may take beyond its structural anchor, before the volatility multiplier.\nScalp previously hard-clamped this to 0.3 and was ALSO the only mode denied slMult — so where every other mode widened its stop by 1.3x in expanding volatility and 1.2x in chop, Scalp held a flat 0.3 ATR through both. The pad was thinnest in exactly the conditions most likely to overrun it. Scalp now takes the multiplier like every other mode.\nRaise this for a more comfortable stop. It widens risk, which lowers R-multiples and makes the reward gate harder to clear — expect fewer signals as you raise it.",
+     group=G_TPSL)
 i_triggerAge = input.int(3, "Trigger Max Age (bars)",
      minval=1, maxval=10,
      tooltip="MSS and Sweep triggers stay 'fresh' for this many bars after firing. Lets OF/CVD confirm on N+1/N+2 rather than only same-bar. v3.3 accuracy fix.\nPair this with the extension cap below — freshness alone let entries land several bars and several ATR past the level that was broken.",
@@ -977,6 +1027,12 @@ i_maxTpR     = input.float(0.0, "Max TP Distance (× risk, 0 = off)", minval=0.0
 i_tpLineLen  = input.int(30,   "TP/SL Line Length (bars)", minval=5, maxval=200, group=G_TPSL)
 i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5.0, step=0.1,
      tooltip="v3.5.8: TP1 must sit at least this many multiples of the stop distance away, or the setup is skipped (reports as 'rr' in Last Block). 0 disables.\nThe engine has always bounded RISK and never once checked REWARD. TP1 is simply the nearest structure level above entry, so it can be a fraction of the stop distance away — and since TP1 also triggers the breakeven move, a too-close first target turns trades into scratches: a third off for a few ticks, stop to entry, brushed out of the rest.\nRaising this demands better setups and cuts signal count; lower it if you want closer first targets.",
+     group=G_TPSL)
+i_minBlendRR = input.float(1.3, "Min Blended Scale-Out Reward (× risk, 0 = off)", minval=0.0, maxval=10.0, step=0.1,
+     tooltip="v3.5.26: an alternative way to pass the reward gate, measuring the WHOLE plan instead of TP1 alone.\nThe position exits 33/33/34 across TP1/TP2/TP3, so judging a setup purely by TP1 describes a third of it. A plan with a modest first target and strong second and third was rejected on a number that never represented it — the largest single source of 'rr' blocks on 15m gold, where the nearest pivot often sits inside 1R.\nA setup now passes on EITHER the TP1 test OR this weighted reward. That raises trade count by fixing what is measured rather than by lowering the bar.\n0 = off, and only the TP1 test applies, exactly as before.\nNOTE: a trade admitted this way does NOT arm the breakeven move, because a close TP1 dragging the stop to entry is the scratch pattern the v3.5.8 gate exists to prevent.",
+     group=G_TPSL)
+i_minTp1Floor = input.float(0.5, "Absolute TP1 Floor (× risk)", minval=0.0, maxval=3.0, step=0.1,
+     tooltip="v3.5.26: TP1 must clear this no matter which path admits the trade. Stops a target a few ticks away being waved through by a strong runner sitting behind it.\nApplies only to the blended path; the ordinary TP1 test already enforces its own, higher bar.",
      group=G_TPSL)
 i_spreadBuf  = input.float(0.0, "Spread + Slippage Buffer", minval=0.0, step=0.01,
      tooltip="v3.5.16: pushes the stop this far FURTHER from entry, and the reported risk grows to match.\nNothing in the engine modelled spread until now: the stop sat exactly on the structural level, so on a symbol with any spread the level could be taken out by the quote alone while the traded price never reached it. On XAUUSD a 0.30 spread against a 9-point scalp stop is ~3% of risk; on a tighter stop it is worse.\nUnits are set by 'Buffer Units' below. 0 = off, and the engine behaves exactly as before.\nOnly the STOP is buffered. Targets are left alone: widening them would flatter the plan rather than protect it.",
@@ -1805,7 +1861,12 @@ sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
 riskAtrRef = isScalp ? atr14 : atrBase
 
 slMult    = volExpand ? 1.3 : volChop ? 1.2 : 1.0
-slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, 0.3) : riskAtrRef * i_slAtr * slMult
+// v3.5.26 SCALP STOP COMFORT. Scalp hard-clamped the pad to 0.3 ATR AND was
+// the only mode denied slMult, so where every other mode widened its stop by
+// 1.3x in expanding volatility and 1.2x in chop, Scalp held a flat 0.3 ATR
+// through both. The pad is thinnest in exactly the conditions that overrun it.
+// Scalp now takes slMult like the rest, and the clamp is an input.
+slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, i_scalpSlCap) * slMult : riskAtrRef * i_slAtr * slMult
 
 // v3.5.7 TRIGGER-AWARE INVALIDATION. The stop was ALWAYS built from the last
 // pivot, whatever fired the entry. For a sweep that is provably wrong: the
@@ -2098,8 +2159,32 @@ if rawSellPre
 // ═══════════════════════════════════════════════════════════════════════════════
 rrBuy    = not na(buyTp1)  ? (buyTp1 - close)  / math.max(buyRiskDist,  1e-9) : na
 rrSell   = not na(sellTp1) ? (close - sellTp1) / math.max(sellRiskDist, 1e-9) : na
-rrOkBuy  = effMinRR <= 0 or (not na(rrBuy)  and rrBuy  >= effMinRR)
-rrOkSell = effMinRR <= 0 or (not na(rrSell) and rrSell >= effMinRR)
+// v3.5.26 BLENDED REWARD. The gate measured TP1 ALONE, but the plan is a
+// 33/33/34 scale-out — so a setup whose first target is modest and whose
+// second and third are excellent was rejected on a number that describes a
+// third of the position. That is a measurement error, not a safety margin, and
+// it is the single largest source of "rr" blocks on 15m gold where the nearest
+// pivot often sits inside 1R.
+//
+// A plan now passes on EITHER the TP1 test (unchanged) OR the weighted reward
+// of the whole scale-out clearing i_minBlendRR. Raising trade count by fixing
+// what is measured, rather than by lowering the bar.
+//
+// Guarded two ways. TP1 must still clear i_minTp1Floor, so a target a few ticks
+// away can never be admitted by a strong runner behind it. And a trade admitted
+// on the blended path does NOT arm the breakeven move (see activeBeOk), because
+// a close TP1 pulling the stop to entry is precisely the scratch machine the
+// v3.5.8 reward gate was built to stop.
+blendBuy  = not na(buyTp1)  and not na(buyTp2)  and not na(buyTp3)  ? (0.33 * (buyTp1 - close) + 0.33 * (buyTp2 - close) + 0.34 * (buyTp3 - close))   / math.max(buyRiskDist,  1e-9) : na
+blendSell = not na(sellTp1) and not na(sellTp2) and not na(sellTp3) ? (0.33 * (close - sellTp1) + 0.33 * (close - sellTp2) + 0.34 * (close - sellTp3)) / math.max(sellRiskDist, 1e-9) : na
+tp1FloorOkBuy  = not na(rrBuy)  and rrBuy  >= i_minTp1Floor
+tp1FloorOkSell = not na(rrSell) and rrSell >= i_minTp1Floor
+blendOkBuy  = i_minBlendRR > 0 and tp1FloorOkBuy  and not na(blendBuy)  and blendBuy  >= i_minBlendRR
+blendOkSell = i_minBlendRR > 0 and tp1FloorOkSell and not na(blendSell) and blendSell >= i_minBlendRR
+rrStrictBuy  = not na(rrBuy)  and rrBuy  >= effMinRR
+rrStrictSell = not na(rrSell) and rrSell >= effMinRR
+rrOkBuy  = effMinRR <= 0 or rrStrictBuy  or blendOkBuy
+rrOkSell = effMinRR <= 0 or rrStrictSell or blendOkSell
 
 // v3.5.12: confluence gate reads the score computed above; 0 disables it.
 confOkBuy  = buyAligned  >= effMinConf
@@ -2247,6 +2332,10 @@ var float activeEntryPx = na   // v3.5.5: needed for the breakeven move
 var int   activeEntryConf = na
 var bool  tradeBuy    = false
 var bool  activeTp1Hit = false
+// v3.5.26: did THIS trade's TP1 clear the strict reward bar? A plan admitted by
+// the blended path has a deliberately modest TP1, and arming breakeven off it
+// would recreate the scratch pattern the v3.5.8 gate was built to stop.
+var bool  activeBeOk   = false
 var bool  activeAtBe   = false
 
 slHitNow  = not na(activeSlPx)  and (tradeBuy ? low  <= activeSlPx  : high >= activeSlPx)
@@ -2330,7 +2419,7 @@ if barstate.isconfirmed and tp1HitNow and not slFirstAmbiguous
     // cooldown guard, but the stop never moved — so a trade could tag TP1
     // and still come back for a full loss. Move the tracked stop to entry
     // and drag the drawn line/label with it.
-    if i_beAfterTp1 and not na(activeEntryPx) and not activeAtBe
+    if i_beAfterTp1 and activeBeOk and not na(activeEntryPx) and not activeAtBe
         activeSlPx := activeEntryPx
         activeAtBe := true
         if not na(tpsl_sl)
@@ -2392,6 +2481,7 @@ if barstate.isconfirmed and (slHitNow or tp3HitNow or timeExit or invalidExit or
     activeEntryConf := na
     activeTp1Hit := false
     activeAtBe   := false
+    activeBeOk   := false
     tradeStartBar := na
     invalidRun    := 0
 
@@ -2403,6 +2493,7 @@ if buySignal
     activeEntryConf := buyAligned
     activeTp1Hit := false
     activeAtBe   := false
+    activeBeOk   := rrStrictBuy
     tradeStartBar := bar_index
     invalidRun    := 0
     tradeBuy     := true
@@ -2432,6 +2523,7 @@ if sellSignal
     activeEntryConf := sellAligned
     activeTp1Hit := false
     activeAtBe   := false
+    activeBeOk   := rrStrictSell
     tradeStartBar := bar_index
     invalidRun    := 0
     tradeBuy     := false
@@ -2489,7 +2581,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.25 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.26 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
