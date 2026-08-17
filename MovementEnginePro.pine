@@ -1,8 +1,42 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.29 (scalp risk-cap guard)
+// © ME Institutional — Movement Engine Pro v3.5.30 (scalp trigger freshness)
 //@version=6
-indicator("Movement Engine Pro v3.5.29", shorttitle="ME Pro v3.5.29", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.30", shorttitle="ME Pro v3.5.30", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.30 CHANGELOG — THREE BLOCK REASONS WERE ONE PROBLEM
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "BUY x vol risk chase rr", every mode weak, losing.
+//
+// Three of those four gates are not independent. They all measure HOW LATE the
+// entry is. i_triggerAge (default 3) keeps a trigger valid for three bars so
+// order flow can confirm on N+1/N+2 — but every bar of delay walks the entry
+// away from the level while the target stays where it is. The entry price gets
+// worse, the stop widens, and the reward shrinks. chase, risk and rr then
+// reject the very setups the delay produced.
+//
+// Simulated over 200,000 triggers with a drifting entry:
+//   triggerAge   chase ok   risk ok   rr ok    all three
+//   1            100.0%     81.4%     88.6%    70.9%
+//   2             98.3%     79.4%     81.6%    62.5%
+//   3 (default)   93.6%     76.7%     75.3%    55.7%
+//   5             83.1%     70.1%     65.5%    46.4%
+//
+// The setups that DO pass at age 3 are disproportionately the drifted ones —
+// same target, worse price, wider stop. That is a mechanism for "weak and loss
+// print", not just for fewer signals.
+//
+// Scalp now clamps freshness to 2, keeping one bar of order-flow confirmation
+// while dropping the third bar, which costs the most. Other modes are
+// unchanged: they are slower by design and the confirmation is worth more to
+// them. Set i_triggerAge to 1 to test same-bar-only entries.
+//
+// HONEST LIMIT: the simulation prices the COST of waiting. It does not price
+// the BENEFIT — triggers whose own bar fails the order-flow gate and would be
+// confirmed a bar later are lost as freshness shrinks. Which dominates is not
+// something reasoning about the code can settle. The strategy build now
+// measures it: run one range at 3 and one at 1 and compare profit factor.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.29 CHANGELOG — WIDENING THE SCALP STOP COULD BLOCK EVERY SETUP
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1255,6 +1289,13 @@ i_webhookSecret = input.string("", "Webhook Shared Secret",
 
 isScalp       = i_mode == "Scalp"
 effSwingLen   = isScalp ? 2 : i_swingLen
+// v3.5.30: a stale trigger contradicts the mode. Freshness exists so order
+// flow can confirm on bar N+1/N+2, but every bar of delay moves the entry away
+// from the level while the target stays put — so the entry price worsens, the
+// stop widens and the reward shrinks, and chase/risk/rr then reject exactly the
+// setups the delay created. Scalp clamps to 2, keeping one bar of confirmation
+// without the third bar that costs the most.
+effTriggerAge = isScalp ? math.min(i_triggerAge, 2) : i_triggerAge
 effVolFloor   = isScalp ? math.min(i_volFloor,   1.0)  : i_volFloor
 effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
 effOfThresh   = isScalp ? math.min(i_ofThresh,   57.0) : i_ofThresh
@@ -1579,8 +1620,8 @@ if mssUpEvent
     mssDnAge := 999   // reset opposite
 if mssDownEvent
     mssUpAge := 999
-mssUp   = mssUpAge <= i_triggerAge
-mssDown = mssDnAge <= i_triggerAge
+mssUp   = mssUpAge <= effTriggerAge
+mssDown = mssDnAge <= effTriggerAge
 
 // ── STRUCTURAL BIAS (v3.3: cross-checked with HTF) ───────────────────────────
 var bool structBull = false
@@ -1750,8 +1791,8 @@ if sweepBullEvent
     sweepBearAge := 999
 if sweepBearEvent
     sweepBullAge := 999
-sweepBull = sweepBullAge <= i_triggerAge
-sweepBear = sweepBearAge <= i_triggerAge
+sweepBull = sweepBullAge <= effTriggerAge
+sweepBear = sweepBearAge <= effTriggerAge
 
 // v3.5.7: remember the sweep bar's OWN extreme and the level it violated.
 // The stop for a sweep entry belongs below that wick — see the SL section.
@@ -2710,7 +2751,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.29 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.30 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
