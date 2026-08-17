@@ -1,8 +1,39 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.28 (HTF degeneracy guard)
+// © ME Institutional — Movement Engine Pro v3.5.29 (scalp risk-cap guard)
 //@version=6
-indicator("Movement Engine Pro v3.5.28", shorttitle="ME Pro v3.5.28", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.29", shorttitle="ME Pro v3.5.29", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.29 CHANGELOG — WIDENING THE SCALP STOP COULD BLOCK EVERY SETUP
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: zero trades on Scalp 15m.
+//
+// v3.5.26 made the Scalp stop buffer adjustable (i_scalpSlCap) and gave Scalp
+// the volatility multiplier the other modes already had. The advice given with
+// it — "raise this for a more comfortable stop" — omitted that Scalp's max-risk
+// cap is a hard 2.0 ATR and that riskDist is the buffer PLUS the distance to
+// the structural anchor. Widen the buffer far enough and the buffer alone
+// consumes the cap, so riskOkBuy/riskOkSell can never pass and the mode goes
+// silent rather than trading with a wider stop:
+//
+//   i_slAtr  cap   worst buf   room under a 2.0 cap
+//   0.5      0.3   0.39        1.61   fine
+//   0.5      1.5   0.65        1.35   fine (i_slAtr still bounds it)
+//   1.5      1.5   1.95        0.05   nothing can pass
+//   3.0      1.5   1.95        0.05   nothing can pass
+//
+// Note the second row: slBuf = min(i_slAtr, i_scalpSlCap) x slMult, so BOTH
+// inputs bound it. Raising only the cap does nothing — which also means the
+// earlier advice to raise it alone was wrong on its own terms.
+//
+// Fix: Scalp's max-risk cap now floors at the worst-case buffer plus 0.75 ATR
+// of room for structure, so widening the stop widens the risk window with it
+// instead of quietly closing the mode down.
+//
+// This is a guard, not a diagnosis. It only explains zero trades if BOTH the
+// buffer inputs were raised. If they are at defaults the cause is elsewhere and
+// the dashboard "Last Block" row names it.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.28 CHANGELOG — HTF FILTER WAS NOT A HTF FILTER ON 4H AND ABOVE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1233,7 +1264,14 @@ scalpHigh     = isScalp and i_scalpFreq == "High"
 scalpStd      = isScalp and i_scalpFreq == "Standard"
 effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 2 : scalpStd ? 4 : 5) : i_cooldown
 effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
-effMaxRisk    = isScalp ? math.min(i_maxRisk,    2.0)  : i_maxRisk
+// v3.5.29: Scalp's max-risk cap must leave room for the stop buffer, or
+// widening the buffer silently blocks every setup instead of widening the
+// stop. slBuf can reach i_scalpSlCap x 1.3 (expansion), and riskDist is that
+// buffer PLUS the distance to the structural anchor — so at cap 1.5 the buffer
+// alone consumes 1.95 of a 2.0 ATR ceiling and riskOkBuy/riskOkSell can never
+// pass. The cap now floors at the worst-case buffer plus 0.75 ATR of room.
+scalpBufWorst = math.min(i_slAtr, i_scalpSlCap) * 1.3
+effMaxRisk    = isScalp ? math.max(math.min(i_maxRisk, 2.0), scalpBufWorst + 0.75) : i_maxRisk
 effTp1R       = isScalp ? math.min(i_tp1R,       1.0)  : i_tp1R
 effTp2R       = isScalp ? math.min(i_tp2R,       1.5)  : i_tp2R
 effTp3R       = isScalp ? math.min(i_tp3R,       2.0)  : i_tp3R
@@ -2672,7 +2710,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.28 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.29 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
