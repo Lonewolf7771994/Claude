@@ -30,6 +30,9 @@ anchor = 'i_cooldown   = input.int(12,'
 src = src.replace(anchor,
     'i_stRiskPct  = input.float(1.0, "STRATEGY: Risk Per Trade (% equity)", minval=0.05, maxval=10.0, step=0.05,\n'
     '     tooltip="Position size is derived from this and the entry-to-stop distance, so a wide-stop trade takes a smaller position and every trade risks the same fraction of equity. Without this, results would just measure stop width.",\n'
+    '     group=G_RISK)\n'
+    'i_stMaxLev   = input.float(5.0, "STRATEGY: Max Notional (x equity, 0 = uncapped)", minval=0.0, maxval=100.0, step=0.5,\n'
+    '     tooltip="Caps position size at this multiple of equity. Risk-normalised sizing divides by stop distance, so a very tight stop yields an enormous position — at 1% risk and a 1-point gold stop that is roughly 44x equity in notional. Without a cap, a few tight-stop trades dominate the whole equity curve and the test stops measuring the engine.\\n0 disables the cap.",\n'
     '     group=G_RISK)\n' + anchor, 1)
 
 src += '''
@@ -54,11 +57,31 @@ var float stTp2     = na
 var float stTp3     = na
 var bool  stTp1Done = false
 var int   stStartBar = na
+// v3.5.27: absolute leg quantities fixed at ENTRY, plus a filled flag per leg.
+// qty_percent is a percentage of the CURRENT position, and these exits were
+// re-issued every bar — so after TP1 filled, L1 was recreated as 33% of what
+// REMAINED, at a limit price the market had already passed, and filled again
+// immediately. The position bled out at TP1's price bar after bar while TP2 and
+// TP3 barely participated. Winners were capped at TP1 and losers took full
+// size: a structural deletion of the right tail, and the direct cause of the
+// large backtest loss.
+var float stQ1 = na
+var float stQ2 = na
+var float stQ3 = na
+var bool  stL1 = false
+var bool  stL2 = false
+var bool  stL3 = false
 var int   stInvalidRun = 0
 var int   stEntryConf  = na
 
 stRiskDist = buySignal ? buyRiskDist : sellSignal ? sellRiskDist : na
-stQty      = not na(stRiskDist) and stRiskDist > 0 ? (strategy.equity * i_stRiskPct / 100.0) / stRiskDist : na
+stQtyRaw   = not na(stRiskDist) and stRiskDist > 0 ? (strategy.equity * i_stRiskPct / 100.0) / stRiskDist : na
+// v3.5.27: cap notional exposure. Risk-normalised sizing divides by the stop
+// distance, so a very tight stop produced an enormous position — at 1% risk and
+// a 1-point stop on gold that is ~44x equity in notional. Unrealistic, and it
+// makes a handful of tight-stop trades dominate the entire equity curve.
+stQtyCap   = i_stMaxLev > 0 ? (strategy.equity * i_stMaxLev) / math.max(close, 1e-9) : na
+stQty      = na(stQtyRaw) ? na : na(stQtyCap) ? stQtyRaw : math.min(stQtyRaw, stQtyCap)
 
 if buySignal and not na(stQty)
     stEntry   := close
@@ -70,6 +93,12 @@ if buySignal and not na(stQty)
     stStartBar := bar_index
     stEntryConf := buyAligned
     stInvalidRun := 0
+    stQ1 := stQty * 0.33
+    stQ2 := stQty * 0.33
+    stQ3 := stQty - stQ1 - stQ2
+    stL1 := false
+    stL2 := false
+    stL3 := false
     strategy.entry("Long", strategy.long, qty=stQty)
 
 if sellSignal and not na(stQty)
@@ -82,6 +111,12 @@ if sellSignal and not na(stQty)
     stStartBar := bar_index
     stEntryConf := sellAligned
     stInvalidRun := 0
+    stQ1 := stQty * 0.33
+    stQ2 := stQty * 0.33
+    stQ3 := stQty - stQ1 - stQ2
+    stL1 := false
+    stL2 := false
+    stL3 := false
     strategy.entry("Short", strategy.short, qty=stQty)
 
 // Breakeven after TP1 trades — mirrors the indicator's i_beAfterTp1 behavior.
@@ -91,16 +126,35 @@ if i_beAfterTp1 and not stTp1Done and strategy.position_size != 0 and not na(stT
         stTp1Done := true
         stSl      := stEntry
 
-// Re-issued every bar so a breakeven move takes effect on the live orders.
+// v3.5.27: absolute quantities, and a leg is never re-issued once its target
+// has traded. Re-issuing is still needed so a breakeven move reaches the live
+// orders, but only for legs that are genuinely still open.
 if strategy.position_size > 0 and not na(stSl)
-    strategy.exit("L1", from_entry="Long", qty_percent=33, limit=stTp1, stop=stSl)
-    strategy.exit("L2", from_entry="Long", qty_percent=33, limit=stTp2, stop=stSl)
-    strategy.exit("L3", from_entry="Long", qty_percent=34, limit=stTp3, stop=stSl)
+    if not stL1
+        strategy.exit("L1", from_entry="Long", qty=stQ1, limit=stTp1, stop=stSl)
+    if not stL2
+        strategy.exit("L2", from_entry="Long", qty=stQ2, limit=stTp2, stop=stSl)
+    if not stL3
+        strategy.exit("L3", from_entry="Long", qty=stQ3, limit=stTp3, stop=stSl)
 
 if strategy.position_size < 0 and not na(stSl)
-    strategy.exit("S1", from_entry="Short", qty_percent=33, limit=stTp1, stop=stSl)
-    strategy.exit("S2", from_entry="Short", qty_percent=33, limit=stTp2, stop=stSl)
-    strategy.exit("S3", from_entry="Short", qty_percent=34, limit=stTp3, stop=stSl)
+    if not stL1
+        strategy.exit("S1", from_entry="Short", qty=stQ1, limit=stTp1, stop=stSl)
+    if not stL2
+        strategy.exit("S2", from_entry="Short", qty=stQ2, limit=stTp2, stop=stSl)
+    if not stL3
+        strategy.exit("S3", from_entry="Short", qty=stQ3, limit=stTp3, stop=stSl)
+
+// Mark a leg filled once its target has traded, so the block above stops
+// re-creating it. Evaluated after the orders are placed for this bar.
+if strategy.position_size != 0
+    stIsLong = strategy.position_size > 0
+    if not stL1 and not na(stTp1) and (stIsLong ? high >= stTp1 : low <= stTp1)
+        stL1 := true
+    if not stL2 and not na(stTp2) and (stIsLong ? high >= stTp2 : low <= stTp2)
+        stL2 := true
+    if not stL3 and not na(stTp3) and (stIsLong ? high >= stTp3 : low <= stTp3)
+        stL3 := true
 
 // v3.5.8 time stop — mirrors the indicator's Max Bars In Trade.
 if i_maxBars > 0 and strategy.position_size != 0 and not na(stStartBar) and (bar_index - stStartBar) >= i_maxBars

@@ -1,8 +1,51 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.26 (scalp stop comfort + blended reward)
+// © ME Institutional — Movement Engine Pro v3.5.27 (strategy scale-out fix)
 //@version=6
-indicator("Movement Engine Pro v3.5.26", shorttitle="ME Pro v3.5.26", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.27", shorttitle="ME Pro v3.5.27", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.27 CHANGELOG — STRATEGY SCALE-OUT WAS BROKEN (backtest, not the engine)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: the backtest showed a huge loss.
+//
+// The cause was in the generated strategy build, not in the signal engine. The
+// indicator, its levels and its alerts were never affected — only the measured
+// results were, which means every backtest run before this version understated
+// the engine by an unknown but large margin.
+//
+// 1. THE SCALE-OUT LIQUIDATED WINNERS AT TP1
+//    Exits were issued as qty_percent 33/33/34 and re-issued EVERY BAR so a
+//    breakeven move would reach the live orders. But qty_percent is a
+//    percentage of the CURRENT position, and an exit ID becomes reusable once
+//    filled. So after TP1 filled, L1 was recreated the next bar as 33% of what
+//    REMAINED, at a limit price the market had already passed — and filled
+//    again immediately. And again the bar after that.
+//
+//    Simulated: 1.00 -> 0.67 -> 0.45 -> 0.30 -> 0.20 -> 0.13 -> 0.09, all at
+//    TP1's price, while TP2 and TP3 barely participated.
+//
+//    Effect on a plan with TP1 1.5R, TP2 2R, TP3 5R:
+//      reaches TP1 only   broken +1.459R   fixed +0.495R
+//      reaches TP2        broken +1.514R   fixed +1.155R
+//      reaches TP3        broken +1.514R   fixed +2.855R
+//      stopped out        broken -1.000R   fixed -1.000R
+//    Every winner capped near +1.5R however far it ran; every loser still paid
+//    a full -1R. The right tail this engine depends on was deleted, and a
+//    5R trade scored the same as one that merely tagged TP1.
+//
+//    Fixed: leg quantities are absolute, fixed at entry, and a leg is never
+//    re-issued once its target has traded.
+//
+// 2. POSITION SIZE WAS UNCAPPED
+//    Risk-normalised sizing divides by stop distance, so a very tight stop
+//    produced an enormous position — at 1% risk and a 1-point gold stop that is
+//    roughly 44x equity in notional. A handful of tight-stop trades could
+//    dominate the entire equity curve. Adds i_stMaxLev, default 5x equity.
+//
+// This does not make the engine profitable, and nothing here should be read as
+// evidence that it is. It means the previous backtest measured a broken
+// execution model rather than the strategy. Re-run it.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.26 CHANGELOG — SCALP STOP COMFORT + BLENDED SCALE-OUT REWARD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2581,7 +2624,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.26 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.27 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
