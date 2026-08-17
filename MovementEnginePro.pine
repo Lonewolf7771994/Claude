@@ -1,8 +1,47 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.27 (strategy scale-out fix)
+// © ME Institutional — Movement Engine Pro v3.5.28 (HTF degeneracy guard)
 //@version=6
-indicator("Movement Engine Pro v3.5.27", shorttitle="ME Pro v3.5.27", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.28", shorttitle="ME Pro v3.5.28", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.28 CHANGELOG — HTF FILTER WAS NOT A HTF FILTER ON 4H AND ABOVE
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: Strict loses on 4H while Scalp is profitable on the same chart —
+// "there are errors". There was one, and it explains the asymmetry directly.
+//
+// i_htfTf defaults to "240". On a 4H chart that requests the SAME timeframe, so
+// request.security returns the chart's own series and htfBull collapses to
+//     close[1] > ta.ema(close, 50)[1]
+// on the very data being traded — a lagged moving-average test wearing the name
+// of a higher-timeframe trend filter. On a Daily chart it is worse: the request
+// is for a LOWER timeframe than the chart.
+//
+//   chart   HTF 240 above chart?   Strict            Scalp
+//   15m     yes                    real HTF gate     bypassed
+//   1H      yes                    real HTF gate     bypassed
+//   4H      NO                     bogus gate        bypassed
+//   1D      NO                     bogus gate        bypassed
+//
+// Strict REQUIRES htfOkBull/htfOkBear. Scalp bypasses the HTF gate entirely by
+// design (modePassBull = isScalp ? notExtended : ...). So on a 4H chart Strict
+// was being gated by a filter that was not measuring what it claimed, and Scalp
+// was not gated by it at all. One mode losing while the other wins on identical
+// data is exactly what that produces — no other explanation is needed.
+//
+// Adds i_htfGuard (default ON): when the configured HTF is not strictly above
+// the chart timeframe, the filter self-disables instead of applying a
+// mislabelled test, and the dashboard shows a yellow warning on the HTF row.
+//
+// The REAL fix is to set an HTF genuinely above the chart — Daily on a 4H
+// chart, Weekly on a Daily chart. The guard stops the engine lying about what
+// it is doing; it does not supply the missing higher-timeframe context.
+//
+// Known and deliberately left alone: buyAligned/sellAligned still count htfBull
+// as one of their three confluence legs even when the HTF is degenerate, so the
+// displayed confluence score on a 4H chart includes that lagged EMA read.
+// Changing it would move every confluence number and the invalidation exit that
+// reads them; that belongs in its own version with its own before/after.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.27 CHANGELOG — STRATEGY SCALE-OUT WAS BROKEN (backtest, not the engine)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1011,6 +1050,9 @@ i_emaSlope   = input.bool(true, "Require Slow-EMA Slope Confirmation",
 i_htfTf      = input.timeframe("240","HTF Timeframe", group=G_HTF)
 i_htfEmaLen  = input.int(50, "HTF EMA Length", minval=5, maxval=500, group=G_HTF)
 i_htfFilter  = input.bool(true, "Enforce HTF Direction (strict)", group=G_HTF)
+i_htfGuard   = input.bool(true, "Disable HTF Filter When It Is Not Higher",
+     tooltip="v3.5.28: switches the HTF filter OFF when the selected HTF timeframe is not actually above the chart timeframe.\nThe default HTF is 240. On a 4H chart that requests the SAME series, so request.security returns the chart's own bars and htfBull collapses to close[1] > EMA50[1] — a lagged moving-average filter wearing the name of a trend filter. On a Daily chart it is worse: the request is for a LOWER timeframe.\nThis matters most in Strict, which requires HTF alignment, while Scalp bypasses the HTF gate entirely — so on a 4H chart Strict is gated by a filter that is not doing what it claims and Scalp is not gated at all. That alone can make one mode lose while the other wins on the same data.\nWith this on, the filter self-disables rather than applying a mislabelled test, and the dashboard shows a warning. The real fix is to set an HTF genuinely above your chart: Daily for a 4H chart, Weekly for a Daily chart.\nTurn this off to keep the old behaviour.",
+     group=G_HTF)
 
 // ── VWAP ─────────────────────────────────────────────────────────────────────
 i_vwapFilter = input.bool(true, "Enable VWAP Filter", group=G_VWAP)
@@ -1371,8 +1413,14 @@ htfBull  = htfClose > htfEma
 htfBear  = htfClose < htfEma
 htfLabel = htfBull ? "BULL" : "BEAR"
 
-htfOkBull = not i_htfFilter or htfBull
-htfOkBear = not i_htfFilter or htfBear
+// v3.5.28: is the configured HTF actually ABOVE the chart timeframe? The
+// default 240 is on a 15m or 1H chart, and is NOT on a 4H or Daily one — there
+// request.security returns the chart's own series (or a lower one) and the
+// "HTF trend filter" silently becomes a lagged EMA test on the same data.
+htfDegenerate = timeframe.in_seconds(i_htfTf) <= timeframe.in_seconds()
+htfFilterOn   = i_htfFilter and not (i_htfGuard and htfDegenerate)
+htfOkBull = not htfFilterOn or htfBull
+htfOkBear = not htfFilterOn or htfBear
 
 // v3.5: Scalp bypasses the HTF gate everywhere — including inside the
 // FVG-retest and Sweep trigger construction, where it was baked in for all
@@ -2624,13 +2672,14 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.27 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.28 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
     // v3.5: in Scalp the HTF gate is bypassed — show direction as info, never "BLOCKED"
-    htfGateOn = i_htfFilter and not isScalp
-    table.cell(dash, 0, 1, "HTF " + i_htfTf + (isScalp ? " (off)" : ""), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    htfGateOn = htfFilterOn and not isScalp
+    htfNote = isScalp ? " (off)" : htfDegenerate ? (i_htfGuard ? " ⚠≤chart, off" : " ⚠≤chart") : ""
+    table.cell(dash, 0, 1, "HTF " + i_htfTf + htfNote, text_color=htfDegenerate and not isScalp ? yel : dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 1, htfBull ? "BULL ✓" : htfGateOn ? "BLOCKED" : "BEAR",   htfBull ? grn : htfGateOn ? red_ : dim)
     f_cell(2, 1, htfBear ? "BEAR ✓" : htfGateOn ? "BLOCKED" : "BULL",   htfBear ? red_ : htfGateOn ? red_ : dim)
 
