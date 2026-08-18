@@ -79,6 +79,7 @@ class Cfg:
     min_blend_rr: float = 1.30
     min_tp1_floor: float = 0.50
     max_tp1_r: float = 2.00      # v3.5.35
+    scalp_max_risk: float = 2.00 # Scalp cap, isolated so it can be swept alone
     tp1r: float = 1.5
     tp2r: float = 2.5
     tp3r: float = 4.0
@@ -109,7 +110,7 @@ class Cfg:
             min_rr       = min(self.min_rr, .7 if hi else .9 if st else 99.) if s else self.min_rr,
         )
         buf_worst = min(self.sl_atr, self.scalp_sl_cap) * 1.3          # v3.5.29
-        e["max_risk"] = max(min(self.max_risk, 2.0), buf_worst + .75) if s else self.max_risk
+        e["max_risk"] = max(min(self.max_risk, self.scalp_max_risk), buf_worst + .75) if s else self.max_risk
         return e
 
 # ── TP ladder: port of f_tpLevels incl. the v3.5.21 spacing and v3.5.35 ceiling
@@ -168,6 +169,10 @@ def run(bars, cfg: Cfg, tf_sec: int):
     l=[b[3] for b in bars]; c=[b[4] for b in bars]; v=[b[5] for b in bars]
     n=len(bars)
     atr14=wilder_atr(h,l,c,14); atr50=wilder_atr(h,l,c,50)
+    vwp = session_vwap(bars)
+    htf_sec = 14400 if tf_sec<=900 else (86400 if tf_sec<=14400 else 604800)
+    hbias = htf_bias(bars, tf_sec, htf_sec)
+    POC,VAH,VAL = frvp(bars)
     ef=ema(c,8); es=ema(c,21); rs=rsi(c,14)
     vavg=sma_prior(v,20)
     ph,pl = pivots(h,l,e["swing"])
@@ -249,6 +254,7 @@ def run(bars, cfg: Cfg, tf_sec: int):
                            swp_s_high=swp_s_high, swp_s_lvl=swp_s_lvl,
                            tf_b=tf_b, tf_s=tf_s, sw_b=sw_b, sw_s=sw_s,
                            mssUp=mssUp, mssDn=mssDn, trigB=trigB, trigS=trigS)
+        yield_state.update(vwap=vwp[i], htfBull=hbias[i], vah=VAH[i], val=VAL[i])
         r = _eval(bars, yield_state, cfg, e, PH, PL, ef, es, rs, v, vavg,
                   cvd_hist, last_sig, blocks, scalp)
         if r is not None:
@@ -290,6 +296,20 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
         if not (lo<=rs[i]<=hi): why.append("rsi")
         if i-last_sig < e["cooldown"]: why.append("cooldown")
 
+        # v2: the two gates the first harness omitted, and they are not minor —
+        # mode IS the only mode gate Scalp has, and Selective demands conf >= 1.
+        vw = S.get("vwap"); vext = abs(c-vw)/A if vw else 0.0
+        notExtended = vext <= cfg.vwap_max
+        if not notExtended: why.append("mode")
+        above = (c > vw) if vw else False
+        hb = S.get("htfBull")
+        vah = S.get("vah"); val = S.get("val")
+        frvpBull = (val is None) or c >= val
+        frvpBear = (vah is None) or c <= vah
+        conf = ((1 if hb else 0) + (1 if above else 0) + (1 if frvpBull else 0)) if is_buy \
+               else ((1 if hb is False else 0) + (0 if above else 1) + (1 if frvpBear else 0))
+        if conf < e["min_conf"]: why.append("confluence")
+
         # stop, trigger-aware (v3.5.7)
         if is_buy:
             anchor = S["swp_b_low"] if (S["sw_b"] and S["swp_b_low"]) else (S["hitB"][1] if S["tf_b"] and S["hitB"] else S["lastPL"])
@@ -327,3 +347,66 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
                  r=risk, rr=rr, pnl=pnl, got=got, dur=dur)
         break
     return out
+
+# ── context gates that v1 of this harness omitted ───────────────────────────
+def session_vwap(bars):
+    """daily-anchored VWAP on hlc3, matching ta.vwap with a day anchor"""
+    out=[]; pv=0.0; vv=0.0; day=None
+    for t,o,h,l,c,v in bars:
+        d=t//86_400_000
+        if d!=day: day=d; pv=0.0; vv=0.0
+        tp=(h+l+c)/3.0; pv+=tp*v; vv+=v
+        out.append(pv/max(vv,1e-9))
+    return out
+
+def htf_bias(bars, tf_sec, htf_sec, ema_len=50):
+    """last CLOSED higher-timeframe bar vs its EMA — the v3.5.17 stable idiom"""
+    buckets={}; order=[]
+    for idx,(t,o,h,l,c,v) in enumerate(bars):
+        k=t//(htf_sec*1000)
+        if k not in buckets: buckets[k]=[c,idx]; order.append(k)
+        buckets[k][0]=c; buckets[k][1]=idx
+    closes=[buckets[k][0] for k in order]
+    em=ema(closes, ema_len)
+    bull=[False]*len(bars); seen={}
+    for j,k in enumerate(order):
+        # only the PREVIOUS closed bucket is knowable during bucket j
+        seen[k]= (closes[j-1] > em[j-1]) if j>=1 and em[j-1]==em[j-1] else None
+    for idx,(t,*_ ) in enumerate(bars):
+        k=t//(htf_sec*1000)
+        bull[idx]=seen.get(k)
+    return bull
+
+def frvp(bars, length=100, bins=32, va=0.70, stride=5):
+    """rolling volume profile -> (poc, vah, val) per bar, recomputed on a stride"""
+    n=len(bars); P=[None]*n; VAH=[None]*n; VAL=[None]*n
+    poc=vah=val=None
+    for i in range(n):
+        if i>=length and i%stride==0:
+            w=bars[i-length+1:i+1]
+            hi=max(b[2] for b in w); lo=min(b[3] for b in w)
+            bs=max(hi-lo,1e-9)/bins
+            acc=[0.0]*bins
+            for _,o,h,l,c,v in w:
+                rng=h-l
+                if rng<=0:
+                    k=min(bins-1,max(0,int((h-lo)/bs))); acc[k]+=v; continue
+                a=min(bins-1,max(0,int((l-lo)/bs))); b_=min(bins-1,max(0,int((h-lo)/bs)))
+                for k in range(a,b_+1):
+                    bb=lo+k*bs; bt=bb+bs
+                    ov=min(bt,h)-max(bb,l)
+                    if ov>0: acc[k]+=v*(ov/rng)
+            tot=sum(acc)
+            if tot>0:
+                pb=max(range(bins), key=lambda k: acc[k])
+                cur=acc[pb]; up=dn=pb; tgt=tot*va; it=0
+                while cur<tgt and it<bins*2:
+                    uv=sum(acc[up+1:up+3]); us=min(2,bins-1-up)
+                    dv=sum(acc[max(0,dn-2):dn]); ds=min(2,dn)
+                    if us==0 and ds==0: break
+                    if us>0 and (ds==0 or uv>=dv): up+=us; cur+=uv
+                    else: dn-=ds; cur+=dv
+                    it+=1
+                poc=lo+(pb+.5)*bs; vah=lo+(up+1)*bs; val=lo+dn*bs
+        P[i]=poc; VAH[i]=vah; VAL[i]=val
+    return P,VAH,VAL
