@@ -1,8 +1,42 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.36 (rel-volume readout fix)
+// © ME Institutional — Movement Engine Pro v3.5.37 (trigger diagnostics row)
 //@version=6
-strategy("ME Pro Strategy v3.5.36", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.37", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.37 CHANGELOG — TRIGGER DIAGNOSTICS ROW (display only)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: 30m produces a Selective Scalp signal while 5m and 15m produce
+// nothing. That is the right thing to be suspicious of — lower timeframes have
+// MORE bars and therefore more trigger opportunities, so they should fire more
+// often, not less.
+//
+// I could not answer it, and I do not have a mechanism that predicts fewer
+// signals on a lower timeframe. Rather than invent one, the dashboard now
+// states the two numbers that separate the only two possible causes:
+//
+//   "Triggers (100b)"   ->   "12 trig / 1 sig  ·  last 4b"
+//
+//   trig = 0            no setup is forming at all. No gate is involved — a
+//                       trigger is the INPUT to every gate. Red.
+//   trig > 0, sig = 0   setups ARE forming and the gates reject all of them.
+//                       "Last Block" names which. Amber.
+//   trig > 0, sig > 0   working. Green.
+//
+// Run the same symbol on 5m, 15m and 30m side by side and read that one row.
+// If 5m shows a healthy trigger count and no signals while 30m converts, the
+// difference is in the gates and the block reasons will say so. If 5m shows
+// zero triggers, the trigger construction itself behaves differently across
+// timeframes and that is a defect worth hunting.
+//
+// Either way the question stops being answerable by assertion, which is what it
+// has been for two days — including from me.
+//
+// Also counts SIGNALS over the same window, so signals-per-100-bars is directly
+// readable per timeframe instead of being counted by eye off the chart.
+//
+// Display only. No gate, level or signal behaviour changes.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.36 CHANGELOG — THE REL VOLUME READOUT WAS LYING (display only)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2843,6 +2877,18 @@ if barstate.isconfirmed and sellTrigger and barBear and not sellSignal
 // MEMORY
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// v3.5.37: a trigger is the INPUT to every gate — no trigger means no gate is
+// even consulted, and "why no trades" cannot be answered without knowing which
+// of the two is happening. These two counters make that readable per timeframe
+// instead of inferable from the MSS freshness counter alone.
+anyTrigEvent = mssUpEvent or mssDownEvent or fvgRetestBull or fvgRetestBear or sweepBullEvent or sweepBearEvent
+var int lastTrigBar = na
+if anyTrigEvent
+    lastTrigBar := bar_index
+trigAge      = na(lastTrigBar) ? 999 : math.min(bar_index - lastTrigBar, 999)
+trigCount100 = math.sum(anyTrigEvent ? 1.0 : 0.0, 100)
+sigCount100  = math.sum((buySignal or sellSignal) ? 1.0 : 0.0, 100)
+
 var string lastSigMemory = "—"
 // v3.5.5: monotonic signal counter — sent as "seq" so a webhook receiver can
 // dedupe retries and reject out-of-order deliveries.
@@ -3147,9 +3193,10 @@ if i_dashboard and barstate.islast
     tPos = (i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left)
 
     if na(dash)
-        dash := table.new(tPos, 3, 18, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
+        dash := table.new(tPos, 3, 19, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
         table.merge_cells(dash, 1, 16, 2, 16)
         table.merge_cells(dash, 1, 17, 2, 17)
+        table.merge_cells(dash, 1, 18, 2, 18)
 
     grn  = color.new(#00FF88, 0)
     red_ = color.new(#FF3366, 0)
@@ -3159,7 +3206,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.36 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.37 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -3242,14 +3289,24 @@ if i_dashboard and barstate.islast
     f_cell(1, 15, str.tostring(buyAligned)  + "/3", buyAligned  == 3 ? grn  : buyAligned  == 2 ? grn2 : dim)
     f_cell(2, 15, str.tostring(sellAligned) + "/3", sellAligned == 3 ? red_ : sellAligned == 2 ? red2 : dim)
 
+    // v3.5.37: triggers formed vs signals produced, over the last 100 bars, plus
+    // how long since the last trigger of any kind. If triggers is 0 the engine
+    // is seeing no setups at all and no gate is involved; if triggers is high
+    // and signals is 0 the gates are rejecting and Last Block names which.
+    trigTxt = str.tostring(int(nz(trigCount100))) + " trig / " + str.tostring(int(nz(sigCount100))) + " sig  ·  last " + (trigAge >= 999 ? "never" : str.tostring(trigAge) + "b")
+    trigCol = nz(trigCount100) == 0 ? red_ : nz(sigCount100) > 0 ? grn : yel
+    table.cell(dash, 0, 16, "Triggers (100b)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 16, trigTxt, trigCol)
+    f_cell(2, 16, trigTxt, trigCol)
+
     lastSigCol = str.contains(lastSigMemory, "BUY") ? grn : str.contains(lastSigMemory, "SELL") ? red_ : dim
     sigSuffix  = activeAtBe ? "  · SL@BE" : lossStreak > 0 ? "  · " + str.tostring(lossStreak) + "L streak" : ""
-    table.cell(dash, 0, 16, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
-    table.cell(dash, 1, 16, lastSigMemory + sigSuffix, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 0, 17, "Last Signal", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 17, lastSigMemory + sigSuffix, text_color=lastSigCol, text_size=size.small, bgcolor=color.rgb(15, 15, 22))
 
     // v3.5.2: which gates vetoed the most recent trigger
-    table.cell(dash, 0, 17, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
-    table.cell(dash, 1, 17, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 0, 18, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 18, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // JSON ALERTS — v3.4.1: TPs are the SAME structure-based levels shown on chart
