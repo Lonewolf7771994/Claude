@@ -1,8 +1,50 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.32 (level-retest entries)
+// © ME Institutional — Movement Engine Pro v3.5.33 (FVG closure guard)
 //@version=6
-indicator("Movement Engine Pro v3.5.32", shorttitle="ME Pro v3.5.32", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.33", shorttitle="ME Pro v3.5.33", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.33 CHANGELOG — MARKET CLOSURES WERE BEING RECORDED AS FAIR VALUE GAPS
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: FVG accuracy differs per timeframe and is mostly broken, while
+// POC/VAH/VAL read correctly. Both halves of that are right, for one reason.
+//
+// An FVG is a THREE-BAR pattern and nothing verified those three bars were
+// contiguous in time. A market closure produces the identical shape — Friday's
+// last bar, then Sunday's open — so every weekend was recorded as an imbalance,
+// on every intraday timeframe, and it cleared the 0.35 ATR minimum without
+// effort because a closure gap dwarfs any real one:
+//
+//   tf    normal 3-bar span   XAUUSD weekend span   ratio
+//   5m    600s                172800s               288x
+//   15m   1800s               172800s                96x
+//   1H    7200s               172800s                24x
+//   4H    28800s              172800s                 6x
+//   1D    172800s             172800s                 1x   (unaffected)
+//
+// That ratio column is also the answer to "it differs per timeframe": the lower
+// the timeframe, the more absurd the false gap, so the corruption scaled with
+// how fast you traded.
+//
+// A closure gap is an absence of trading, not liquidity left behind by
+// aggressive orders, and price returning to it carries no information. The cost
+// went past a bad signal: v3.5.7 anchors the stop beyond the retested gap's far
+// edge and v3.5.6 measures the chase cap from its near edge, so one false gap
+// mispriced an entire plan — a stop placed across a weekend's worth of range.
+//
+// WHY POC/VAH/VAL WERE FINE. The profile aggregates volume across 100 bars into
+// 32 bins. A single anomalous bar shifts a bin slightly and moves nothing else.
+// A three-bar pattern has no such averaging — one bad triple IS the whole
+// signal. Robustness to a data artefact is what separated the two, not accuracy
+// of the maths.
+//
+// Fix: a three-bar window whose elapsed time exceeds i_fvgGapTol x the normal
+// span is rejected. Verified across timeframes — every intraday weekend is
+// rejected, every normal window is kept, and a daily Thursday-Friday-Monday
+// window (4 days against a 6-day threshold) is untouched.
+//
+// Gap sizing, retest logic and the multi-gap tracking are unchanged.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.32 CHANGELOG — LEVEL-RETEST ENTRIES (opt-in, default off)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1115,6 +1157,12 @@ i_fvgMaxAge  = input.int(30, "FVG Max Age (bars)",
      minval=5, maxval=500,
      tooltip="FVG is invalidated if not retested within this many bars. Stops stale gaps from firing. v3.3 accuracy fix.",
      group=G_FVG)
+i_fvgGapGuard = input.bool(true, "Reject Gaps Across Market Closures",
+     tooltip="v3.5.33: an FVG is a THREE-BAR pattern, and nothing checked that those three bars were contiguous in time. A market closure produces the same shape — Friday's last bar, then Sunday's open — so every weekend registered as a fair value gap on every intraday timeframe, and it cleared the minimum-size filter trivially because the closure gap is far wider than any real imbalance.\nMeasured span versus a normal 3-bar span on XAUUSD: 5m 288x, 15m 96x, 1H 24x, 4H 6x. A daily chart is unaffected (ratio 1x) since its bars already skip the weekend.\nA closure gap is an absence of trading, not an imbalance left by aggressive orders, and price returning to it means nothing. Worse, it becomes a stop anchor (v3.5.7 puts the stop beyond the gap's far edge) and a chase reference, so one false gap distorts an entire plan.\nThis rejects any three-bar window whose elapsed time exceeds the tolerance below. It does not touch gap sizing or retest logic.",
+     group=G_FVG)
+i_fvgGapTol   = input.float(3.0, "Closure Tolerance (× normal span)", minval=1.5, maxval=20.0, step=0.5,
+     tooltip="v3.5.33: how much longer than a normal three-bar span the window may be before it is treated as a market closure. A normal span is exactly 2 x the timeframe, so 3.0 allows up to 6 x before rejecting.\nGenerous on purpose: intraday closure gaps run 6x to 288x, so even a loose tolerance separates them cleanly, while a daily chart's Thursday-Friday-Monday window (4 days against a 6-day threshold) is never touched.\nLower it to also reject daily-session breaks on symbols that have them.",
+     group=G_FVG)
 i_fvgMax     = input.int(5, "Max Gaps Tracked Per Direction", minval=1, maxval=20,
      tooltip="v3.5.10: how many unfilled FVGs to keep per side. Before this, exactly ONE gap per direction was retained — a new gap overwrote the previous one, so an older gap price had not yet returned to was silently discarded. In a fast leg that stacks several gaps only the newest survived, and the newest is usually the FURTHEST from price, i.e. the least likely to be retested.\nEach tracked gap expires and invalidates independently. Higher values retain more history at a small drawing cost.",
      group=G_FVG)
@@ -1721,12 +1769,23 @@ biasOkSell = isScalp or not structInit or structBull == false
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fvgMinPts    = atr14 * i_fvgMinAtr
+// v3.5.33 CLOSURE GUARD. The three bars forming an FVG were never checked for
+// contiguity, so a market closure — Friday's last bar followed by Sunday's open
+// — produced the identical shape and was recorded as an imbalance. On XAUUSD
+// the weekend span is 96x a normal 3-bar span on 15m and 288x on 5m, so it
+// passes the minimum-size filter without effort. That is an absence of trading,
+// not liquidity left behind by aggressive orders, and price returning to it
+// carries no information. It also becomes a stop anchor and a chase reference,
+// so a single false gap misprices a whole plan.
+fvgSpanMs     = time - time[2]
+fvgNormalMs   = timeframe.in_seconds() * 1000 * 2
+fvgContiguous = not i_fvgGapGuard or na(fvgSpanMs) or fvgSpanMs <= fvgNormalMs * i_fvgGapTol
 bullFvgTop   = low
 bullFvgBot   = high[2]
-bullFvgValid = barstate.isconfirmed and bullFvgBot < bullFvgTop and (bullFvgTop - bullFvgBot) >= fvgMinPts and close[1] > open[1]
+bullFvgValid = barstate.isconfirmed and fvgContiguous and bullFvgBot < bullFvgTop and (bullFvgTop - bullFvgBot) >= fvgMinPts and close[1] > open[1]
 bearFvgBot   = high
 bearFvgTop   = low[2]
-bearFvgValid = barstate.isconfirmed and bearFvgTop > bearFvgBot and (bearFvgTop - bearFvgBot) >= fvgMinPts and close[1] < open[1]
+bearFvgValid = barstate.isconfirmed and fvgContiguous and bearFvgTop > bearFvgBot and (bearFvgTop - bearFvgBot) >= fvgMinPts and close[1] < open[1]
 
 // ── MULTI-GAP STORAGE (v3.5.10) ─────────────────────────────────────────────
 // Parallel arrays, one entry per unfilled gap. Each expires and invalidates on
@@ -2905,7 +2964,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.32 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.33 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
