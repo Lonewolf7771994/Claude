@@ -1,8 +1,55 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.31 (revert freshness clamp)
+// © ME Institutional — Movement Engine Pro v3.5.32 (level-retest entries)
 //@version=6
-strategy("ME Pro Strategy v3.5.31", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.32", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.32 CHANGELOG — LEVEL-RETEST ENTRIES (opt-in, default off)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported, and correct: "the buy/sell you call happens after the movement, not
+// during it — it is no more than a description of a previous market move."
+//
+// That is structural, not incidental. Every trigger requires its event to be
+// COMPLETE before it can fire: MSS needs the close to have already broken the
+// pivot, a sweep needs the wick to have already speared the level AND closed
+// back, an FVG retest needs price already returned to the gap with a rejection
+// close. Add bar-close confirmation (+1 bar), the pivot itself not being known
+// until i_swingLen bars after it forms (+2-3), and up to i_triggerAge bars of
+// freshness (+3), and a 15m entry can land nearly two hours after the move that
+// defines it. That lag is the price of not repainting — a signal that appears
+// DURING a move is a signal that can vanish when the bar closes, which is the
+// exact defect v3.5.11, v3.5.17 and v3.5.19 were spent removing.
+//
+// What can be fixed is WHERE the entry is taken. Adds i_entryMode:
+//
+//   MARKET (CONFIRMED)  default, unchanged. Buys the close of the qualifying
+//                       bar, wherever price has drifted to by then.
+//   LEVEL RETEST        the qualifying bar ARMS an order at the trigger's own
+//                       level — broken pivot for MSS, gap edge for an FVG,
+//                       swept level for a sweep — and the entry fires only if
+//                       price returns there within i_pendBars.
+//
+// The stop, risk distance, both targets and both reward gates are now measured
+// from buyEntryRef/sellEntryRef rather than from close, so in level mode the
+// whole plan describes the trade that would actually be filled instead of one
+// priced at a bar the order never touches. In market mode those references are
+// literally `close`, so every downstream formula is byte-identical to v3.5.31.
+//
+// SIMULATED, AND THE RESULT IS NOT A CLEAN WIN:
+//   market entry   median TP1 reward 1.62R
+//   level  entry   median TP1 reward 2.10R    (+30% per filled trade)
+//   at an assumed 62% fill rate, expected R PER TRIGGER:
+//   market 1.617   level 1.301
+// Entering at the level pays materially more per trade, and you forgo roughly
+// four setups in ten because price never comes back. On reward alone that nets
+// NEGATIVE. It only turns positive if the setups that never fill are also the
+// ones that lose more often — plausible, since a move that never retests is a
+// move that ran away from a chased entry, but entirely unproven here.
+//
+// So this ships OFF. It is the honest answer to a real criticism, not an
+// improvement I can demonstrate. Run one range in each mode and compare profit
+// factor; the simulation above is a reason to test it, not a reason to trust it.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.31 CHANGELOG — REVERT v3.5.30. THE SIMULATION ASKED THE WRONG QUESTION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1024,6 +1071,13 @@ var string G_ALERT  = "══ Alerts ══"
 i_scalpFreq  = input.string("Selective", "Scalp Signal Frequency",
      options=["Selective","Standard","High"],
      tooltip="v3.5.14: Scalp only. Trades signal COUNT against signal QUALITY, explicitly, so the cost of each step is visible instead of buried.\n\nSELECTIVE (default) — cooldown 5 bars, TP1 must reach the full Min TP1 Reward, confluence floor 1. Identical to v3.5.13.\nSTANDARD — cooldown 4, TP1 reward capped at 0.9R, confluence floor 1.\nHIGH — cooldown 2, TP1 reward capped at 0.7R, confluence floor removed.\n\nHIGH raises the rate mainly by letting good setups sit closer together (cooldown), which costs least, but it also accepts nearer first targets and drops the trend-context floor, which costs real quality. A closer TP1 also fires the breakeven move sooner, so more trades end as scratches.\nSignals per day depend on the market, not the setting — measure the actual rate in the strategy tester.",
+     group=G_ENGINE)
+i_entryMode  = input.string("Market (confirmed)", "Entry Mode",
+     options=["Market (confirmed)","Level retest (pending)"],
+     tooltip="v3.5.32: WHERE the entry is taken once a setup qualifies.\n\nMARKET (CONFIRMED) — the original behaviour and the default. The signal fires at the close of the qualifying bar. Every trigger requires its event to be COMPLETE (the break already happened, the sweep already closed back, the retest already rejected), plus bar-close confirmation, plus up to i_triggerAge bars of freshness — so on 15m the entry can land more than an hour after the move that defines it, at a worse price with a wider stop. That lag is the price of not repainting.\n\nLEVEL RETEST (PENDING) — the qualifying bar ARMS an order at the trigger's own level instead of buying the close: the broken pivot for MSS, the gap edge for an FVG retest, the swept level for a sweep. The entry fires only if price returns to that level within the window below. Entry price is the level, so the stop sits closer to it, R shrinks, the reward gate clears more easily and 'chase' can never fire.\n\nThe trade-off is honest: a pending order that never fills is a move missed entirely, and one that fills right before the level breaks is a worse loss than the market entry would have been. UNMEASURED — run one range in each mode and compare profit factor.",
+     group=G_ENGINE)
+i_pendBars   = input.int(8, "Pending Entry Window (bars)", minval=1, maxval=50,
+     tooltip="v3.5.32: how long an armed level-retest order stays live before it is cancelled. Longer gives price more chance to come back, at the cost of entering on a setup whose context has moved on.\nOnly used when Entry Mode is 'Level retest (pending)'.",
      group=G_ENGINE)
 i_mode       = input.string("Balanced", "Engine Mode",
      options=["Scalp","Aggressive","Balanced","Strict"],
@@ -2058,6 +2112,30 @@ buyTrigger  = mssUp   or buyTrigFvg  or buyTrigSweep
 sellTrigger = mssDown or sellTrigFvg or sellTrigSweep
 
 riskAtrRef = isScalp ? atr14 : atrBase
+// v3.5.32: each trigger's OWN reference level, hoisted above the stop block so
+// it can also serve as the ENTRY price in level-retest mode. Previously it was
+// computed further down and used only by the anti-chase cap.
+buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
+sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.32 ENTRY REFERENCE
+// ─────────────────────────────────────────────────────────────────────────────
+// Everything downstream — the stop, the risk distance, the targets and the
+// reward gate — is measured from the ENTRY. At market that is the bar close. In
+// level-retest mode it is the trigger's own level, because that is where the
+// pending order sits. Using the close there would size the plan against a price
+// the trade will never be filled at.
+// pendBuyLvl/pendSellLvl are declared further down and hold NA until a level is
+// armed, so on the arming bar this correctly falls through to buyChaseRef.
+// ═══════════════════════════════════════════════════════════════════════════════
+levelMode    = i_entryMode == "Level retest (pending)"
+var float pendBuyLvl  = na
+var float pendSellLvl = na
+var int   pendBuyBar  = na
+var int   pendSellBar = na
+buyEntryRef  = levelMode ? (not na(pendBuyLvl)  ? pendBuyLvl  : not na(buyChaseRef)  ? buyChaseRef  : close) : close
+sellEntryRef = levelMode ? (not na(pendSellLvl) ? pendSellLvl : not na(sellChaseRef) ? sellChaseRef : close) : close
 
 slMult    = volExpand ? 1.3 : volChop ? 1.2 : 1.0
 // v3.5.26 SCALP STOP COMFORT. Scalp hard-clamped the pad to 0.3 ATR AND was
@@ -2080,8 +2158,8 @@ slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, i_scalpSlCap) * slMult : ri
 buySlAnchor  = buyTrigSweep  and not na(sweepBullLow)  ? sweepBullLow  : buyTrigFvg  and not na(lBullBot) ? lBullBot : lastPL
 sellSlAnchor = sellTrigSweep and not na(sweepBearHigh) ? sweepBearHigh : sellTrigFvg and not na(lBearTop) ? lBearTop : lastPH
 
-buySLraw  = not na(buySlAnchor)  ? math.min(buySlAnchor - slBuf,  close - riskAtrRef * 0.5) : close - riskAtrRef * 1.5
-sellSLraw = not na(sellSlAnchor) ? math.max(sellSlAnchor + slBuf, close + riskAtrRef * 0.5) : close + riskAtrRef * 1.5
+buySLraw  = not na(buySlAnchor)  ? math.min(buySlAnchor - slBuf,  buyEntryRef - riskAtrRef * 0.5) : buyEntryRef - riskAtrRef * 1.5
+sellSLraw = not na(sellSlAnchor) ? math.max(sellSlAnchor + slBuf, sellEntryRef + riskAtrRef * 0.5) : sellEntryRef + riskAtrRef * 1.5
 
 // v3.5.4 DEAD-ZONE FIX. The structural stop was floored at 0.5 ATR from
 // price while the min-risk gate demanded 1.0 ATR — so a near pivot produced
@@ -2097,10 +2175,10 @@ clampOn   = i_riskClampMode != "Off (block instead)"
 // volatility stop) or an explicit "Both sides" choice gets it.
 clampFar  = clampOn and i_riskClampMode == "Both sides"
 clampNear = clampOn
-buySLfar  = clampFar  ? math.max(buySLraw,  close - slFar) : buySLraw
-sellSLfar = clampFar  ? math.min(sellSLraw, close + slFar) : sellSLraw
-buySLbase  = clampNear ? math.min(buySLfar,  close - slNear) : buySLfar
-sellSLbase = clampNear ? math.max(sellSLfar, close + slNear) : sellSLfar
+buySLfar  = clampFar  ? math.max(buySLraw,  buyEntryRef - slFar) : buySLraw
+sellSLfar = clampFar  ? math.min(sellSLraw, sellEntryRef + slFar) : sellSLraw
+buySLbase  = clampNear ? math.min(buySLfar,  buyEntryRef - slNear) : buySLfar
+sellSLbase = clampNear ? math.max(sellSLfar, sellEntryRef + slNear) : sellSLfar
 
 // v3.5.6: is the stop the real structural level, or one we moved? Shown on
 // the SL label, the dashboard and in the alert payload, so a synthetic stop
@@ -2125,8 +2203,8 @@ sellSLpx  = sellSLbase + spreadPx
 buyStopTxt   = buyClamped  ? " SL~ " : " SL  "
 sellStopTxt  = sellClamped ? " SL~ " : " SL  "
 
-buyRiskDist  = math.max(close - buySLpx,  atr14 * 0.1)
-sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
+buyRiskDist  = math.max(buyEntryRef - buySLpx,  atr14 * 0.1)
+sellRiskDist = math.max(sellSLpx - sellEntryRef, atr14 * 0.1)
 
 // v3.3: both a floor AND a cap. With the clamp ON these always pass (the stop
 // was moved into the window); they still gate when the clamp is OFF.
@@ -2298,8 +2376,6 @@ notWeakSell = (sellTrigSweep or sellTrigFvg) ? notWeakRejSell : notWeak
 // occur AT a level — true on the trigger bar, but the freshness window lets
 // them fire up to i_triggerAge bars later, by which time price has left the
 // level and the reclaim edge is gone.
-buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
-sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
 chaseOkBuy   = na(buyChaseRef)  or (close - buyChaseRef)  <= atr14 * i_maxChase
 chaseOkSell  = na(sellChaseRef) or (sellChaseRef - close) <= atr14 * i_maxChase
 
@@ -2329,7 +2405,7 @@ string sellTag2 = na
 string sellTag3 = na
 
 if rawBuyPre
-    [t1, t2, t3, g1, g2, g3] = f_tpLevels(true, close, buyRiskDist)
+    [t1, t2, t3, g1, g2, g3] = f_tpLevels(true, buyEntryRef, buyRiskDist)
     buyTp1  := t1
     buyTp2  := t2
     buyTp3  := t3
@@ -2337,7 +2413,7 @@ if rawBuyPre
     buyTag2 := g2
     buyTag3 := g3
 if rawSellPre
-    [t1, t2, t3, g1, g2, g3] = f_tpLevels(false, close, sellRiskDist)
+    [t1, t2, t3, g1, g2, g3] = f_tpLevels(false, sellEntryRef, sellRiskDist)
     sellTp1  := t1
     sellTp2  := t2
     sellTp3  := t3
@@ -2356,8 +2432,8 @@ if rawSellPre
 // exactly what "lacks accuracy" feels like on a chart.
 // TP1 must now be at least i_minRR × the risk. 0 disables the gate.
 // ═══════════════════════════════════════════════════════════════════════════════
-rrBuy    = not na(buyTp1)  ? (buyTp1 - close)  / math.max(buyRiskDist,  1e-9) : na
-rrSell   = not na(sellTp1) ? (close - sellTp1) / math.max(sellRiskDist, 1e-9) : na
+rrBuy    = not na(buyTp1)  ? (buyTp1 - buyEntryRef)  / math.max(buyRiskDist,  1e-9) : na
+rrSell   = not na(sellTp1) ? (sellEntryRef - sellTp1) / math.max(sellRiskDist, 1e-9) : na
 // v3.5.26 BLENDED REWARD. The gate measured TP1 ALONE, but the plan is a
 // 33/33/34 scale-out — so a setup whose first target is modest and whose
 // second and third are excellent was rejected on a number that describes a
@@ -2374,8 +2450,8 @@ rrSell   = not na(sellTp1) ? (close - sellTp1) / math.max(sellRiskDist, 1e-9) : 
 // on the blended path does NOT arm the breakeven move (see activeBeOk), because
 // a close TP1 pulling the stop to entry is precisely the scratch machine the
 // v3.5.8 reward gate was built to stop.
-blendBuy  = not na(buyTp1)  and not na(buyTp2)  and not na(buyTp3)  ? (0.33 * (buyTp1 - close) + 0.33 * (buyTp2 - close) + 0.34 * (buyTp3 - close))   / math.max(buyRiskDist,  1e-9) : na
-blendSell = not na(sellTp1) and not na(sellTp2) and not na(sellTp3) ? (0.33 * (close - sellTp1) + 0.33 * (close - sellTp2) + 0.34 * (close - sellTp3)) / math.max(sellRiskDist, 1e-9) : na
+blendBuy  = not na(buyTp1)  and not na(buyTp2)  and not na(buyTp3)  ? (0.33 * (buyTp1 - buyEntryRef) + 0.33 * (buyTp2 - buyEntryRef) + 0.34 * (buyTp3 - buyEntryRef))   / math.max(buyRiskDist,  1e-9) : na
+blendSell = not na(sellTp1) and not na(sellTp2) and not na(sellTp3) ? (0.33 * (sellEntryRef - sellTp1) + 0.33 * (sellEntryRef - sellTp2) + 0.34 * (sellEntryRef - sellTp3)) / math.max(sellRiskDist, 1e-9) : na
 tp1FloorOkBuy  = not na(rrBuy)  and rrBuy  >= i_minTp1Floor
 tp1FloorOkSell = not na(rrSell) and rrSell >= i_minTp1Floor
 blendOkBuy  = i_minBlendRR > 0 and tp1FloorOkBuy  and not na(blendBuy)  and blendBuy  >= i_minBlendRR
@@ -2389,8 +2465,63 @@ rrOkSell = effMinRR <= 0 or rrStrictSell or blendOkSell
 confOkBuy  = buyAligned  >= effMinConf
 confOkSell = sellAligned >= effMinConf
 
-buySignal  = rawBuyPre  and rrOkBuy  and confOkBuy
-sellSignal = rawSellPre and rrOkSell and confOkSell
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.32 LEVEL-RETEST ENTRIES
+// ─────────────────────────────────────────────────────────────────────────────
+// At market a qualifying bar IS the entry. In level mode it instead ARMS an
+// order at the trigger's own level and the entry happens only if price returns
+// there within i_pendBars. Everything above has already been measured from that
+// level (buyEntryRef), so the stop, the targets and both reward gates describe
+// the trade that would actually be filled.
+//
+// Why this exists: every trigger requires its event to be COMPLETE before it
+// can fire — the break already happened, the sweep already closed back, the
+// retest already rejected — and bar-close confirmation plus up to i_triggerAge
+// bars of freshness sit on top. On 15m that is up to ~7 bars, so a market entry
+// is systematically taken away from the level with a wider stop. Arming at the
+// level removes that penalty without loosening a single gate.
+//
+// The cost is real and not simulated away: an order that never fills is a move
+// missed, and one that fills just before the level breaks is a worse loss than
+// the market entry would have been. Off by default.
+qualBuy  = rawBuyPre  and rrOkBuy  and confOkBuy
+qualSell = rawSellPre and rrOkSell and confOkSell
+
+// expire first, so a stale level can never fill on the bar it lapses
+if not na(pendBuyBar) and bar_index - pendBuyBar > i_pendBars
+    pendBuyLvl := na
+    pendBuyBar := na
+if not na(pendSellBar) and bar_index - pendSellBar > i_pendBars
+    pendSellLvl := na
+    pendSellBar := na
+
+// fill: price traded back to the armed level on a confirmed bar
+fireBuy  = levelMode and barstate.isconfirmed and not na(pendBuyLvl)  and low  <= pendBuyLvl
+fireSell = levelMode and barstate.isconfirmed and not na(pendSellLvl) and high >= pendSellLvl
+
+buySignal  = levelMode ? fireBuy  : qualBuy
+sellSignal = levelMode ? fireSell : qualSell
+
+// arm AFTER the fill test, so a setup cannot arm and fill on the same bar using
+// a level price the bar may never have traded at
+if levelMode and qualBuy and not na(buyChaseRef) and na(pendBuyLvl)
+    pendBuyLvl := buyChaseRef
+    pendBuyBar := bar_index
+if levelMode and qualSell and not na(sellChaseRef) and na(pendSellLvl)
+    pendSellLvl := sellChaseRef
+    pendSellBar := bar_index
+
+// clear the filled side, and drop the opposite pending — the market has chosen
+if buySignal
+    pendBuyLvl := na
+    pendBuyBar := na
+    pendSellLvl := na
+    pendSellBar := na
+if sellSignal
+    pendSellLvl := na
+    pendSellBar := na
+    pendBuyLvl := na
+    pendBuyBar := na
 // v3.4.1: names respect mode gating — previously "FVG"/"SWEEP" could be
 // reported in modes where those triggers are disabled.
 buyType    = mssUp   ? "MSS" : buyTrigFvg   ? "FVG" : buyTrigSweep  ? "SWEEP" : "MSS"
@@ -2688,7 +2819,7 @@ if buySignal
     activeSlPx   := buySLpx
     activeTp1Px  := buyTp1
     activeTp3Px  := buyTp3
-    activeEntryPx := close
+    activeEntryPx := buyEntryRef
     activeEntryConf := buyAligned
     activeTp1Hit := false
     activeAtBe   := false
@@ -2699,7 +2830,7 @@ if buySignal
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
         tpsl_sl   := line.new(bar_index, buySLpx, endBar, buySLpx, color=color.new(#FF3366,  0), width=2, style=line.style_dashed)
-        tpsl_ent  := line.new(bar_index, close,   endBar, close,   color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
+        tpsl_ent  := line.new(bar_index, buyEntryRef,  endBar, buyEntryRef,  color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
         tpsl_tp1  := line.new(bar_index, buyTp1,  endBar, buyTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, buyTp2,  endBar, buyTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, buyTp3,  endBar, buyTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
@@ -2718,7 +2849,7 @@ if sellSignal
     activeSlPx   := sellSLpx
     activeTp1Px  := sellTp1
     activeTp3Px  := sellTp3
-    activeEntryPx := close
+    activeEntryPx := sellEntryRef
     activeEntryConf := sellAligned
     activeTp1Hit := false
     activeAtBe   := false
@@ -2729,7 +2860,7 @@ if sellSignal
     if i_tpslShow
         endBar = bar_index + i_tpLineLen
         tpsl_sl   := line.new(bar_index, sellSLpx, endBar, sellSLpx, color=color.new(#FF3366,  0), width=2, style=line.style_dashed)
-        tpsl_ent  := line.new(bar_index, close,    endBar, close,    color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
+        tpsl_ent  := line.new(bar_index, sellEntryRef, endBar, sellEntryRef, color=color.new(#FFFFFF, 65), width=1, style=line.style_dotted)
         tpsl_tp1  := line.new(bar_index, sellTp1,  endBar, sellTp1,  color=color.new(#00FF88,  0), width=3, style=line.style_solid)
         tpsl_tp2  := line.new(bar_index, sellTp2,  endBar, sellTp2,  color=color.new(#FFD700,  0), width=2, style=line.style_solid)
         tpsl_tp3  := line.new(bar_index, sellTp3,  endBar, sellTp3,  color=color.new(#FF9500,  0), width=2, style=line.style_dashed)
@@ -2780,7 +2911,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.31 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.32 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -2876,16 +3007,16 @@ if i_dashboard and barstate.islast
 // them — previously ~60 str.tostring concatenations ran on every single bar.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_, stopType_) =>
+f_json(side, trigger, slPx_, rDist_, tp1_, tp2_, tp3_, conf_, stopType_, entry_) =>
     // v3.5.9: optional shared secret, emitted as the FIRST field INSIDE the
     // object so a receiver can reject an unauthenticated payload early.
-    '{' + (i_webhookSecret == "" ? "" : '"secret":"' + i_webhookSecret + '",') + '"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","stop_type":"' + stopType_ + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
+    '{' + (i_webhookSecret == "" ? "" : '"secret":"' + i_webhookSecret + '",') + '"action":"' + side + '","trigger":"' + trigger + '","mode":"' + i_mode + '","symbol":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","entry":' + str.tostring(entry_, format.mintick) + ',"sl":' + str.tostring(slPx_, format.mintick) + ',"tp1":' + str.tostring(tp1_, format.mintick) + ',"tp2":' + str.tostring(tp2_, format.mintick) + ',"tp3":' + str.tostring(tp3_, format.mintick) + ',"risk_atr":' + str.tostring(math.round(rDist_ / riskAtrRef, 2)) + ',"of_pct":' + str.tostring(math.round(buyPct, 1)) + ',"delta":' + str.tostring(math.round(deltaRatio, 2)) + ',"rel_vol":' + str.tostring(math.round(relVol, 2)) + ',"rsi":' + str.tostring(math.round(rsi, 1)) + ',"cvd":"' + (cvdBull ? "BULL" : "BEAR") + '","htf":"' + htfLabel + '","vwap":"' + vwapLabel + '","frvp":"' + frvpPosStr + '","poc":' + (na(pocPrice) ? "0" : str.tostring(pocPrice, format.mintick)) + ',"vah":' + (na(vahPrice) ? "0" : str.tostring(vahPrice, format.mintick)) + ',"val":' + (na(valPrice) ? "0" : str.tostring(valPrice, format.mintick)) + ',"regime":"' + (volExpand ? "EXPAND" : volChop ? "CHOP" : "NORMAL") + '","stop_type":"' + stopType_ + '","confluence":' + str.tostring(conf_) + ',"seq":' + str.tostring(sigSeq) + ',"bar_time":' + str.tostring(time, "#") + '}'
 
 
 if buySignal
-    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3,  buyAligned,  buyClamped  ? "clamped" : "structural")  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
+    alert(i_jsonAlerts ? f_json("BUY",  buyType,  buySLpx,  buyRiskDist,  buyTp1,  buyTp2,  buyTp3,  buyAligned,  buyClamped  ? "clamped" : "structural", buyEntryRef)  : "ME Pro BUY "  + buyType,  alert.freq_once_per_bar_close)
 if sellSignal
-    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3, sellAligned, sellClamped ? "clamped" : "structural") : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
+    alert(i_jsonAlerts ? f_json("SELL", sellType, sellSLpx, sellRiskDist, sellTp1, sellTp2, sellTp3, sellAligned, sellClamped ? "clamped" : "structural", sellEntryRef) : "ME Pro SELL " + sellType, alert.freq_once_per_bar_close)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STRATEGY EXECUTION (generated by build_strategy.py — do not hand-edit)
@@ -2935,7 +3066,7 @@ stQtyCap   = i_stMaxLev > 0 ? (strategy.equity * i_stMaxLev) / math.max(close, 1
 stQty      = na(stQtyRaw) ? na : na(stQtyCap) ? stQtyRaw : math.min(stQtyRaw, stQtyCap)
 
 if buySignal and not na(stQty)
-    stEntry   := close
+    stEntry   := buyEntryRef
     stSl      := buySLpx
     stTp1     := buyTp1
     stTp2     := buyTp2
@@ -2953,7 +3084,7 @@ if buySignal and not na(stQty)
     strategy.entry("Long", strategy.long, qty=stQty)
 
 if sellSignal and not na(stQty)
-    stEntry   := close
+    stEntry   := sellEntryRef
     stSl      := sellSLpx
     stTp1     := sellTp1
     stTp2     := sellTp2

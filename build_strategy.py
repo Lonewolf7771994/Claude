@@ -91,7 +91,7 @@ stQtyCap   = i_stMaxLev > 0 ? (strategy.equity * i_stMaxLev) / math.max(close, 1
 stQty      = na(stQtyRaw) ? na : na(stQtyCap) ? stQtyRaw : math.min(stQtyRaw, stQtyCap)
 
 if buySignal and not na(stQty)
-    stEntry   := close
+    stEntry   := buyEntryRef
     stSl      := buySLpx
     stTp1     := buyTp1
     stTp2     := buyTp2
@@ -109,7 +109,7 @@ if buySignal and not na(stQty)
     strategy.entry("Long", strategy.long, qty=stQty)
 
 if sellSignal and not na(stQty)
-    stEntry   := close
+    stEntry   := sellEntryRef
     stSl      := sellSLpx
     stTp1     := sellTp1
     stTp2     := sellTp2
