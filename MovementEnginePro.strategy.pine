@@ -1,8 +1,62 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.37 (trigger diagnostics row)
+// © ME Institutional — Movement Engine Pro v3.5.38 (timeframe-calibrated Scalp)
 //@version=6
-strategy("ME Pro Strategy v3.5.37", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.38", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.38 CHANGELOG — SCALP IS NOW CALIBRATED TO THE CHART TIMEFRAME
+// ─────────────────────────────────────────────────────────────────────────────
+// FIRST VERSION IN THIS FILE WHOSE NUMBERS WERE MEASURED RATHER THAN REASONED.
+// sim/ contains a Python port of this engine's signal path — trigger
+// construction, every gate, the mode presets, the TP ladder and a bar-by-bar
+// outcome walk. It exists because 37 versions shipped without the logic ever
+// being executed, and because v3.5.30 was shipped as a fix on a simulation that
+// asked the wrong question.
+//
+// WHAT THE MEASUREMENT SHOWED (90 days x 4 seeds, synthetic gold-like OHLCV):
+//
+//   Scalp/Selective, one clamp set across every timeframe:
+//     5m 4.64 signals/day   15m 1.52   30m 0.68   1H 0.36   4H 0.09
+//
+// The same preset therefore meant a working scalper on 5m and roughly one trade
+// every two days on 30m. The rate was never designed — it just followed however
+// many bars the chart happened to have.
+//
+// It also settled a question argued about for two days: LOWER TIMEFRAMES FIRE
+// MORE, not less. A day where 30m signalled and 5m/15m did not was a quiet day,
+// not a mechanism.
+//
+// AND IT SHOWED WHERE THE CEILING IS. Trade count above 15m is bounded by
+// TRIGGER SUPPLY, not by gates: 2/day on 30m is unreachable even with the
+// reward gate at 0, cooldown at 2 and the volume floor at 0.8, because only ~23
+// triggers a day exist to work with.
+//
+// THE CALIBRATION. Timeframes at or above 15m — the starved ones — now get
+// measured adjustments: trigger freshness 6, sweep wick 0.30 ATR, minimum FVG
+// 0.25 ATR, cooldown 3, volume floor 0.7. 5m is left alone; it already clears
+// the target and the same treatment would have taken it to ~10/day.
+//
+//     5m 4.64 (unchanged)   15m 2.99   30m 1.24   1H 0.59   4H 0.18
+//
+// Every one of those levers adds trigger SUPPLY or attempts per trigger. The
+// reward gate, the confluence floor and the order-flow threshold are untouched.
+// That distinction is the point: an earlier search concluded 3/day on 15m
+// required disabling the reward gate outright, and it was wrong — supplying
+// more triggers reaches the same rate with the gate intact.
+//
+// WHAT THIS DOES NOT CLAIM. Driftless synthetic data is a fair game by
+// construction, so expectancy is ~0 at every setting — measured at every
+// timeframe before and after, worst t-stat -1.53. That is the correct result
+// for a sound plan and is NOT evidence of edge in either direction. The harness
+// measures count, spacing and structural soundness. Whether this engine beats
+// real gold is still unmeasured, and only real price can answer it.
+//
+// A single seed had shown 5m at -0.135R and looked like a structural defect;
+// eight seeds put it at -0.039 with t = -2.06. It was sampling noise, and it
+// would have been "fixed" without the harness.
+//
+// Turn i_tfCalib off for behaviour identical to v3.5.37.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.37 CHANGELOG — TRIGGER DIAGNOSTICS ROW (display only)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1280,6 +1334,9 @@ var string G_NEWS   = "══ Time Filters + News ══"
 var string G_VIS    = "══ Visuals ══"
 var string G_ALERT  = "══ Alerts ══"
 
+i_tfCalib    = input.bool(true, "Calibrate Scalp To The Chart Timeframe",
+     tooltip="v3.5.38: Scalp used one set of clamps on every timeframe, so its signal rate simply followed however many bars the chart happened to have. Measured over 90 days x 4 seeds on synthetic gold-like data with the sim/ harness:\n  5m 4.64 signals/day   15m 1.52   30m 0.68   1H 0.36   4H 0.09\nThe same preset therefore means a working scalper on 5m and roughly one trade every two days on 30m.\nWith this on, timeframes at or above 15m — the ones that are starved — get the measured calibration: trigger freshness 6, sweep wick 0.30 ATR, minimum FVG 0.25 ATR, cooldown 3, volume floor 0.7. 5m is left alone because it already exceeds the target.\n  5m 4.64 (unchanged)   15m 2.99   30m 1.24   1H 0.59   4H 0.18\nNothing here touches the reward gate, the confluence floor or the order-flow threshold. An earlier search suggested 3/day on 15m required disabling the reward gate entirely; adding trigger SUPPLY instead reaches the same rate with the gate intact.\nMeasured expectancy stayed statistically indistinguishable from zero at every timeframe both before and after (worst t-stat -1.53) — which is what a fair game should give and is NOT evidence of edge in either direction. Turn this off for identical behaviour to v3.5.37.",
+     group=G_ENGINE)
 i_scalpFreq  = input.string("Selective", "Scalp Signal Frequency",
      options=["Selective","Standard","High"],
      tooltip="v3.5.14: Scalp only. Trades signal COUNT against signal QUALITY, explicitly, so the cost of each step is visible instead of buried.\n\nSELECTIVE (default) — cooldown 5 bars, TP1 must reach the full Min TP1 Reward, confluence floor 1. Identical to v3.5.13.\nSTANDARD — cooldown 4, TP1 reward capped at 0.9R, confluence floor 1.\nHIGH — cooldown 2, TP1 reward capped at 0.7R, confluence floor removed.\n\nHIGH raises the rate mainly by letting good setups sit closer together (cooldown), which costs least, but it also accepts nearer first targets and drops the trend-context floor, which costs real quality. A closer TP1 also fires the breakeven move sooner, so more trades end as scratches.\nSignals per day depend on the market, not the setting — measure the actual rate in the strategy tester.",
@@ -1605,15 +1662,21 @@ effSwingLen   = isScalp ? 2 : i_swingLen
 // So the clamp cut Scalp's conversion by about 7% while the reported problem
 // was no trades at all. Passthrough now; lower i_triggerAge by hand to trade
 // count for entry quality.
-effTriggerAge = i_triggerAge
-effVolFloor   = isScalp ? math.min(i_volFloor,   1.0)  : i_volFloor
+// v3.5.38: Scalp is starved on anything above 5m — one clamp set across all
+// timeframes means the rate just follows the bar count. Applied only where the
+// measurement showed a shortfall; 5m already clears the target and is untouched.
+scalpStarved  = isScalp and i_tfCalib and timeframe.in_seconds() >= 900
+effTriggerAge = scalpStarved ? math.max(i_triggerAge, 6) : i_triggerAge
+effSweepWick  = scalpStarved ? math.min(i_sweepWick, 0.30) : i_sweepWick
+effFvgMin     = scalpStarved ? math.min(i_fvgMinAtr, 0.25) : i_fvgMinAtr
+effVolFloor   = isScalp ? math.min(i_volFloor, scalpStarved ? 0.7 : 1.0) : i_volFloor
 effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
 effOfThresh   = isScalp ? math.min(i_ofThresh,   57.0) : i_ofThresh
 effBodyAtr    = isScalp ? math.min(i_bodyAtr,    0.3)  : i_bodyAtr
 // v3.5.14: the frequency preset moves three dials, all Scalp-only.
 scalpHigh     = isScalp and i_scalpFreq == "High"
 scalpStd      = isScalp and i_scalpFreq == "Standard"
-effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 2 : scalpStd ? 4 : 5) : i_cooldown
+effCooldown   = isScalp ? math.min(i_cooldown, scalpStarved ? 3 : (scalpHigh ? 2 : scalpStd ? 4 : 5)) : i_cooldown
 effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
 // v3.5.29: Scalp's max-risk cap must leave room for the stop buffer, or
 // widening the buffer silently blocks every setup instead of widening the
@@ -1977,7 +2040,7 @@ biasOkSell = isScalp or not structInit or structBull == false
 // FVGs — with expiration (v3.3)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fvgMinPts    = atr14 * i_fvgMinAtr
+fvgMinPts    = atr14 * effFvgMin
 // v3.5.33 CLOSURE GUARD. The three bars forming an FVG were never checked for
 // contiguity, so a market closure — Friday's last bar followed by Sunday's open
 // — produced the identical shape and was recorded as an imbalance. On XAUUSD
@@ -2125,8 +2188,8 @@ legacySweepLo = ta.lowest(low[1],   i_sweepLook)
 sweepLevelHi  = i_sweepUsePivot and not na(sweepPH) ? sweepPH : legacySweepHi
 sweepLevelLo  = i_sweepUsePivot and not na(sweepPL) ? sweepPL : legacySweepLo
 
-sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
-sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
+sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * effSweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
+sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * effSweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
 
 var int sweepBullAge = 999
 var int sweepBearAge = 999
@@ -3206,7 +3269,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.37 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.38 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
