@@ -1,8 +1,55 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.34 (timeframe auto-scaling)
+// © ME Institutional — Movement Engine Pro v3.5.35 (TP1 ceiling)
 //@version=6
-indicator("Movement Engine Pro v3.5.34", shorttitle="ME Pro v3.5.34", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.35", shorttitle="ME Pro v3.5.35", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.35 CHANGELOG — TP1 HAD NO CEILING (why trades "hit almost zero TP")
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: two days without a 15m signal, and the 30m entries that do fire
+// reach almost no targets. The second half was a defect, visible on the chart.
+//
+// XAUUSD 30m, trade #87: SL 4384.877, TP1 4421.470, entry just above 4391.
+//
+//   entry    R      TP1 in R   P(reach TP1 before the stop)
+//   4391.5   6.62   4.53R      18%
+//   4393.0   8.12   3.50R      22%
+//   4395.0  10.12   2.61R      28%
+//
+// TP1 is the FIRST target and it sat three to four and a half R away. Min TP1
+// Reward enforces a FLOOR of 1.0R; nothing ever enforced a ceiling. TP1 is
+// simply the nearest pivot or value-area edge above entry, so when no structure
+// exists nearby it lands wherever the next one happens to be.
+//
+// Three consequences, all compounding:
+//   • roughly 78% of such trades reach the stop before the first target;
+//   • the breakeven move keys off TP1, so it never armed and the FULL position
+//     rode full risk for the life of the trade;
+//   • the scale-out never began, so a trade that went 3R in favour and turned
+//     still booked a complete loss.
+// That is not a market condition. That is a plan that cannot pay.
+//
+// Fix: when the nearest structure candidate is beyond i_maxTp1R x risk, the
+// R-multiple is inserted AHEAD of it. The distant level is not discarded — it
+// becomes a later target instead of the first one.
+//
+//   trade #87 old   TP1 3.50R  TP2 4.36R  TP3 5.32R   P(TP1) 22%
+//   trade #87 new   TP1 1.00R  TP2 3.50R  TP3 4.36R   P(TP1) 50%
+//
+// Across a simulated distribution of nearest-structure distances, the share of
+// trades reaching TP1 — and therefore arming breakeven — goes from 37.7% with
+// no ceiling to 50.0% at 2.0R.
+//
+// Default 2.0R, ON. This is not a tuning preference: an unbounded first target
+// makes the breakeven rule and the scale-out dead code on exactly the setups
+// where they matter most. It only changes plans whose nearest structure was
+// already out of reach. Set 0 to restore the old behaviour.
+//
+// Note what this does NOT claim. Expectancy on a fair game is zero at any
+// target spacing — v3.5.34's analysis showed that. A closer TP1 buys reach
+// probability and lets the de-risking machinery function; it does not create
+// edge. The entries still have to beat random by more than costs.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.34 CHANGELOG — TIMEFRAME AUTO-SCALING (the two settings that BREAK, not
 // merely differ)
@@ -1362,6 +1409,9 @@ i_minRR      = input.float(1.0, "Min TP1 Reward (× risk)", minval=0.0, maxval=5
 i_minBlendRR = input.float(1.3, "Min Blended Scale-Out Reward (× risk, 0 = off)", minval=0.0, maxval=10.0, step=0.1,
      tooltip="v3.5.26: an alternative way to pass the reward gate, measuring the WHOLE plan instead of TP1 alone.\nThe position exits 33/33/34 across TP1/TP2/TP3, so judging a setup purely by TP1 describes a third of it. A plan with a modest first target and strong second and third was rejected on a number that never represented it — the largest single source of 'rr' blocks on 15m gold, where the nearest pivot often sits inside 1R.\nA setup now passes on EITHER the TP1 test OR this weighted reward. That raises trade count by fixing what is measured rather than by lowering the bar.\n0 = off, and only the TP1 test applies, exactly as before.\nNOTE: a trade admitted this way does NOT arm the breakeven move, because a close TP1 dragging the stop to entry is the scratch pattern the v3.5.8 gate exists to prevent.",
      group=G_TPSL)
+i_maxTp1R    = input.float(2.0, "Max TP1 Distance (× risk, 0 = off)", minval=0.0, maxval=10.0, step=0.1,
+     tooltip="v3.5.35: if the nearest STRUCTURE level sits further than this from entry, TP1 falls back to its R-multiple instead and the distant level moves to a later slot.\nMin TP1 Reward enforced a FLOOR of 1.0R and nothing enforced a ceiling. TP1 is simply the nearest pivot or value-area edge above entry, so when no structure exists nearby it lands wherever the next one is — measured live on XAUUSD 30m trade #87: SL 4384.877, TP1 4421.470, entry just above 4391, putting the FIRST target 3.5R-4.5R away.\nThat has three consequences, all bad. Roughly 78% of such trades reach the stop before the first target. The breakeven move keys off TP1, so it never arms and the whole position rides full risk. And the scale-out never begins, so a trade that goes 3R in your favour and turns still books a full loss.\n2.0 bounds the first target's reach probability at about 33%. Lower it for a higher win rate with smaller wins; 0 restores the old unbounded behaviour.\nThis changes level selection only on setups where the nearest structure was already out of reach.",
+     group=G_TPSL)
 i_minTp1Floor = input.float(0.5, "Absolute TP1 Floor (× risk)", minval=0.0, maxval=3.0, step=0.1,
      tooltip="v3.5.26: TP1 must clear this no matter which path admits the trade. Stops a target a few ticks away being waved through by a strong runner sitting behind it.\nApplies only to the blended path; the ordinary TP1 test already enforces its own, higher bar.",
      group=G_TPSL)
@@ -2409,6 +2459,21 @@ f_tpLevels(bool _isBuy, float _entry, float _risk) =>
     // otherwise R-multiple s. That mapping is unchanged from every previous
     // version — only the collision nudge is new, so a plan that never collided
     // comes out bit-identical.
+    // v3.5.35 TP1 CEILING. The nearest structure level becomes TP1 no matter how
+    // far away it is — the reward gate only ever enforced a MINIMUM. With no
+    // structure near entry the first target lands several R out, so the trade
+    // must run 3-4R to bank anything, the breakeven move (which keys off TP1)
+    // never arms, and the scale-out never begins. Measured live on XAUUSD 30m
+    // #87: TP1 3.5R-4.5R from entry, ~78% chance of hitting the stop first.
+    // When the nearest candidate is out of reach, insert the R-multiple ahead
+    // of it: the distant level is not discarded, it simply becomes a later
+    // target instead of the first one.
+    float capT1 = i_maxTp1R > 0 ? _risk * i_maxTp1R : 1.0e12
+    bool t1Inj  = false
+    if n >= 1 and math.abs(array.get(cands, 0) - _entry) > capT1
+        array.unshift(cands, _entry + dir * _risk * effTp1R)
+        n := array.size(cands)
+        t1Inj := true
     float[]  rMul = array.from(effTp1R, effTp2R, effTp3R)
     float[]  fV   = array.new_float(0)
     string[] fT   = array.new_string(0)
@@ -2416,7 +2481,7 @@ f_tpLevels(bool _isBuy, float _entry, float _risk) =>
         if s < n
             sv = array.get(cands, s)
             array.push(fV, sv)
-            array.push(fT, not na(lvl) and sv == lvl ? lt : " Pivot")
+            array.push(fT, s == 0 and t1Inj ? " " + str.tostring(effTp1R) + "R" : (not na(lvl) and sv == lvl ? lt : " Pivot"))
         else
             float rv = _entry + dir * _risk * array.get(rMul, s)
             for pass = 0 to 3
@@ -3038,7 +3103,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.34 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.35 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
