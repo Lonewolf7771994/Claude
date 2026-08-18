@@ -1,8 +1,46 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.40 (measured signal rates, corrected)
+// © ME Institutional — Movement Engine Pro v3.5.41 (manual levels + Heikin Ashi guard)
 //@version=6
-strategy("ME Pro Strategy v3.5.40", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.41", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.41 CHANGELOG — MANUAL LEVELS, AND A HEIKIN ASHI GUARD
+// ─────────────────────────────────────────────────────────────────────────────
+// Two reported gaps, one of which was a safety problem rather than a feature.
+//
+// 1. HEIKIN ASHI IS NOT SUPPORTED, AND SILENTLY PRODUCED UNTRADEABLE LEVELS.
+//    On an HA chart TradingView feeds a script the SYNTHETIC series:
+//        HA close = (o + h + l + c) / 4
+//        HA open  = (previous HA open + previous HA close) / 2
+//    Neither is a price that ever traded. Every order-flow read here — body
+//    conviction (close-open)/range, close position, the CVD sign, the body
+//    gate — would be measuring a moving average of itself, and every trigger
+//    that tests `close` would be testing a smoothed value rather than what the
+//    market printed.
+//    The serious part is the plan: the stop and all three targets are derived
+//    from `close` and from pivots of the HA high/low, so the levels drawn would
+//    be prices that DO NOT EXIST in the real market and cannot fill. The chart
+//    would look cleaner and the numbers on it would be fiction.
+//    HA has an exact signature — open == (open[1] + close[1]) / 2 on
+//    essentially every bar — so it is now detected and the dashboard header
+//    turns into "HEIKIN ASHI — LEVELS INVALID". Use standard candles. This is
+//    not a preference; the levels are not real otherwise.
+//
+// 2. THE DRAWN LEVELS COULD NOT BE MOVED. Correct, and it is a platform limit:
+//    Pine draws with line.new and those objects are not draggable. There is no
+//    setting that changes it.
+//    Adds four price inputs — Manual SL / TP1 / TP2 / TP3. Any one set to a
+//    non-zero price replaces the engine's level on the open plan; leave a slot
+//    at 0 to keep the engine's own, so the stop can be moved without touching
+//    the targets. They can be placed by clicking the chart or typed exactly.
+//    Overrides reach the DRAWN plan and the hit tracking that feeds breakeven,
+//    the cooldown and the loss-streak guard, so the engine scores the trade you
+//    are actually in. They deliberately do NOT feed back into signal
+//    generation: the reward gate already passed on the engine's own levels, and
+//    letting a manual target re-open that decision would let a user talk the
+//    engine into a setup it refused. An overridden level is marked with * on
+//    its label so a manual plan is never mistaken for a computed one.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.40 CHANGELOG — THE RATES IN v3.5.38 AND v3.5.39 WERE WRONG BY 4x
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1629,6 +1667,13 @@ i_rsiSellLo  = input.int(22, "SELL min RSI", minval=10, maxval=45,
 i_rsiSellHi  = input.int(60, "SELL max RSI", minval=40, maxval=90, group=G_RSI)
 
 // ── TP / SL ──────────────────────────────────────────────────────────────────
+i_manualOn   = input.bool(false, "Manual TP / SL Override",
+     tooltip="v3.5.41: lets you move the levels of the OPEN plan yourself.\nThe engine draws its levels with line.new, and Pine drawings cannot be dragged — that is a platform limit, not a setting, which is why they read as frozen. These four price inputs are the closest thing available: set one and it replaces the engine's level on the live plan.\nEach can be placed by clicking the chart (TradingView prompts for a price when the input is first enabled) or typed exactly.\nLeave a value at 0 to keep the engine's own level for that slot, so you can move only the stop and leave the targets alone.\nOverrides apply to the DRAWN plan and to the hit tracking that feeds breakeven, the cooldown and the loss-streak guard. They do NOT feed back into signal generation — the reward gate already passed on the engine's own levels, and letting a manual target re-open that decision would let you talk the engine into a trade it refused.",
+     group=G_TPSL)
+i_mSL        = input.price(0.0, "  Manual SL",  group=G_TPSL, confirm=true)
+i_mTP1       = input.price(0.0, "  Manual TP1", group=G_TPSL, confirm=true)
+i_mTP2       = input.price(0.0, "  Manual TP2", group=G_TPSL, confirm=true)
+i_mTP3       = input.price(0.0, "  Manual TP3", group=G_TPSL, confirm=true)
 i_tpslShow   = input.bool(true, "Show TP / SL Lines",
      tooltip="v3.4.1: display only. SL/TP tracking (post-SL cooldown, TP1 de-risk) now runs whether or not lines are shown.",
      group=G_TPSL)
@@ -1816,6 +1861,20 @@ effMinRR      = isScalp ? math.min(i_minRR, scalpHigh ? 0.7 : scalpStd ? 0.9 : 9
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATR + VOLATILITY REGIME
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// v3.5.41 HEIKIN ASHI GUARD. On an HA chart TradingView feeds this script the
+// SYNTHETIC series: HA close is (o+h+l+c)/4 and HA open is the midpoint of the
+// previous HA bar. Neither is a price that ever traded. Every order-flow read
+// here — body conviction, close position, CVD sign, the body gate — and every
+// trigger that tests `close` would be measuring a moving average of itself.
+// Worse, the STOP and TARGETS are derived from close and from pivots of the HA
+// high/low, so the levels drawn would be prices that never existed in the
+// market and cannot be filled.
+// HA has an exact signature: open == (open[1] + close[1]) / 2 on essentially
+// every bar. Detect it and warn; the engine is not usable on that chart type.
+haBar    = math.abs(open - (open[1] + close[1]) / 2.0) <= syminfo.mintick * 2
+haScore  = math.sum(haBar ? 1.0 : 0.0, 50)
+isHeikin = bar_index > 60 and haScore >= 46
 
 atr14 = ta.atr(14)
 atr50 = ta.atr(50)
@@ -3345,6 +3404,54 @@ if sellSignal
             tpsl_tp3Z := box.new(bar_index, sellTp3 + zh, endBar, sellTp3 - zh, bgcolor=color.new(#FF9500, 85), border_color=color.new(#FF9500, 60))
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.41 MANUAL LEVEL OVERRIDE
+// ─────────────────────────────────────────────────────────────────────────────
+// Applied AFTER the plan is built, so signal generation is untouched: the
+// reward gate already decided on the engine's own levels and a manual target
+// must not be able to re-open that decision. What these do change is the drawn
+// plan and the hit tracking that feeds breakeven, the cooldown and the
+// loss-streak guard — i.e. the engine now scores the trade you are actually in.
+// ═══════════════════════════════════════════════════════════════════════════════
+manSL  = i_manualOn and i_mSL  > 0 ? i_mSL  : na
+manTP1 = i_manualOn and i_mTP1 > 0 ? i_mTP1 : na
+manTP2 = i_manualOn and i_mTP2 > 0 ? i_mTP2 : na
+manTP3 = i_manualOn and i_mTP3 > 0 ? i_mTP3 : na
+
+if not na(activeSlPx)
+    if not na(manSL)
+        activeSlPx  := manSL
+    if not na(manTP1)
+        activeTp1Px := manTP1
+    if not na(manTP3)
+        activeTp3Px := manTP3
+
+if barstate.islast and i_manualOn
+    if not na(manSL) and not na(tpsl_sl)
+        line.set_y1(tpsl_sl, manSL)
+        line.set_y2(tpsl_sl, manSL)
+    if not na(manSL) and not na(tpsl_slL)
+        label.set_y(tpsl_slL, manSL)
+        label.set_text(tpsl_slL, " SL* " + sigTag + str.tostring(manSL, format.mintick))
+    if not na(manTP1) and not na(tpsl_tp1)
+        line.set_y1(tpsl_tp1, manTP1)
+        line.set_y2(tpsl_tp1, manTP1)
+    if not na(manTP1) and not na(tpsl_tp1L)
+        label.set_y(tpsl_tp1L, manTP1)
+        label.set_text(tpsl_tp1L, " TP1*" + sigTag + str.tostring(manTP1, format.mintick))
+    if not na(manTP2) and not na(tpsl_tp2)
+        line.set_y1(tpsl_tp2, manTP2)
+        line.set_y2(tpsl_tp2, manTP2)
+    if not na(manTP2) and not na(tpsl_tp2L)
+        label.set_y(tpsl_tp2L, manTP2)
+        label.set_text(tpsl_tp2L, " TP2*" + sigTag + str.tostring(manTP2, format.mintick))
+    if not na(manTP3) and not na(tpsl_tp3)
+        line.set_y1(tpsl_tp3, manTP3)
+        line.set_y2(tpsl_tp3, manTP3)
+    if not na(manTP3) and not na(tpsl_tp3L)
+        label.set_y(tpsl_tp3L, manTP3)
+        label.set_text(tpsl_tp3L, " TP3*" + sigTag + str.tostring(manTP3, format.mintick))
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SIGNAL LABELS
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3381,7 +3488,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.40 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, (isHeikin ? "⛔ HEIKIN ASHI — LEVELS INVALID" : "ME PRO v3.5.41") + " — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
