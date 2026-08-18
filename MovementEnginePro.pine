@@ -1,8 +1,44 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.35 (TP1 ceiling)
+// © ME Institutional — Movement Engine Pro v3.5.36 (rel-volume readout fix)
 //@version=6
-indicator("Movement Engine Pro v3.5.35", shorttitle="ME Pro v3.5.35", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.36", shorttitle="ME Pro v3.5.36", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.36 CHANGELOG — THE REL VOLUME READOUT WAS LYING (display only)
+// ─────────────────────────────────────────────────────────────────────────────
+// Two days were spent blaming the volume floor for a silent engine, on the
+// strength of a dashboard row that was never showing the number the gate uses.
+//
+//   relVol = volume / ta.sma(volume[1], 20)
+//
+// The dashboard renders on barstate.islast — always the LIVE, unfinished bar —
+// and on that bar `volume` is only partly accumulated. A bar 50% through its
+// period reads about 0.50x of its eventual value:
+//
+//   bar  25% elapsed -> displayed reads 0.25x of true
+//   bar  50% elapsed -> 0.50x
+//   bar  67% elapsed -> 0.67x
+//   bar 100% elapsed -> 1.00x   (what the gate actually evaluates)
+//
+// Five separate XAUUSD screenshots read 0.48x, 0.51x, 0.52x, 0.53x, 0.54x. That
+// tight cluster around one half is the signature of a mid-bar reading, not of a
+// volume series — a real one ranges roughly 0.1x to 3x and would never sit in a
+// 0.06-wide band across five independent samples. The tell was there and I read
+// it as a broken feed instead.
+//
+// THE GATE WAS NEVER AFFECTED. Signals fire only on barstate.isconfirmed, where
+// the bar is complete and relVol is correct. Nothing about signal generation
+// changes here. But the readout sent the diagnosis after the volume floor for
+// two days, and it is also what made the v3.5.25 degenerate-volume detector
+// look necessary on gold when the gold feed was fine all along.
+//
+// The row now shows the last CONFIRMED bar's value, labelled "(last bar)", and
+// colours itself against the floor using that same value.
+//
+// v3.5.25's detector is unchanged and still correct: it measures the pass rate
+// over confirmed bars, not the live one, so it was never fooled by this. The
+// BTCUSD feed genuinely was degenerate.
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.35 CHANGELOG — TP1 HAD NO CEILING (why trades "hit almost zero TP")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1622,6 +1658,20 @@ relVol = volDataSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
 // still read the same broken series, which is why the warning is surfaced
 // rather than hidden — this keeps Scalp usable, it does not make the data good.
 // ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.36 DISPLAY FIX. relVol divides the CURRENT bar's volume by the average
+// of the prior 20 — but on the live bar `volume` is only partly accumulated, so
+// a bar 50% through its period reads ~0.50x of its true value. The dashboard
+// renders on barstate.islast, i.e. always on that unfinished bar, so the Rel
+// Volume row systematically understated and looked like a permanently failing
+// gate. Five separate XAUUSD screenshots read 0.48x 0.51x 0.52x 0.53x 0.54x — a
+// cluster around half, which is a mid-bar artefact, not a volume series (a real
+// one ranges roughly 0.1x to 3x).
+// The GATE was never affected: signals fire only on barstate.isconfirmed, where
+// the bar is complete. Only the readout was wrong — but it was wrong in a way
+// that sent the diagnosis after the volume floor for two days.
+var float relVolConfirmed = 1.0
+if barstate.isconfirmed
+    relVolConfirmed := relVol
 volPassBar   = volDataSeen and relVol >= effVolFloor ? 1.0 : 0.0
 volPassRate  = ta.sma(volPassBar, i_volSanityLen)
 volSeriesBad = i_volSanity and volDataSeen and bar_index > i_volSanityLen and volPassRate < i_volSanityMin
@@ -3103,7 +3153,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.35 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.36 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -3149,9 +3199,11 @@ if i_dashboard and barstate.islast
     f_cell(1, 9, str.tostring(math.round(deltaRatio, 2)), deltaBullOk ? grn : dim)
     f_cell(2, 9, str.tostring(math.round(deltaRatio, 2)), deltaBearOk ? red_ : dim)
 
-    relVolTxt = not volDataSeen ? "N/A (no vol)" : volSeriesBad ? str.tostring(math.round(relVol, 2)) + "× ⚠VOL?" : str.tostring(math.round(relVol, 2)) + "×"
+    // v3.5.36: show the last CONFIRMED bar's reading — the live bar's volume is
+    // incomplete and the gate never sees it.
+    relVolTxt = not volDataSeen ? "N/A (no vol)" : volSeriesBad ? str.tostring(math.round(relVolConfirmed, 2)) + "× ⚠VOL?" : str.tostring(math.round(relVolConfirmed, 2)) + "× (last bar)"
     table.cell(dash, 0, 10, "Rel Volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    relVolCol = not volDataSeen ? dim : volSeriesBad ? yel : volOk ? grn : red_
+    relVolCol = not volDataSeen ? dim : volSeriesBad ? yel : relVolConfirmed >= effVolFloor ? grn : red_
     f_cell(1, 10, relVolTxt, relVolCol)
     f_cell(2, 10, relVolTxt, relVolCol)
 
