@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.21-S4 (intrabar delta, opt-in)
+// © ME Institutional — Movement Engine Pro v3.5.21-S5 (scalp duration fix)
 //@version=6
-strategy("ME Pro Strategy v3.5.21-S4", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.21-S5", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.21-S2 — THREE MORE SCALP RESTRICTIONS REMOVED.
@@ -957,6 +957,10 @@ i_maxRisk    = input.float(3.0,"Max Risk Cap (× ATR)",
      minval=1.0, maxval=10.0, step=0.25,
      tooltip="Signal blocked if entry-to-SL distance > this many ATRs. Kills setups where the pivot is too far away. v3.3 accuracy fix.\nScalp mode: a structural stop beyond the cap is clamped to the cap (volatility stop) instead of blocking (v3.5.1).",
      group=G_RISK)
+i_scalpMaxRisk = input.float(1.0, "Scalp Max Risk (× ATR)",
+     minval=0.6, maxval=3.0, step=0.1,
+     tooltip="Scalp mode only. THE SINGLE BIGGEST CONTROL OVER HOW LONG A TRADE LASTS, because the stop distance sets the target distance too — TP1 is 1.0R, so a wider stop moves the first target further away and the trade takes longer to resolve either way.\n\nMeasured on 5m Scalp/Selective, 150 days x 6 seeds:\n\n  cap     median   p90 bars   signals/day\n  2.5     7        34         3.89\n  1.5     5        16         3.56\n  1.0     3        9          3.78\n\nSignals/day barely moves because the far-side clamp turns an over-wide structural stop into a volatility stop at the cap rather than blocking the setup. So tightening this buys speed almost for free. Same pattern on 15m (p90 33 -> 10) and 30m (37 -> 9).\n\nDEFAULT 1.0 — a 5m trade that is still open after 30 minutes is not a scalp.\n\nRAISE IT for a more comfortable stop that is harder to shake out; 2.5 restores v3.5.21-S behaviour. The trade-off is real and it cuts both ways: a tighter stop resolves faster and risks less per trade, but real spread and noise punish it harder than this synthetic measurement can show.",
+     group=G_RISK)
 i_riskClampMode = input.string("Near side only", "Stop Clamping",
      options=["Off (block instead)","Near side only","Both sides"],
      tooltip="What to do when the structural stop falls outside the min/max risk window.\n\nNEAR SIDE ONLY (default, v3.5.6): a too-TIGHT stop is widened to the min-risk floor — safe, because the stop only moves further from price and stays beyond the invalidation level. A setup whose real invalidation lies beyond the max-risk cap is SKIPPED, not clamped.\n\nBOTH SIDES (v3.5.4/v3.5.5 behavior): also drags a too-far stop IN to the cap, placing it inside the structure that defines the trade, so price can hit it while the setup is still valid — the cause of the Strict/Balanced stop-outs reported against v3.5.5. Choose it only if you want a pure volatility stop.\n\nOFF: both ends gate the signal (pre-v3.5.4).\n\nv3.5.7: Scalp uses the same near-side-only default as every other mode. Its sweep stops are now anchored to the sweep wick rather than the pivot, so they are naturally tight and the far clamp rarely binds; when it would, the invalidation is too far away to be a scalp.",
@@ -1057,8 +1061,16 @@ scalpStd      = isScalp and i_scalpFreq == "Standard"
 // frequency. Now 1/2/3.
 effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 1 : scalpStd ? 2 : 3) : i_cooldown
 effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
-// was 2.0 — widened so the far-side clamp below has room to land.
-effMaxRisk    = isScalp ? math.min(i_maxRisk,    2.5)  : i_maxRisk
+// v3.5.21-S5: was a hard clamp to 2.5, which is what made a 5m "scalp" sit
+// open for 30+ minutes: the stop distance sets the target distance (TP1 = 1.0R),
+// so a wide stop pushes the first target out of reach and the trade resolves
+// slowly in BOTH directions. Measured on 5m, median duration 7 bars at 2.5 ATR
+// against 3 bars at 1.0, p90 34 bars against 9 — while signals/day moved only
+// 3.89 -> 3.78, because the far-side clamp converts an over-wide structural stop
+// into a volatility stop instead of blocking the setup.
+// Now a real input rather than a hidden ceiling, so it can be raised past the
+// default — the mistake this file already corrected once for Min Confluence.
+effMaxRisk    = isScalp ? math.min(i_maxRisk, i_scalpMaxRisk) : i_maxRisk
 effTp1R       = isScalp ? math.min(i_tp1R,       1.0)  : i_tp1R
 effTp2R       = isScalp ? math.min(i_tp2R,       1.5)  : i_tp2R
 effTp3R       = isScalp ? math.min(i_tp3R,       2.0)  : i_tp3R
@@ -2471,7 +2483,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.21-S4 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.21-S5 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
