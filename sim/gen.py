@@ -7,15 +7,16 @@ was inflated by roughly an order of magnitude, and the calibration built on
 those rates was worthless.
 
 v2 adds the two properties that make real price form structure slowly:
-  - momentum persistence (AR(1) on returns), so moves extend instead of
-    reversing every bar, which is what makes a swing a swing;
+  - momentum persistence (AR(1) on returns). DEFAULT 0.03, matching real
+    bar-scale autocorrelation. An earlier default of 0.82 put a large
+    trend-following edge INTO the data and made every engine look profitable;
   - volatility clustering (GARCH-like), so quiet stretches stay quiet.
 Both are tuned so structure-shift spacing matches the observed chart.
 """
 import math, random
 
 def series(n, tf_sec, seed=1, price=4400.0, ann_vol=0.16,
-           phi=0.82, vol_persist=0.94, vol_shock=0.06, wick_mult=1.6):
+           phi=0.03, vol_persist=0.94, vol_shock=0.06, wick_mult=1.6):
     random.seed(seed)
     bars=[]; t0=1_700_000_000_000
     per_year = 365*24*3600/tf_sec
