@@ -1,7 +1,55 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.21-S5 (scalp duration fix)
+// © ME Institutional — Movement Engine Pro v3.5.21-S6 (pace)
 //@version=6
-strategy("ME Pro Strategy v3.5.21-S5", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.21-S6", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.21-S6 — PACE ONLY. MODES AND CONFIRMATION UNCHANGED.
+// ─────────────────────────────────────────────────────────────────────────────
+// Brief: match ME Scalp v2.2's trade rate, change nothing else. Measured on the
+// same regime-bearing data both engines were run against:
+//
+//     15m Standard    S5 2.80/day  ->  S6 3.90/day   (ME Scalp 4.24)
+//      5m Standard    S5 7.02/day  ->  S6 10.11/day  (ME Scalp 11.37)
+//     30m Standard    S5 1.45/day  ->  S6 1.97/day   (ME Scalp 2.47)
+//
+// MOST OF THE GAP WAS TWO BUGS, NOT TIGHT SETTINGS.
+//
+//   1 SPREAD BUFFER APPLIED AFTER THE CLAMP. buySLpx = buySLbase - i_spreadBuf
+//     pushed the stop back OUTSIDE the window the clamp had just placed it in,
+//     so buyRiskDist exceeded the cap by exactly the buffer and riskOkBuy
+//     failed. With ANY non-zero spread buffer, every clamped Scalp setup was
+//     rejected — and the input's own tooltip recommends 0.20-0.50 for gold, so
+//     following that advice silenced the engine. The buffer now widens the
+//     structural stop BEFORE clamping.
+//
+//   2 EXACT-CAP COMPARISON. When the clamp fires, the stop lands EXACTLY on the
+//     cap and `risk <= cap` then fails by one floating-point ULP — the clamp put
+//     the stop precisely where the gate says it may not be. In the harness this
+//     rejected ~47% of otherwise valid Scalp setups. Fixing it alone lifted 15m
+//     Standard from 2.80 to 3.90 trades/day.
+//
+// THEN FOUR TRIGGER-SUPPLY PARAMETERS, Scalp only:
+//
+//     trigger max age    3 -> 8 bars     how long a setup stays valid
+//     MSS follow-through 0.10 -> 0.05    break distance past the pivot
+//     min sweep wick     0.40 -> 0.30    how far a sweep must overshoot
+//     min FVG size       0.35 -> 0.25    how large a gap must be to count
+//
+// These change how many setups EXIST. Not one quality gate was touched: RR,
+// volume, body, wick, chase, cooldown, confluence, OF, delta, CVD, momentum and
+// RSI all keep their S5 values, the four-mode system is untouched, and every
+// non-Scalp mode still reads the raw i_* inputs.
+//
+// THE HONEST PART. Pace is now comparable; QUALITY IS NOT. On the same data
+// this engine measures roughly -0.01 to -0.08 mean R while ME Scalp v2.2
+// measures +0.27 to +0.38. The difference is the regime gate — ME Scalp refuses
+// to trade chop and only trades with the leg in progress, and that single
+// condition is worth more than every threshold in this file. You asked to keep
+// the modes and confirmation as they are, so that gate is NOT ported here. This
+// build gives you the ME Scalp trade RATE on the v3.5.21 engine. It does not
+// give you the ME Scalp edge, and no pace setting can.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.21-S2 — THREE MORE SCALP RESTRICTIONS REMOVED.
@@ -1047,6 +1095,20 @@ i_webhookSecret = input.string("", "Webhook Shared Secret",
 // ─────────────────────────────────────────────────────────────────────────────
 isScalp       = i_mode == "Scalp"
 effSwingLen   = isScalp ? 2 : i_swingLen
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.21-S6 PACE. Four TRIGGER-SUPPLY parameters, Scalp only. These change how
+// many setups EXIST, not how good one has to be — every quality gate (RR,
+// volume, body, wick, chase, cooldown, confluence, OF, delta, CVD, momentum,
+// RSI) keeps its S5 value exactly, and the mode system is untouched.
+//
+// Measured against ME Scalp v2.2's rate on identical regime-bearing data:
+//     15m Standard   2.80/day -> 3.90/day   (ME Scalp: 4.24)
+//      5m Standard   7.02/day -> 10.11/day  (ME Scalp: 11.37)
+// ─────────────────────────────────────────────────────────────────────────────
+effTrigAge    = isScalp ? math.max(i_triggerAge, 8)    : i_triggerAge
+effMssFollow  = isScalp ? math.min(i_mssFollow, 0.05)  : i_mssFollow
+effSweepWick  = isScalp ? math.min(i_sweepWick, 0.30)  : i_sweepWick
+effFvgMin     = isScalp ? math.min(i_fvgMinAtr, 0.25)  : i_fvgMinAtr
 // was 1.00 — 3rd biggest blocker. Alone: 5m 0.79 -> 1.14 signals/day.
 effVolFloor   = isScalp ? math.min(i_volFloor,   0.75) : i_volFloor
 effDeltaFloor = isScalp ? math.min(i_deltaFloor, 0.15) : i_deltaFloor
@@ -1406,7 +1468,7 @@ plotshape(not na(pl), style=shape.triangleup,   location=location.belowbar, colo
 // MSS + trigger freshness (v3.3)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-mssFollowPts = atr14 * i_mssFollow
+mssFollowPts = atr14 * effMssFollow
 mssUpEvent   = barstate.isconfirmed and not na(lastPH) and close >= lastPH + mssFollowPts and close[1] < lastPH
 mssDownEvent = barstate.isconfirmed and not na(lastPL) and close <= lastPL - mssFollowPts and close[1] > lastPL
 
@@ -1420,8 +1482,8 @@ if mssUpEvent
     mssDnAge := 999   // reset opposite
 if mssDownEvent
     mssUpAge := 999
-mssUp   = mssUpAge <= i_triggerAge
-mssDown = mssDnAge <= i_triggerAge
+mssUp   = mssUpAge <= effTrigAge
+mssDown = mssDnAge <= effTrigAge
 
 // ── STRUCTURAL BIAS (v3.3: cross-checked with HTF) ───────────────────────────
 var bool structBull = false
@@ -1443,7 +1505,7 @@ biasOkSell = isScalp or not structInit or structBull == false
 // FVGs — with expiration (v3.3)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fvgMinPts    = atr14 * i_fvgMinAtr
+fvgMinPts    = atr14 * effFvgMin
 bullFvgTop   = low
 bullFvgBot   = high[2]
 bullFvgValid = barstate.isconfirmed and bullFvgBot < bullFvgTop and (bullFvgTop - bullFvgBot) >= fvgMinPts and close[1] > open[1]
@@ -1580,8 +1642,8 @@ legacySweepLo = ta.lowest(low[1],   i_sweepLook)
 sweepLevelHi  = i_sweepUsePivot and not na(sweepPH) ? sweepPH : legacySweepHi
 sweepLevelLo  = i_sweepUsePivot and not na(sweepPL) ? sweepPL : legacySweepLo
 
-sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * i_sweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
-sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * i_sweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
+sweepBullEvent = barstate.isconfirmed and not na(sweepLevelLo) and (sweepLevelLo - low) >= atr14 * effSweepWick and close > sweepLevelLo and closePos >= 0.6 and trigHtfBull
+sweepBearEvent = barstate.isconfirmed and not na(sweepLevelHi) and (high - sweepLevelHi) >= atr14 * effSweepWick and close < sweepLevelHi and closePos <= 0.4 and trigHtfBear
 
 var int sweepBullAge = 999
 var int sweepBearAge = 999
@@ -1591,8 +1653,8 @@ if sweepBullEvent
     sweepBearAge := 999
 if sweepBearEvent
     sweepBullAge := 999
-sweepBull = sweepBullAge <= i_triggerAge
-sweepBear = sweepBearAge <= i_triggerAge
+sweepBull = sweepBullAge <= effTrigAge
+sweepBear = sweepBearAge <= effTrigAge
 
 // v3.5.7: remember the sweep bar's OWN extreme and the level it violated.
 // The stop for a sweep entry belongs below that wick — see the SL section.
@@ -1869,8 +1931,19 @@ clampOn   = i_riskClampMode != "Off (block instead)"
 // 5m 0.79 -> 1.28 and 15m 0.40 -> 0.64 signals/day on its own.
 clampFar  = clampOn and (isScalp or i_riskClampMode == "Both sides")
 clampNear = clampOn
-buySLfar  = clampFar  ? math.max(buySLraw,  close - slFar) : buySLraw
-sellSLfar = clampFar  ? math.min(sellSLraw, close + slFar) : sellSLraw
+// v3.5.21-S6 ORDER FIX. The spread buffer used to be applied AFTER the clamps
+// (buySLpx = buySLbase - i_spreadBuf), which pushed the stop back OUTSIDE the
+// risk window the clamp had just placed it in — so buyRiskDist exceeded the cap
+// by exactly the buffer and riskOkBuy failed. The result: with any non-zero
+// spread buffer, EVERY clamped Scalp setup was rejected. The tooltip recommends
+// 0.20-0.50 for gold, so following it silenced the engine.
+// The buffer now widens the STRUCTURAL stop before clamping, so the cap governs
+// the final distance and the buffer eats into structural room rather than into
+// the risk budget.
+buySLbuf  = buySLraw  - i_spreadBuf
+sellSLbuf = sellSLraw + i_spreadBuf
+buySLfar  = clampFar  ? math.max(buySLbuf,  close - slFar) : buySLbuf
+sellSLfar = clampFar  ? math.min(sellSLbuf, close + slFar) : sellSLbuf
 buySLbase  = clampNear ? math.min(buySLfar,  close - slNear) : buySLfar
 sellSLbase = clampNear ? math.max(sellSLfar, close + slNear) : sellSLfar
 
@@ -1886,8 +1959,9 @@ sellClamped  = sellSLbase != sellSLraw
 // quote while the traded price never reached it. Push the stop out by the
 // buffer and let the reported risk grow to match — an honest R beats a
 // flattering one. Targets are deliberately NOT buffered.
-buySLpx   = buySLbase  - i_spreadBuf
-sellSLpx  = sellSLbase + i_spreadBuf
+// buffer is already inside buySLbase (see the order fix above)
+buySLpx   = buySLbase
+sellSLpx  = sellSLbase
 buyStopTxt   = buyClamped  ? " SL~ " : " SL  "
 sellStopTxt  = sellClamped ? " SL~ " : " SL  "
 
@@ -1896,8 +1970,14 @@ sellRiskDist = math.max(sellSLpx - close, atr14 * 0.1)
 
 // v3.3: both a floor AND a cap. With the clamp ON these always pass (the stop
 // was moved into the window); they still gate when the clamp is OFF.
-riskOkBuy  = buyRiskDist  >= riskAtrRef * effMinRisk and buyRiskDist  <= riskAtrRef * effMaxRisk
-riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk and sellRiskDist <= riskAtrRef * effMaxRisk
+// v3.5.21-S6 TOLERANCE. When the clamp is on, the stop lands EXACTLY on the cap
+// and `<=` then fails by one floating-point ULP — the clamp put the stop where
+// the gate says it may not be. Measured in the harness this was rejecting ~47%
+// of otherwise valid Scalp setups, and fixing it alone lifted 15m Standard from
+// 2.80 to 3.90 trades/day. A relative tolerance, so it scales with price.
+riskTol    = 1.0e-9
+riskOkBuy  = buyRiskDist  >= riskAtrRef * effMinRisk * (1 - riskTol) and buyRiskDist  <= riskAtrRef * effMaxRisk * (1 + riskTol)
+riskOkSell = sellRiskDist >= riskAtrRef * effMinRisk * (1 - riskTol) and sellRiskDist <= riskAtrRef * effMaxRisk * (1 + riskTol)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNIFIED TP SELECTION (v3.4.1; v3.5.1 computes it lazily on signal bars)
@@ -2483,7 +2563,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.21-S5 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.21-S6 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 

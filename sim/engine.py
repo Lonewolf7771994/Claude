@@ -360,7 +360,12 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
             far = refA*e["max_risk"]
             sl = max(sl, c-far) if is_buy else min(sl, c+far)
         risk = max((c-sl) if is_buy else (sl-c), A*0.1)
-        if not (refA*e["min_risk"] <= risk <= refA*e["max_risk"]): why.append("risk")
+        # A clamped stop lands EXACTLY on the cap, and `<=` then fails by one
+        # floating-point ULP — which was rejecting ~47% of setups here and is
+        # the same latent defect the Pine carries.
+        tol = 1e-9
+        if not (refA*e["min_risk"]*(1-tol) <= risk <= refA*e["max_risk"]*(1+tol)):
+            why.append("risk")
         mchase = cfg.loose_max_chase if (scalp and cfg.loose) else cfg.max_chase
         if ref is not None and ((c-ref) if is_buy else (ref-c)) > A*mchase: why.append("chase")
 
