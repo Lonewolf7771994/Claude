@@ -51,3 +51,68 @@ def series(n, tf_sec, seed=1, price=4400.0, ann_vol=0.16,
         bars.append((t0+i*tf_sec*1000,o,hi,lo,cl,v))
         p=cl
     return bars
+
+
+def series_regime(n, tf_sec, seed=1, price=4400.0, ann_vol=0.16,
+                  vol_persist=0.94, vol_shock=0.06, wick_mult=1.6,
+                  mean_range=220, mean_trend=70, trend_k=0.55):
+    """OHLCV with REGIMES — the property `series` lacks and real markets have.
+
+    WHY THIS EXISTS. `series` uses phi=0.03, so it has essentially no sustained
+    directional movement: over 900 simulated days it produced TWO trades in the
+    top efficiency-ratio quintile. Every threshold calibrated against it was
+    therefore fitted to pure chop, which is exactly how you end up with an engine
+    that fires on noise and sits out real moves.
+
+    A Markov chain alternates two states:
+      range  mean-reverting toward a slow anchor, so price chops
+      trend  a persistent drift of +/- trend_k sigma per bar
+
+    THE DIRECTION OF EACH TREND IS DRAWN AT RANDOM WHEN THE REGIME STARTS and is
+    never knowable in advance, so this adds NO free edge — buy-and-hold remains
+    ~0 EV. It can only be exploited by DETECTING a regime after it begins, which
+    is precisely what trend following is and precisely what the current engine
+    cannot do. Getting this wrong is easy: an earlier generator used phi=0.82,
+    which baked a trend-following edge into the data itself and made every
+    engine look profitable.
+    """
+    rng = random.Random(seed)
+    bars=[]; t0=1_700_000_000_000
+    per_year = 365*24*3600/tf_sec
+    base = ann_vol/math.sqrt(per_year)
+    p=price; prev=0.0; h2=1.0
+    state="range"; left=int(rng.expovariate(1.0/mean_range))+1
+    mu=0.0; anchor=price
+    for i in range(n):
+        if left <= 0:
+            if state == "range":
+                state="trend"
+                left=int(rng.expovariate(1.0/mean_trend))+1
+                mu = rng.choice([-1.0, 1.0]) * trend_k      # direction is a coin flip
+            else:
+                state="range"
+                left=int(rng.expovariate(1.0/mean_range))+1
+                mu=0.0
+                anchor=p
+        left -= 1
+        hour = ((i*tf_sec)//3600) % 24
+        def bump(cn,w,a): return a*math.exp(-((hour-cn)**2)/(2*w*w))
+        vshape = .25 + bump(8,1.6,1.0) + bump(13.5,1.8,1.6) + bump(15,1.0,.7) + bump(20,1.2,.4)
+        act = 0.6 + 0.9*vshape
+        z = max(-8.0, min(8.0, prev/max(base,1e-12)))
+        h2 = (1-vol_persist-vol_shock) + vol_persist*h2 + vol_shock*z*z
+        h2 = max(0.05, min(h2, 25.0))
+        sig = base*math.sqrt(max(h2,.05))*act
+        drift = mu*sig if state=="trend" else -0.05*math.log(max(p,1e-9)/max(anchor,1e-9))
+        ret = drift + rng.gauss(0, sig)
+        ret = max(-0.08, min(0.08, ret))
+        prev = ret
+        o=p; cl=o*math.exp(ret)
+        body=abs(cl-o)
+        wick=(body+o*sig*.6)*abs(rng.gauss(0,wick_mult))
+        hi=max(o,cl)+wick*rng.random()
+        lo=min(o,cl)-wick*rng.random()
+        v=max(1.0, vshape*1000*rng.lognormvariate(0,.45))
+        bars.append((t0+i*tf_sec*1000,o,hi,lo,cl,v))
+        p=cl
+    return bars

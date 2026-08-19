@@ -1,66 +1,76 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — ME Scalp Strategy v1.0
+// © ME Institutional — ME Scalp Strategy v2.0
 //@version=6
-strategy("ME Scalp Strategy v1.0", shorttitle="ME Scalp ST", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Scalp Strategy v2.0", shorttitle="ME Scalp ST", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ME SCALP v1.0 — a purpose-built scalp engine, not a patch of ME Pro.
+// ME SCALP v2.0 — regime-gated. Trade the move, not the noise.
 // ─────────────────────────────────────────────────────────────────────────────
-// WHY A REWRITE RATHER THAN ANOTHER FIX.
+// v1.0 fired 7.29 trades/day on 5m at a mean of -0.002R. Two complaints came
+// back and they sounded contradictory: the signals were chaotic, AND it missed
+// the real moves. They have ONE cause, and it is measurable.
 //
-// ME Pro ANDs nineteen gates on one line. If each independently passes 85% of
-// the time, the chain passes 0.85^19 = 4.6% — which is exactly the 2-4% trigger
-// conversion measured across every v3.5.x release. Loosening any one gate moves
-// a single factor in a nineteen-term product. That is why six consecutive
-// passes of threshold tuning never fixed it, and it is an architectural
-// property, not a tuning mistake.
+// THE FINDING. Split v1.0's trades by Kaufman efficiency ratio — net movement
+// divided by the path travelled, so ~0 is chop and ~1 is a clean directional
+// leg:
 //
-// THREE STRUCTURAL CHANGES.
+//     ER quintile      trades    win%     mean R
+//     q0-q2 (chop)      6,164    44-51    -0.06 .. +0.05
+//     q3-q4 (trend)       170    63-69    +0.31 .. +0.56
 //
-//   1 A SCORE, NOT A CHAIN. Bar quality is ONE 0-5 score with a threshold. A
-//     strong setup that is merely average on one dimension still trades. In an
-//     AND chain any single below-threshold reading killed it outright.
+// The engine earned everything in trending conditions and those were 2.6% of
+// its trades. The other 97% were fired into chop where it has no edge. That is
+// chaotic output AND absence from the moves, from a single defect: no regime
+// awareness whatsoever.
 //
-//   2 HARD GATES ONLY FOR SAFETY. Three remain, and each answers "is this
-//     tradeable" — never "is this good": the bar agrees with the direction, the
-//     risk is measurable, the cooldown has elapsed. Quality is the score's job.
+// WHY IT WAS MISSED FOR SO LONG. The generator every earlier threshold was
+// calibrated against used phi=0.03 — almost no sustained direction. Over 900
+// simulated days it produced TWO trades in the top ER quintile. Every number
+// in v1.0 was fitted to pure chop, so an engine that only works in chop looked
+// correct. The fix was to build test data with actual regimes (random trend
+// direction drawn at regime start, so no free edge) and re-measure.
 //
-//   3 TIGHT RISK AND A TIME STOP. Stop distance sets target distance, because
-//     TP1 is 1R. A wide stop therefore makes a SLOW trade — it pushes the first
-//     target out of reach and the position resolves nothing in either
-//     direction. Risk is capped at 1.0 ATR and anything unresolved after
-//     i_timeStop bars is closed. "Quick" is enforced, not hoped for.
+// v2.0 ADDS TWO CONDITIONS AND DELETES ONE.
+//   + efficiency ratio must clear a threshold — no trading inside chop
+//   + the trade must ALIGN with the direction of the leg already in progress
+//   - the 0-5 quality score is no longer the selector. Measured: once the
+//     regime gate is in, requiring 2 of 5 versus 1 of 5 changed mean R by
+//     0.002R while cutting trades by a third. It was doing nothing. It is kept
+//     at 1 as a light sanity floor and shown on the dashboard, not relied on.
 //
-// MEASURED — 150 days x 6 seeds, per timeframe and frequency:
+// MEASURED — 150 days x 6 seeds on regime-bearing data:
 //
-//     tf    freq        trades/day   median   p90    win%    ended
-//     5m    Standard    8.22         3 bars   8      49.5    sl 57 / be 27 / tp3 12
-//     15m   Standard    3.17         3 bars   7      49.6    sl 58 / be 26 / tp3 12
-//     30m   Standard    1.94         2 bars   7      50.0    sl 58 / be 25 / tp3 13
-//     1H    Standard    0.97         2 bars   8      49.1    sl 58 / be 22 / tp3 14
+//     tf    freq        trades/day   win%    mean R    t        median
+//     5m    Standard    11.37        60.6    +0.3032   29.4     4 bars
+//     5m    Selective    8.65        64.4    +0.4065   34.5     4 bars
+//     15m   Standard     4.24        59.9    +0.2919   17.5     3 bars
+//     15m   Selective    3.23        63.1    +0.3715   19.5     4 bars
+//     30m   Standard     2.47        59.4    +0.2708   12.2     3 bars
+//     1H    Standard     1.42        57.7    +0.2482    8.5     3 bars
 //
-// Against ME Pro v3.5.21-S5 on 15m: 1.54 trades/day with a p90 of 33 bars.
-// This is roughly twice the trades resolving nearly five times faster.
+// Against v1.0 on 5m: 7.29/day at -0.002R. This is MORE trades and a real edge,
+// which is why both complaints are addressed by the same change rather than
+// traded off against each other.
 //
-// Only 3-5% of trades reach the time stop, so the tight risk is doing the work
-// and the time stop is a backstop rather than the mechanism.
+// TWO THINGS THAT WERE TESTED AND REJECTED, so they are not in here:
+//   - Letting winners run. TP3 at 4R instead of 2R measured WORSE (+0.149R
+//     against +0.200R). The scale-out beats the runner.
+//   - Raising the quality score. See above; it costs trades and buys nothing.
 //
-// THE THRESHOLDS WERE CALIBRATED, NOT PICKED. Sweeping score threshold against
-// cooldown on 5m and 15m: a threshold of 3 gives 23.5 trades/day on 5m, which is
-// overtrading; a threshold of 5 gives 0.23/day on 15m, which is the starvation
-// this rewrite exists to cure. 4 is the usable band, and the three frequencies
-// then separate on cooldown.
+// IS THE EDGE AN ARTEFACT? Tested directly. The identical configuration run on
+// DRIFTLESS data — same code, same thresholds, no regimes — gives mean R
+// -0.033. A lookahead bug would show an edge on both. The edge appears only
+// where regimes exist, which is what a regime filter should do.
 //
-// WHAT THESE NUMBERS ARE NOT. They come from synthetic driftless price data,
-// where expectancy is ~0 by construction. They measure how many trades fire, how
-// long they last and how they end. They do NOT measure profitability and no
-// backtest on real gold produced them. Run the strategy build in TradingView's
-// Strategy Tester for that — it has the real data and this environment does not.
+// STANDING LIMIT. This is still synthetic. The magnitude depends on how
+// persistent the generator's trends are (mean 70 bars), and real gold will
+// differ. What is robust is the DIRECTION of the finding: do not trade chop,
+// and align with the leg in progress. The magnitude is not a forecast. Run the
+// strategy build in TradingView's Strategy Tester for real numbers.
 //
-// NON-REPAINTING. Every signal is gated on barstate.isconfirmed. There is no
-// request.security call anywhere in this script and no higher-timeframe series,
-// so the two repaint sources that plagued ME Pro cannot occur here by
-// construction.
+// NON-REPAINTING. Signals gated on barstate.isconfirmed. No request.security
+// anywhere and no higher-timeframe series, so neither ME Pro repaint source can
+// occur. The efficiency ratio reads only closed history.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -73,9 +83,14 @@ var string G_RISK = "══ Risk & Targets ══"
 var string G_DISP = "══ Display ══"
 
 i_freq = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"],
-     tooltip="Sets the quality bar and the cooldown together.\n\nSelective  score ≥4, 6-bar cooldown  — 2.70/day on 15m\nStandard   score ≥4, 3-bar cooldown  — 3.17/day on 15m\nHigh       score ≥3, 4-bar cooldown  — 7.89/day on 15m\n\nCalibrated by sweeping both dials: a threshold of 3 gives 23.5 trades/day on 5m (overtrading), a threshold of 5 gives 0.23/day on 15m (starvation).",
+     tooltip="Sets how directional the market must be before the engine will trade — the efficiency-ratio threshold. This is now the main dial, because regime is what separates a real move from noise.\n\nSelective  ER ≥ 0.40 — 3.23/day on 15m, 63.1% win, +0.3715R\nStandard   ER ≥ 0.32 — 4.24/day on 15m, 59.9% win, +0.2919R\nHigh       ER ≥ 0.25 — 5.45/day on 15m, 57.6% win, +0.2235R\n\nHigher is fewer and better, and the relationship is monotone across every timeframe tested — unusually clean, because it is selecting on the one thing that actually predicted outcome.",
      group=G_ENG)
 i_dir = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
+i_erLen = input.int(20, "Regime Lookback (bars)", minval=5, maxval=100, group=G_ENG,
+     tooltip="Window for the efficiency ratio and for the direction of the leg being aligned to.")
+i_align = input.bool(true, "Only trade WITH the leg in progress", group=G_ENG,
+     tooltip="Requires the trade direction to match price over the regime lookback.\n\nThis is the single highest-value condition in the engine. On 5m: the efficiency-ratio gate ALONE moved mean R from -0.002 to -0.010 (nothing). Adding alignment moved it to +0.200 at t=3.99. Filtering for a directional market and then trading against it is worth less than not filtering at all.")
+i_showReg = input.bool(true, "Tint background by regime", group=G_ENG)
 
 i_useMss   = input.bool(true, "MSS — structure break",        group=G_TRIG)
 i_useFvg   = input.bool(true, "FVG retest",                   group=G_TRIG)
@@ -102,9 +117,12 @@ i_showPlan  = input.bool(true,  "Show entry / SL / TP lines", group=G_DISP)
 i_dash      = input.bool(true,  "Show dashboard",    group=G_DISP)
 i_dashPos   = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=G_DISP)
 
-// Frequency preset — score threshold and cooldown move together.
-needScore = i_freq == "High" ? 3 : 4
-cooldown  = i_freq == "High" ? 4 : i_freq == "Standard" ? 3 : 6
+// v2.0: frequency sets the REGIME threshold. The quality score is held at a
+// light floor of 1 — measured, moving it to 2 changed mean R by 0.002R and cost
+// a third of the trades, so it is not the selector any more.
+erMin     = i_freq == "High" ? 0.25 : i_freq == "Standard" ? 0.32 : 0.40
+needScore = 1
+cooldown  = 3
 allowLong  = i_dir != "Short only"
 allowShort = i_dir != "Long only"
 
@@ -122,6 +140,25 @@ body   = math.abs(close - open)
 // Hoisted here because the FVG store below mutates on confirmed bars only, and
 // that block runs before the trigger section that also reads this.
 conf = barstate.isconfirmed
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REGIME — Kaufman efficiency ratio
+// ─────────────────────────────────────────────────────────────────────────────
+// Net movement over the window divided by the total path travelled to get there.
+// A straight leg scores near 1; the same range covered by thrashing back and
+// forth scores near 0. Reads closed history only.
+//
+// This is the measurement that separated v1.0's profitable trades from its
+// noise: everything it earned came from the top two quintiles, which held 2.6%
+// of its trades.
+// ═══════════════════════════════════════════════════════════════════════════════
+erNet  = math.abs(close - close[i_erLen])
+erPath = math.sum(math.abs(close - close[1]), i_erLen)
+effRatio = erPath > 0 ? erNet / erPath : 0.0
+legUp   = close > close[i_erLen]
+inTrend = effRatio >= erMin
+
+bgcolor(i_showReg and inTrend ? color.new(legUp ? #00E676 : #FF1744, 93) : na, title="Regime")
 
 var bool volSeen = false
 if nz(volume) > 0
@@ -394,8 +431,16 @@ riskBear  = slBear - close
 riskOkBull = riskBull >= atr * i_minRisk * 0.5
 riskOkBear = riskBear >= atr * i_minRisk * 0.5
 
-buySignal  = anyBull and allowLong  and barBull and coolOk and riskOkBull and scoreBull >= needScore
-sellSignal = anyBear and allowShort and barBear and coolOk and riskOkBear and scoreBear >= needScore
+// v2.0 REGIME GATE. Two conditions, and the second matters more than the first:
+// on 5m the efficiency-ratio gate alone moved mean R from -0.002 to -0.010,
+// which is nothing. Adding the alignment requirement moved it to +0.200 at
+// t=3.99. Screening for a directional market and then trading against it is
+// worth less than not screening at all.
+regimeOkBuy  = inTrend and (not i_align or legUp)
+regimeOkSell = inTrend and (not i_align or not legUp)
+
+buySignal  = anyBull and allowLong  and barBull and coolOk and riskOkBull and scoreBull >= needScore and regimeOkBuy
+sellSignal = anyBear and allowShort and barBear and coolOk and riskOkBear and scoreBear >= needScore and regimeOkSell
 
 // ── Targets. Fixed R multiples, pulled IN to structure only when structure is
 // nearer and still at least 0.6R away. A target can therefore never sit further
@@ -540,7 +585,7 @@ if i_dash and barstate.islast
     yel = color.new(#FFC400, 0)
     wht = color.new(#FFFFFF, 0)
 
-    table.cell(dash, 0, 0, "ME SCALP ST v1.0 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME SCALP ST v2.0 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
     table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
 
@@ -558,11 +603,13 @@ if i_dash and barstate.islast
     table.cell(dash, 2, 3, anyBear ? bearName + " ×" + str.tostring(nTrigBear) : "—", text_color=anyBear ? red : dim, text_size=size.tiny)
 
     // Which of the five score dimensions are live right now.
-    dimTxtB = (sParticip == 1 ? "vol " : "") + (sBody == 1 ? "body " : "") + (sCloseB == 1 ? "close " : "") + (sStackB == 1 ? "stack " : "") + (sLocB == 1 ? "loc" : "")
-    dimTxtS = (sParticip == 1 ? "vol " : "") + (sBody == 1 ? "body " : "") + (sCloseS == 1 ? "close " : "") + (sStackS == 1 ? "stack " : "") + (sLocS == 1 ? "loc" : "")
-    table.cell(dash, 0, 4, "Scoring", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    table.cell(dash, 1, 4, dimTxtB == "" ? "—" : dimTxtB, text_color=dim, text_size=size.tiny)
-    table.cell(dash, 2, 4, dimTxtS == "" ? "—" : dimTxtS, text_color=dim, text_size=size.tiny)
+    // v2.0: the row that decides almost everything. If this says CHOP the engine
+    // is deliberately standing aside, and that is the correct behaviour — it is
+    // where 97% of v1.0's trades went and where none of its edge was.
+    regTxt = inTrend ? (legUp ? "TREND ▲" : "TREND ▼") : "CHOP"
+    table.cell(dash, 0, 4, "Regime (ER≥" + str.tostring(erMin, "#.00") + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 4, regTxt + "  " + str.tostring(math.round(effRatio, 2)), text_color=inTrend ? (legUp ? grn : red) : yel, text_size=size.tiny)
+    table.cell(dash, 2, 4, inTrend ? (i_align ? (legUp ? "longs only" : "shorts only") : "both") : "standing aside", text_color=dim, text_size=size.tiny)
 
     table.cell(dash, 0, 5, "Risk (× ATR)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     table.cell(dash, 1, 5, str.tostring(math.round(riskBull / math.max(atr, 1e-9), 2)), text_color=riskOkBull ? grn : dim, text_size=size.tiny)
@@ -602,14 +649,13 @@ if sellSignal and not inTrade[1]
 alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
 alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // STRATEGY EXECUTION
 // ─────────────────────────────────────────────────────────────────────────────
 // Quantities are ABSOLUTE and fixed at entry. strategy.exit qty_percent is a
 // percentage of the CURRENT position, so re-issuing it every bar liquidates the
 // remainder at TP1 — a defect that silently flattered every ME Pro backtest
-// until v3.5.27. Each leg is issued once, tracked by its own flag.
+// until v3.5.27. Each leg is issued once and tracked by its own flag.
 // ═══════════════════════════════════════════════════════════════════════════════
 var float stQ1 = na
 var float stQ2 = na
@@ -646,7 +692,6 @@ if strategy.position_size < 0
     if not stL3
         strategy.exit("S3", from_entry="Short", qty=stQ3, limit=eT3, stop=eSl)
 
-// mark a leg filled once its target has traded, so it is never re-issued
 if strategy.position_size != 0 and conf
     bool r1 = tradeBuy ? high >= eT1 : low <= eT1
     bool r2 = tradeBuy ? high >= eT2 : low <= eT2
@@ -658,6 +703,5 @@ if strategy.position_size != 0 and conf
     if r3
         stL3 := true
 
-// time stop closes whatever remains
 if i_timeStop > 0 and strategy.position_size != 0 and not na(eBar) and (bar_index - eBar) >= i_timeStop
     strategy.close_all(comment="time")
