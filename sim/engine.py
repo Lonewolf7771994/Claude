@@ -88,6 +88,15 @@ class Cfg:
     vwap_max: float = 3.00
     rsi_buy: tuple = (40, 78)
     rsi_sell: tuple = (22, 60)
+    v21: bool = False            # reproduce v3.5.21 exactly: no v3.5.29 risk floor
+    # ── Scalp-only loosening levers (all no-ops unless loose=True and mode=Scalp)
+    loose: bool = False
+    loose_vol: float = 0.75      # Scalp volume floor  (v3.5.21 clamps to 1.00)
+    loose_body: float = 0.20     # Scalp body/ATR floor (v3.5.21 clamps to 0.30)
+    loose_rr: tuple = (0.8, 0.7, 0.6)   # Selective / Standard / High
+    loose_max_risk: float = 2.50 # Scalp max risk in ATR (v3.5.21 caps at 2.00)
+    loose_clamp_risk: bool = True  # stop beyond the cap -> clamp, do not block
+    loose_vwap_max: float = 4.0  # Scalp overextension guard (v3.5.21 uses 3.0)
 
     def eff(self):
         s = self.mode == "Scalp"
@@ -109,8 +118,19 @@ class Cfg:
             min_conf     = (self.min_conf if hi else max(self.min_conf,1)) if s else self.min_conf,
             min_rr       = min(self.min_rr, .7 if hi else .9 if st else 99.) if s else self.min_rr,
         )
+        if s and self.loose:
+            e["vol_floor"] = min(self.vol_floor, self.loose_vol)
+            e["body_atr"]  = min(self.body_atr,  self.loose_body)
+            e["min_rr"]    = min(self.min_rr, self.loose_rr[2] if hi else
+                                              self.loose_rr[1] if st else self.loose_rr[0])
         buf_worst = min(self.sl_atr, self.scalp_sl_cap) * 1.3          # v3.5.29
-        e["max_risk"] = max(min(self.max_risk, self.scalp_max_risk), buf_worst + .75) if s else self.max_risk
+        if s and self.loose:
+            e["max_risk"] = min(self.max_risk, self.loose_max_risk)
+            return e
+        if self.v21:
+            e["max_risk"] = min(self.max_risk, self.scalp_max_risk) if s else self.max_risk
+        else:
+            e["max_risk"] = max(min(self.max_risk, self.scalp_max_risk), buf_worst + .75) if s else self.max_risk
         return e
 
 # ── TP ladder: port of f_tpLevels incl. the v3.5.21 spacing and v3.5.35 ceiling
@@ -299,7 +319,8 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
         # v2: the two gates the first harness omitted, and they are not minor —
         # mode IS the only mode gate Scalp has, and Selective demands conf >= 1.
         vw = S.get("vwap"); vext = abs(c-vw)/A if vw else 0.0
-        notExtended = vext <= cfg.vwap_max
+        vwmax = cfg.loose_vwap_max if (scalp and cfg.loose) else cfg.vwap_max
+        notExtended = vext <= vwmax
         if not notExtended: why.append("mode")
         above = (c > vw) if vw else False
         hb = S.get("htfBull")
@@ -325,6 +346,12 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
             sl = min(anchor-buf, c-refA*0.5) if is_buy else max(anchor+buf, c+refA*0.5)
         near = refA*e["min_risk"]
         sl = min(sl, c-near) if is_buy else max(sl, c+near)      # near-side clamp only
+        # Scalp-only: a structural stop past the cap becomes a volatility stop AT
+        # the cap instead of killing the setup. `risk` is the 2nd biggest sole
+        # blocker in v3.5.21 Scalp (483 of them on 15m Selective).
+        if scalp and cfg.loose and cfg.loose_clamp_risk:
+            far = refA*e["max_risk"]
+            sl = max(sl, c-far) if is_buy else min(sl, c+far)
         risk = max((c-sl) if is_buy else (sl-c), A*0.1)
         if not (refA*e["min_risk"] <= risk <= refA*e["max_risk"]): why.append("risk")
         if ref is not None and ((c-ref) if is_buy else (ref-c)) > A*cfg.max_chase: why.append("chase")
