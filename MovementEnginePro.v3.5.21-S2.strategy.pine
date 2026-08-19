@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.21-S3 (Scalp loosened + trigger diagnostics)
+// © ME Institutional — Movement Engine Pro v3.5.21-S4 (intrabar delta, opt-in)
 //@version=6
-strategy("ME Pro Strategy v3.5.21-S3", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.21-S4", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.21-S2 — THREE MORE SCALP RESTRICTIONS REMOVED.
@@ -853,6 +853,13 @@ i_wickMax    = input.float(2.0,"Max Wick/Body Ratio",
 i_cvdReset   = input.bool(false, "Reset CVD Each Session (daily anchor)",
      tooltip="Anchors CVD to session open. Default OFF because reset creates 20-bar noisy EMA readings.",
      group=G_OF)
+i_ltfDelta   = input.bool(false, "Intrabar Delta (lower-timeframe order flow)",
+     tooltip="OFF (default) = the engine behaves EXACTLY as before. Every order-flow reading falls back to its original formula and no signal changes.\n\nON = the three order-flow readings are rebuilt from the bars INSIDE each chart bar instead of from the chart bar's shape.\n\nWhy this matters: two of the four 'order flow' readings never touched volume at all. OF Pressure was (close-low)/range and Body Conviction was (close-open)/range — both are candle geometry. CVD assigned the ENTIRE bar's volume to buyers whenever the bar closed up, so a bar that closed green with eleven red minutes inside it scored as fully bullish.\n\nWith this on, a 15m bar is measured from its fifteen 1-minute bars: volume on up-minutes vs down-minutes. Fifteen directional samples instead of one.\n\nHONEST LIMIT: this is the tick rule, not true bid/ask footprint. Pine has no access to the tape, the DOM, or aggressor side on a standard chart, so no indicator can give you real delta. This is closer, not real.\n\nFalls back automatically, bar by bar, wherever intrabar data is unavailable (TradingView caps total intrabars, so deep history may return none) or where the symbol reports no volume.\n\nCosts load time — it requests three extra series.",
+     group=G_OF)
+i_ltfRes     = input.string("Auto", "Intrabar Resolution",
+     options=["Auto","5S","15S","30S","1","3","5","15"],
+     tooltip="Auto picks roughly 12-20 samples per chart bar: 5S under 1m, 15S up to 5m, 1m up to 15m, 5m up to 1H, 15m above.\nFiner resolutions give better delta but hit TradingView's intrabar cap sooner, which shortens how far back the data reaches.",
+     group=G_OF)
 
 // ── Momentum Stack ───────────────────────────────────────────────────────────
 i_momFilter  = input.bool(true, "Enable EMA Momentum Filter (8/21)",
@@ -1096,7 +1103,62 @@ atrBase   = math.max(atr14, atr50)
 
 range_   = math.max(high - low, 1e-9)
 closePos = (close - low) / range_
-buyPct   = closePos * 100.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.21-S4 INTRABAR DELTA — order flow from inside the bar (opt-in, default OFF)
+// ─────────────────────────────────────────────────────────────────────────────
+// What the engine called "order flow" was, in three of four readings, not order
+// flow at all:
+//
+//   OF Pressure      (close-low)/range        candle geometry, no volume
+//   Body Conviction  (close-open)/range       candle geometry, no volume
+//   CVD              close>open ? +vol : -vol whole bar's volume, signed by
+//                                             the candle's direction
+//
+// So a 15m bar that closed one tick green after eleven red minutes counted as
+// fully bullish participation. This rebuilds all three from the bars INSIDE the
+// chart bar: volume traded on up-intrabars against volume on down-intrabars.
+// Fifteen directional samples on a 15m chart instead of one.
+//
+// HONEST LIMIT, stated because the label "order flow" oversells it: this is the
+// tick rule. Pine on a standard chart has no bid, no ask, no tape and no DOM, so
+// aggressor side cannot be known and no indicator can give true delta. This is
+// materially closer to it, and it is not it.
+//
+// SAFETY: request.security_lower_tf returns an empty array wherever intrabar
+// data is unavailable — TradingView caps total intrabars, so deep history is
+// often empty. Every reading below falls back to its ORIGINAL formula bar by
+// bar whenever that happens, and unconditionally when the input is off. With
+// i_ltfDelta false the engine is bit-identical to v3.5.21-S3.
+// ═══════════════════════════════════════════════════════════════════════════════
+ltfAutoRes = timeframe.in_seconds() <= 60 ? "5S" : timeframe.in_seconds() <= 300 ? "15S" : timeframe.in_seconds() <= 900 ? "1" : timeframe.in_seconds() <= 3600 ? "5" : "15"
+ltfRes     = i_ltfRes == "Auto" ? ltfAutoRes : i_ltfRes
+
+// request.* must sit at global scope, so these are always requested; the input
+// decides whether the result is USED.
+ltfO = request.security_lower_tf(syminfo.tickerid, ltfRes, open)
+ltfC = request.security_lower_tf(syminfo.tickerid, ltfRes, close)
+ltfV = request.security_lower_tf(syminfo.tickerid, ltfRes, volume)
+
+ltfUp = 0.0
+ltfDn = 0.0
+ltfN  = array.size(ltfC)
+if i_ltfDelta and ltfN > 0 and array.size(ltfO) == ltfN and array.size(ltfV) == ltfN
+    for k = 0 to ltfN - 1
+        subO = array.get(ltfO, k)
+        subC = array.get(ltfC, k)
+        subV = nz(array.get(ltfV, k))
+        if subC > subO
+            ltfUp := ltfUp + subV
+        else if subC < subO
+            ltfDn := ltfDn + subV
+
+ltfTot = ltfUp + ltfDn
+// A bar with zero classified volume carries no information — fall back rather
+// than emit 50/50, which would read as a neutral bar the gates might accept.
+ltfOk  = i_ltfDelta and ltfTot > 0
+
+buyPct   = ltfOk ? 100.0 * ltfUp / ltfTot : closePos * 100.0
 
 // v3.5.2: symbols with no volume feed (many indices / FX / CFD tickers)
 // previously produced volOk=false, deltaRatio=na and a flat CVD — no mode
@@ -1118,7 +1180,10 @@ volOk  = not volDataSeen or relVol >= effVolFloor
 // the first one restated, so the stack had one measurement, not two.
 // (close−open)/range is independent of where in the range the bar closed:
 // a doji closing at its high scores ~0 here and is correctly rejected.
-deltaRatio    = (close - open) / range_
+// v3.5.21-S4: with intrabar delta on this becomes the volume BALANCE inside the
+// bar, on the same -1..+1 scale the original produced, so effDeltaFloor needs no
+// change. Off, it is the original geometry.
+deltaRatio    = ltfOk ? (ltfUp - ltfDn) / ltfTot : (close - open) / range_
 deltaBullOk   = deltaRatio >=  effDeltaFloor
 deltaBearOk   = deltaRatio <= -effDeltaFloor
 
@@ -1129,7 +1194,7 @@ adaptThresh = i_ofAdaptive and volChop and not isScalp ? effOfThresh + 5.0 : eff
 
 // v3.3: doji contributes zero to CVD (was volume*(2*closePos-1) which drifted EMAs)
 sessionChange = ta.change(time("D")) != 0
-cvdVol = close > open ? nz(volume) : close < open ? -nz(volume) : 0.0
+cvdVol = ltfOk ? (ltfUp - ltfDn) : (close > open ? nz(volume) : close < open ? -nz(volume) : 0.0)
 var float cvd = 0.0
 if i_cvdReset and sessionChange
     cvd := 0.0
@@ -2406,7 +2471,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.21-S3 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.21-S4 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -2443,7 +2508,11 @@ if i_dashboard and barstate.islast
 
     ofBuyTxt  = str.tostring(math.round(buyPct,         1)) + "% / " + str.tostring(math.round(adaptThresh, 0)) + "%"
     ofSellTxt = str.tostring(math.round(100.0 - buyPct, 1)) + "% / " + str.tostring(math.round(adaptThresh, 0)) + "%"
-    table.cell(dash, 0, 8, "OF (adaptive)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    // v3.5.21-S4: name the SOURCE of the order-flow reading. Silent fallback
+    // would be worse than no feature — if intrabar data is unavailable the row
+    // must say so rather than let a candle-geometry number pass as delta.
+    ofSrcTxt = not i_ltfDelta ? "OF (bar shape)" : ltfOk ? "OF (" + ltfRes + " delta ×" + str.tostring(ltfN) + ")" : "OF (⚠ no intrabar)"
+    table.cell(dash, 0, 8, ofSrcTxt, text_color=i_ltfDelta and not ltfOk ? yel : dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 8, ofBuyTxt,  ofBull ? grn : buyPct  > 50 ? wht : dim)
     f_cell(2, 8, ofSellTxt, ofBear ? red_ : buyPct < 50 ? wht : dim)
 
