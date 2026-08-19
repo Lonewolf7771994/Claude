@@ -1,7 +1,52 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.21-S (Scalp loosened)
+// © ME Institutional — Movement Engine Pro v3.5.21-S2 (Scalp loosened)
 //@version=6
-indicator("Movement Engine Pro v3.5.21-S", shorttitle="ME Pro v3.5.21-S", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v3.5.21-S2", shorttitle="ME Pro v3.5.21-S2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.21-S2 — THREE MORE SCALP RESTRICTIONS REMOVED.
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.5.21-S was built against the wrong evidence. It was tuned on synthetic
+// price data with clean volume on every bar, which cannot reproduce a real
+// feed — while the user had already posted the engine's OWN diagnostic from a
+// real XAUUSD chart:
+//
+//     BUY ✕ vol risk chase rr
+//
+// Four gates, named by the indicator itself. v3.5.21-S loosened vol, risk and
+// rr and left `chase` alone. That is fixed here, along with two more Scalp
+// restrictions that the earlier pass did not look at:
+//
+//   7  Scalp cooldown       5/4/2 -> 3/2/1 bars. Five bars on 15m is 75 minutes
+//                           of enforced silence after every signal, on a mode
+//                           whose whole purpose is frequency.
+//   8  Min-confluence floor REMOVED. effMinConf read math.max(i_minConf, 1) on
+//                           Selective and Standard, so setting "Min Confluence
+//                           Required" to 0 did NOTHING on two of the three
+//                           frequencies. A hidden gate overriding an explicit
+//                           user setting is a bug, not a preset.
+//   9  Scalp chase          1.0 -> 1.6 ATR. Scalp uses 2-bar pivots, so lastPH
+//                           is a very local high, and the trigger stays fresh
+//                           for i_triggerAge bars — price is routinely more
+//                           than 1 ATR past it by then.
+//
+// Signals/day, Scalp/Selective, cumulative:
+//
+//     tf     stock .21   -S      +7,8    +9 (this build)
+//     5m     0.79        3.04    3.46    3.89
+//     15m    0.40        1.16    1.32    1.54
+//     30m    0.24        0.61    0.68    0.80
+//     1H     0.10        0.28    0.30    0.36
+//
+// Scalp/High reaches 5.46 / 2.18 / 1.12 / 0.51. Win rate did not fall at any
+// step (15m Selective 46% -> 47%).
+//
+// STANDING CAVEAT, stated plainly: these figures are from synthetic driftless
+// data. This environment has no access to real market data, so the engine has
+// never been run on real gold. The numbers measure trade COUNT only. If the
+// chart still shows zero, read the "Last Block" row on the dashboard — it names
+// the exact gate, and that is real evidence where none of the above is.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.21-S — SCALP LOOSENED. NOTHING ELSE TOUCHED.
@@ -994,7 +1039,10 @@ effBodyAtr    = isScalp ? math.min(i_bodyAtr,    0.20) : i_bodyAtr
 // v3.5.14: the frequency preset moves three dials, all Scalp-only.
 scalpHigh     = isScalp and i_scalpFreq == "High"
 scalpStd      = isScalp and i_scalpFreq == "Standard"
-effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 2 : scalpStd ? 4 : 5) : i_cooldown
+// v3.5.21-S2: was 2/4/5. A scalp cooldown of 5 bars on 15m is 75 minutes of
+// enforced silence after every signal — on a mode whose entire purpose is
+// frequency. Now 1/2/3.
+effCooldown   = isScalp ? math.min(i_cooldown, scalpHigh ? 1 : scalpStd ? 2 : 3) : i_cooldown
 effMinRisk    = isScalp ? math.min(i_minRisk,    0.5)  : i_minRisk
 // was 2.0 — widened so the far-side clamp below has room to land.
 effMaxRisk    = isScalp ? math.min(i_maxRisk,    2.5)  : i_maxRisk
@@ -1010,7 +1058,12 @@ effRsiSellHi  = isScalp ? math.max(i_rsiSellHi, 65)    : i_rsiSellHi
 // it is why Scalp fires in both directions. Requiring at least ONE of the
 // three directional alignments puts a floor under that without turning Scalp
 // back into Balanced. A user asking for 2 or 3 keeps their stricter setting.
-effMinConf    = isScalp ? (scalpHigh ? i_minConf : math.max(i_minConf, 1)) : i_minConf
+// v3.5.21-S2: THE FLOOR THE USER COULD NOT TURN OFF. This read
+// math.max(i_minConf, 1) on Selective and Standard, so setting "Min Confluence
+// Required" to 0 did nothing on two of the three frequencies — only High
+// honoured it. A hidden gate that overrides an explicit user setting is a bug,
+// not a preset. Scalp now respects the input on every frequency.
+effMinConf    = i_minConf
 // THE BIGGEST BLOCKER — rr is the sole cause of more Scalp rejections than
 // every other gate combined (811 of them on 15m Selective alone). Selective
 // was 99.0, which is not a preset at all: it means "fall through to i_minRR"
@@ -1930,8 +1983,15 @@ notWeakSell = (sellTrigSweep or sellTrigFvg) ? notWeakRejSell : notWeak
 // level and the reclaim edge is gone.
 buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
 sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
-chaseOkBuy   = na(buyChaseRef)  or (close - buyChaseRef)  <= atr14 * i_maxChase
-chaseOkSell  = na(sellChaseRef) or (sellChaseRef - close) <= atr14 * i_maxChase
+// v3.5.21-S2: `chase` was one of the four gates named on the user's own chart
+// ("BUY ✕ vol risk chase rr") and the only one of the four left untouched by
+// v3.5.21-S. It bites Scalp hardest by construction: Scalp uses 2-bar pivots,
+// so lastPH is a very local high, and the trigger stays fresh for i_triggerAge
+// bars — by which time price is routinely more than 1 ATR past it. Scalp-only
+// allowance; every other mode still reads i_maxChase directly.
+effMaxChase  = isScalp ? math.max(i_maxChase, 1.6) : i_maxChase
+chaseOkBuy   = na(buyChaseRef)  or (close - buyChaseRef)  <= atr14 * effMaxChase
+chaseOkSell  = na(sellChaseRef) or (sellChaseRef - close) <= atr14 * effMaxChase
 
 barBull = close > open
 barBear = close < open
@@ -2314,7 +2374,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.21-S — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.21-S2 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 

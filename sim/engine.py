@@ -97,6 +97,9 @@ class Cfg:
     loose_max_risk: float = 2.50 # Scalp max risk in ATR (v3.5.21 caps at 2.00)
     loose_clamp_risk: bool = True  # stop beyond the cap -> clamp, do not block
     loose_vwap_max: float = 4.0  # Scalp overextension guard (v3.5.21 uses 3.0)
+    loose_min_conf: bool = True  # drop the unturnoffable conf>=1 floor on Sel/Std
+    loose_cd: tuple = (3, 2, 1)  # Scalp cooldown bars: Selective / Standard / High
+    loose_max_chase: float = 1.6 # Scalp entry extension past trigger, in ATR
 
     def eff(self):
         s = self.mode == "Scalp"
@@ -123,6 +126,10 @@ class Cfg:
             e["body_atr"]  = min(self.body_atr,  self.loose_body)
             e["min_rr"]    = min(self.min_rr, self.loose_rr[2] if hi else
                                               self.loose_rr[1] if st else self.loose_rr[0])
+            e["cooldown"]  = min(self.cooldown, self.loose_cd[2] if hi else
+                                                self.loose_cd[1] if st else self.loose_cd[0])
+            if self.loose_min_conf:
+                e["min_conf"] = self.min_conf
         buf_worst = min(self.sl_atr, self.scalp_sl_cap) * 1.3          # v3.5.29
         if s and self.loose:
             e["max_risk"] = min(self.max_risk, self.loose_max_risk)
@@ -354,7 +361,8 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
             sl = max(sl, c-far) if is_buy else min(sl, c+far)
         risk = max((c-sl) if is_buy else (sl-c), A*0.1)
         if not (refA*e["min_risk"] <= risk <= refA*e["max_risk"]): why.append("risk")
-        if ref is not None and ((c-ref) if is_buy else (ref-c)) > A*cfg.max_chase: why.append("chase")
+        mchase = cfg.loose_max_chase if (scalp and cfg.loose) else cfg.max_chase
+        if ref is not None and ((c-ref) if is_buy else (ref-c)) > A*mchase: why.append("chase")
 
         struct = (PH+[None]) if is_buy else (PL+[None])
         struct = [x for x in struct if x is not None]
