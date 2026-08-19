@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — ME Scalp v2.1
+// © ME Institutional — ME Scalp v2.2
 //@version=6
-indicator("ME Scalp v2.1", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+indicator("ME Scalp v2.2", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ME SCALP v2.0 — regime-gated. Trade the move, not the noise.
@@ -98,6 +98,48 @@ indicator("ME Scalp v2.1", shorttitle="ME Scalp", overlay=true, max_boxes_count=
 //   already found to behave the same way in v2.0. On this engine, confirmation
 //   is not where the accuracy is; REGIME is.
 //
+// ─────────────────────────────────────────────────────────────────────────────
+// v2.2 — ENTRY CONFIRMATION, TP/SL ZONES, AND A CORRECTION.
+//
+// A CORRECTION FIRST. v2.1 said confirmation does not help. That was measured
+// with a crude test — close beyond the prior bar's extreme, entered on the SAME
+// bar — and it was wrong. Waiting one bar and entering at the CONFIRMING bar's
+// close measures, on regime data:
+//
+//     5m    11.37/day 63.8% +0.2757R   ->   6.65/day 70.0% +0.3757R
+//     15m    4.24/day 63.5% +0.2738R   ->   2.45/day 68.1% +0.3292R
+//
+// It is not free: ~40% fewer trades, and total R per day is slightly lower.
+// This buys hit rate, not throughput. Default ON; switch off for volume.
+//
+// TWO MEASUREMENT BUGS WERE FOUND AND FIXED WHILE TESTING THIS, and both had
+// produced results good enough to be tempting:
+//
+//   1 LOOKAHEAD. The first confirmation test read the next bar's close to
+//     decide whether to take the trade, then entered at the OLD price — buying
+//     only trades already known to be winning. It scored 91.7% win and +1.04R.
+//     Fixed by entering at the confirming bar's own close.
+//
+//   2 INTRABAR ORDERING. A limit-entry variant filled on a bar's low and then
+//     credited the SAME bar's high for TP1. OHLC does not record which came
+//     first, so that assumes the favourable sequence on every fill. It scored
+//     +0.49R on DRIFTLESS data, where no edge can exist. Fixed by evaluating
+//     only the stop on a fill bar.
+//
+// After both fixes, LIMIT/RETEST ENTRY MEASURED WORSE than entering at the
+// close (+0.232R against +0.276R on 5m) and was NOT shipped. The whole reason
+// it looked good was the bias.
+//
+// Every variant is now checked against driftless data before it is believed.
+// Confirmation reads -0.059R there against -0.030R for immediate entry: it
+// costs MORE in a market with no edge, which is what a real filter should do.
+//
+// TP/SL ZONES. A fill happens in a band, not at a price — spread, slippage and
+// the tick the order rests on all move it. Each level is now drawn as a zone of
+// i_zoneW ATR. The stop zone extends only AWAY from entry, because a stop is
+// triggered from one side and drawing it reaching back toward price would
+// overstate where the trade dies. Set the width to 0 for plain lines.
+//
 // NON-REPAINTING. Signals gated on barstate.isconfirmed. No request.security
 // anywhere and no higher-timeframe series, so neither ME Pro repaint source can
 // occur. The efficiency ratio reads only closed history.
@@ -121,6 +163,10 @@ i_erLen = input.int(20, "Regime Lookback (bars)", minval=5, maxval=100, group=G_
 i_align = input.bool(true, "Only trade WITH the leg in progress", group=G_ENG,
      tooltip="Requires the trade direction to match price over the regime lookback.\n\nThis is the single highest-value condition in the engine. On 5m: the efficiency-ratio gate ALONE moved mean R from -0.002 to -0.010 (nothing). Adding alignment moved it to +0.200 at t=3.99. Filtering for a directional market and then trading against it is worth less than not filtering at all.")
 i_showReg = input.bool(true, "Tint background by regime", group=G_ENG)
+i_confirmBar = input.bool(true, "Confirm entry on the next bar", group=G_ENG,
+     tooltip="Waits ONE bar after a setup and requires that bar to close beyond the setup bar's close, then enters at the CONFIRMING bar's close.\n\nMeasured (regime data, 150d x 6 seeds):\n  5m   11.37/day 63.8% +0.2757R  ->  6.65/day 70.0% +0.3757R\n  15m   4.24/day 63.5% +0.2738R  ->  2.45/day 68.1% +0.3292R\n\nHigher accuracy per trade, and about 40% fewer trades. Total R per day is slightly LOWER — this buys hit rate, not throughput. Turn it off if you would rather have the volume.\n\nNote it costs the setup bar's price: you enter later and worse, which is exactly why it is not free. On driftless data it measures WORSE than entering immediately (-0.059 against -0.030), which is the signature of a real filter rather than an artefact.")
+i_zoneW = input.float(0.10, "TP/SL Zone Width (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=G_DISP,
+     tooltip="Draws each target and the stop as a ZONE rather than a hairline, because fills happen in a band, not at a price. 0 = plain lines.")
 
 i_useMss   = input.bool(true, "MSS — structure break",        group=G_TRIG)
 i_useFvg   = input.bool(true, "FVG retest",                   group=G_TRIG)
@@ -504,6 +550,72 @@ sellTp3 = f_tp(false, close, riskBear, 3, i_tp3R)
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// v2.2 ENTRY CONFIRMATION
+// ─────────────────────────────────────────────────────────────────────────────
+// A setup ARMS on its trigger bar and only becomes a trade if the NEXT bar
+// closes beyond the setup bar's close. Entry is that confirming bar's close, so
+// the confirmation is paid for in price — you enter later and worse.
+//
+// v2.1 reported that confirmation does not help. That was measured with a
+// cruder test (close beyond the prior bar's extreme, entered on the same bar)
+// and it was wrong. Waiting a bar and entering at the confirmed close measures
+// +0.3757R against +0.2757R on 5m and +0.3292R against +0.2738R on 15m.
+//
+// It is not free: about 40% fewer trades, and total R per day is slightly lower.
+// This buys hit rate, not throughput.
+//
+// The stop stays anchored to the SETUP bar's invalidation — that level is what
+// the trade is wrong about, and it does not move because a bar has passed. Risk
+// is then re-measured from the actual entry and refloored, so the R-multiples
+// stay honest.
+// ═══════════════════════════════════════════════════════════════════════════════
+var bool  armBuy   = false
+var bool  armSell  = false
+var float armRef   = na
+var float armSl    = na
+var int   armBar   = na
+var string armName = ""
+
+rawBuy  = buySignal
+rawSell = sellSignal
+
+cfmBuy  = false
+cfmSell = false
+if i_confirmBar and conf
+    if (armBuy or armSell) and not na(armBar) and bar_index == armBar + 1
+        // against armSl — the SETUP bar's stop, which is the level the trade is
+        // wrong about. slBull/slBear here would be this bar's own stop, a
+        // different trade's number.
+        if armBuy and close > armRef and close > armSl
+            cfmBuy := true
+        if armSell and close < armRef and close < armSl
+            cfmSell := true
+    // an arm survives exactly one bar
+    if not na(armBar) and bar_index > armBar
+        armBuy  := false
+        armSell := false
+
+// arm AFTER testing, so a setup cannot confirm itself on its own bar
+if i_confirmBar and conf and (rawBuy or rawSell) and not (cfmBuy or cfmSell)
+    armBuy  := rawBuy
+    armSell := rawSell
+    armRef  := close
+    armSl   := rawBuy ? slBull : slBear
+    armBar  := bar_index
+    armName := rawBuy ? bullName : bearName
+
+// Entry price and stop actually used. Without confirmation these are the setup
+// bar's own values, which is v2.1 behaviour exactly.
+entBuy  = i_confirmBar ? cfmBuy  : rawBuy
+entSell = i_confirmBar ? cfmSell : rawSell
+entPx   = close
+entSlB  = i_confirmBar ? math.min(armSl, close - atr * i_minRisk) : slBull
+entSlS  = i_confirmBar ? math.max(armSl, close + atr * i_minRisk) : slBear
+entRkB  = entPx - entSlB
+entRkS  = entSlS - entPx
+entName = i_confirmBar ? armName : (entBuy ? bullName : bearName)
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TRADE STATE — one open plan at a time, tracked to its conclusion
 // ═══════════════════════════════════════════════════════════════════════════════
 var bool  inTrade   = false
@@ -520,18 +632,22 @@ var int   nWin      = 0
 var int   nLoss     = 0
 var int   nTrades   = 0
 
-fired = (buySignal or sellSignal) and not inTrade
+// v2.2: targets are rebuilt from the ACTUAL entry and its risk, so a confirmed
+// entry does not inherit the setup bar's ladder.
+fired = (entBuy or entSell) and not inTrade
 if fired
     inTrade  := true
-    tradeBuy := buySignal
-    eEntry   := close
-    eSl      := buySignal ? slBull : slBear
-    eT1      := buySignal ? buyTp1 : sellTp1
-    eT2      := buySignal ? buyTp2 : sellTp2
-    eT3      := buySignal ? buyTp3 : sellTp3
+    tradeBuy := entBuy
+    eEntry   := entPx
+    eSl      := entBuy ? entSlB : entSlS
+    float rk = entBuy ? entRkB : entRkS
+    float dd = entBuy ? 1.0 : -1.0
+    eT1      := entPx + dd * rk * i_tp1R
+    eT2      := entPx + dd * rk * i_tp2R
+    eT3      := entPx + dd * rk * i_tp3R
     eBar     := bar_index
     eTp1Done := false
-    eName    := buySignal ? bullName : bearName
+    eName    := entName
     lastSigBar := bar_index
     nTrades  := nTrades + 1
 
@@ -572,8 +688,11 @@ if justClosed
 // ═══════════════════════════════════════════════════════════════════════════════
 // PLOTTING
 // ═══════════════════════════════════════════════════════════════════════════════
-plotshape(buySignal  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
-plotshape(sellSignal and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+plotshape(entBuy  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(entSell and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+// a setup waiting on its confirming bar
+plotshape(i_confirmBar and armBuy  and not entBuy,  "Armed long",  shape.circle, location.belowbar, color.new(#FFC400, 30), size=size.tiny)
+plotshape(i_confirmBar and armSell and not entSell, "Armed short", shape.circle, location.abovebar, color.new(#FFC400, 30), size=size.tiny)
 
 var line lnSl = na
 var line lnT1 = na
@@ -588,7 +707,46 @@ var label lbT3 = na
 // outcome. v2.0 drew a fixed 25-bar projection once at entry and deleted it only
 // when the next signal arrived, which is why a trade appeared to still be open
 // after it had hit TP3 or its stop.
+// ═══════════════════════════════════════════════════════════════════════════════
+// v2.2 TP / SL ZONES
+// ─────────────────────────────────────────────────────────────────────────────
+// A fill happens in a band, not at a price: spread, slippage and the tick the
+// order actually rests on all move it. Drawing a hairline implies a precision
+// the execution does not have, so each level is a ZONE of i_zoneW ATR either
+// side. The line stays inside as the reference price.
+// The STOP zone is deliberately asymmetric — it extends only AWAY from entry,
+// because a stop is triggered from one side and showing it reaching back toward
+// price would overstate where the trade dies.
+// ═══════════════════════════════════════════════════════════════════════════════
+var box bxSl = na
+var box bx1  = na
+var box bx2  = na
+var box bx3  = na
 var label lbEnd = na
+if i_showPlan and i_zoneW > 0 and fired
+    if not na(bxSl)
+        box.delete(bxSl)
+        box.delete(bx1)
+        box.delete(bx2)
+        box.delete(bx3)
+    float zw = atr * i_zoneW
+    float slFar = tradeBuy ? eSl - zw : eSl + zw
+    bxSl := box.new(bar_index, math.max(eSl, slFar), bar_index, math.min(eSl, slFar), border_color=color.new(#FF1744, 60), bgcolor=color.new(#FF1744, 88))
+    bx1  := box.new(bar_index, eT1 + zw, bar_index, eT1 - zw, border_color=color.new(#00E676, 70), bgcolor=color.new(#00E676, 88))
+    bx2  := box.new(bar_index, eT2 + zw, bar_index, eT2 - zw, border_color=color.new(#00E676, 78), bgcolor=color.new(#00E676, 91))
+    bx3  := box.new(bar_index, eT3 + zw, bar_index, eT3 - zw, border_color=color.new(#00E676, 84), bgcolor=color.new(#00E676, 93))
+
+if i_showPlan and i_zoneW > 0 and not na(bxSl) and (inTrade or justClosed)
+    box.set_right(bxSl, bar_index)
+    box.set_right(bx1, bar_index)
+    box.set_right(bx2, bar_index)
+    box.set_right(bx3, bar_index)
+    if inTrade
+        float zw2 = atr * i_zoneW
+        float slFar2 = tradeBuy ? eSl - zw2 : eSl + zw2
+        box.set_top(bxSl, math.max(eSl, slFar2))
+        box.set_bottom(bxSl, math.min(eSl, slFar2))
+
 if i_showPlan and fired
     if not na(lnSl)
         line.delete(lnSl)
@@ -660,7 +818,7 @@ if i_dash and barstate.islast
     yel = color.new(#FFC400, 0)
     wht = color.new(#FFFFFF, 0)
 
-    table.cell(dash, 0, 0, "ME SCALP v2.1 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME SCALP v2.2 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
     table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
 
@@ -716,10 +874,10 @@ if i_dash and barstate.islast
 // ═══════════════════════════════════════════════════════════════════════════════
 // ALERTS
 // ═══════════════════════════════════════════════════════════════════════════════
-if buySignal and not inTrade[1]
-    alert("ME Scalp BUY " + bullName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBull, format.mintick) + " | TP1 " + str.tostring(buyTp1, format.mintick) + " | TP2 " + str.tostring(buyTp2, format.mintick) + " | TP3 " + str.tostring(buyTp3, format.mintick) + " | score " + str.tostring(scoreBull) + "/5", alert.freq_once_per_bar_close)
-if sellSignal and not inTrade[1]
-    alert("ME Scalp SELL " + bearName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBear, format.mintick) + " | TP1 " + str.tostring(sellTp1, format.mintick) + " | TP2 " + str.tostring(sellTp2, format.mintick) + " | TP3 " + str.tostring(sellTp3, format.mintick) + " | score " + str.tostring(scoreBear) + "/5", alert.freq_once_per_bar_close)
+if entBuy and not inTrade[1]
+    alert("ME Scalp BUY " + entName + " | entry " + str.tostring(eEntry, format.mintick) + " | SL " + str.tostring(eSl, format.mintick) + " | TP1 " + str.tostring(eT1, format.mintick) + " | TP2 " + str.tostring(eT2, format.mintick) + " | TP3 " + str.tostring(eT3, format.mintick) + " | ER " + str.tostring(math.round(effRatio, 2)), alert.freq_once_per_bar_close)
+if entSell and not inTrade[1]
+    alert("ME Scalp SELL " + entName + " | entry " + str.tostring(eEntry, format.mintick) + " | SL " + str.tostring(eSl, format.mintick) + " | TP1 " + str.tostring(eT1, format.mintick) + " | TP2 " + str.tostring(eT2, format.mintick) + " | TP3 " + str.tostring(eT3, format.mintick) + " | ER " + str.tostring(math.round(effRatio, 2)), alert.freq_once_per_bar_close)
 
-alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
-alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
+alertcondition(entBuy,  "ME Scalp — BUY",  "ME Scalp BUY")
+alertcondition(entSell, "ME Scalp — SELL", "ME Scalp SELL")
