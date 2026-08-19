@@ -16,7 +16,7 @@ edge that was rejected — so the stop is defined the same way MSS/FVG/sweep
 stops are. Neither is a loosening of an existing gate.
 """
 import math
-from engine import wilder_atr, ema, rsi, sma_prior, pivots, tp_levels, resolve, Cfg
+from engine import wilder_atr, ema, rsi, sma_prior, pivots, tp_levels, resolve, Cfg, frvp
 from flow import vwap_bands, zones
 
 def triggers_v4(bars, tf_sec, k1=1.0, k2=2.0, wick=0.4, fvg_min=0.35,
@@ -26,6 +26,7 @@ def triggers_v4(bars, tf_sec, k1=1.0, k2=2.0, wick=0.4, fvg_min=0.35,
     atr=wilder_atr(h,l,c,14)
     vw,u1,l1,u2,l2 = vwap_bands(bars,k1,k2)
     Z = zones(bars, atr, fvg_min, fvg_age)
+    POC, VAH, VAL = frvp(bars)
     ph,pl = pivots(h,l,swing); sph,spl = pivots(h,l,sweep_len)
     PH=[];PL=[];SPH=SPL=None
     out=[]
@@ -55,11 +56,17 @@ def triggers_v4(bars, tf_sec, k1=1.0, k2=2.0, wick=0.4, fvg_min=0.35,
         if h[i]>=u1[i] and c[i]<u1[i] and cp<=.45: ev["sell"].append(("band",u1[i],h[i]))
         if l[i]<=l2[i] and c[i]>l2[i] and cp>=.55: ev["buy"].append(("band2",l2[i],l[i]))
         if h[i]>=u2[i] and c[i]<u2[i] and cp<=.45: ev["sell"].append(("band2",u2[i],h[i]))
+        # 5 VALUE-AREA rejection: price trades OUTSIDE the value area and closes
+        # back inside it. Promised in this module's docstring since v4 and never
+        # actually built — FRVP was only ever a filter and a TP source.
+        if VAL[i] is not None and VAH[i] is not None:
+            if l[i]<=VAL[i] and c[i]>VAL[i] and cp>=.55: ev["buy"].append(("value",VAL[i],l[i]))
+            if h[i]>=VAH[i] and c[i]<VAH[i] and cp<=.45: ev["sell"].append(("value",VAH[i],h[i]))
         out.append(ev)
-    return out, (vw,u1,l1,u2,l2), atr
+    return out, (vw,u1,l1,u2,l2), atr, (POC,VAH,VAL)
 
 def count(bars, tf_sec, **kw):
-    T,_,_ = triggers_v4(bars, tf_sec, **kw)
+    T,_,_,_ = triggers_v4(bars, tf_sec, **kw)
     tot={}; any_=0
     for e in T:
         got=False
@@ -74,7 +81,7 @@ def run_v4(bars, tf_sec, mode="Scalp", freq="Selective",
            min_risk=0.5, max_risk=3.0, sl_buf=0.30,
            min_rr=1.0, min_blend=1.3, tp1_floor=0.5, max_tp1=2.0,
            cooldown=4, tp_r=(1.0,1.5,2.0), max_tp_r=None):
-    T,(vw,u1,l1,u2,l2),atr = triggers_v4(bars, tf_sec)
+    T,(vw,u1,l1,u2,l2),atr,(POC,VAH,VAL) = triggers_v4(bars, tf_sec)
     h=[b[2] for b in bars]; l=[b[3] for b in bars]; c=[b[4] for b in bars]
     o=[b[1] for b in bars]; v=[b[5] for b in bars]
     vavg=sma_prior(v,20); htf=ema(c,50)
@@ -138,7 +145,9 @@ def run_v4(bars, tf_sec, mode="Scalp", freq="Selective",
             # coming back toward the mean. Giving it the same continuation ladder
             # as an MSS breakout measured -0.075R against MSS's -0.007R. Its
             # first target is the mean itself.
-            if name in ("band","band2"):
+            if name == "value":
+                struct=[x for x in (POC[i], vw[i]) if x is not None and (x>c[i])==is_buy]
+            elif name in ("band","band2"):
                 struct=[vw[i]]
                 for band in ((u1[i],) if is_buy else (l1[i],)):
                     struct.append(band)
