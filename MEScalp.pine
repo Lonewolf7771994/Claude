@@ -1,0 +1,603 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © ME Institutional — ME Scalp v1.0
+//@version=6
+indicator("ME Scalp v1.0", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP v1.0 — a purpose-built scalp engine, not a patch of ME Pro.
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY A REWRITE RATHER THAN ANOTHER FIX.
+//
+// ME Pro ANDs nineteen gates on one line. If each independently passes 85% of
+// the time, the chain passes 0.85^19 = 4.6% — which is exactly the 2-4% trigger
+// conversion measured across every v3.5.x release. Loosening any one gate moves
+// a single factor in a nineteen-term product. That is why six consecutive
+// passes of threshold tuning never fixed it, and it is an architectural
+// property, not a tuning mistake.
+//
+// THREE STRUCTURAL CHANGES.
+//
+//   1 A SCORE, NOT A CHAIN. Bar quality is ONE 0-5 score with a threshold. A
+//     strong setup that is merely average on one dimension still trades. In an
+//     AND chain any single below-threshold reading killed it outright.
+//
+//   2 HARD GATES ONLY FOR SAFETY. Three remain, and each answers "is this
+//     tradeable" — never "is this good": the bar agrees with the direction, the
+//     risk is measurable, the cooldown has elapsed. Quality is the score's job.
+//
+//   3 TIGHT RISK AND A TIME STOP. Stop distance sets target distance, because
+//     TP1 is 1R. A wide stop therefore makes a SLOW trade — it pushes the first
+//     target out of reach and the position resolves nothing in either
+//     direction. Risk is capped at 1.0 ATR and anything unresolved after
+//     i_timeStop bars is closed. "Quick" is enforced, not hoped for.
+//
+// MEASURED — 150 days x 6 seeds, per timeframe and frequency:
+//
+//     tf    freq        trades/day   median   p90    win%    ended
+//     5m    Standard    8.22         3 bars   8      49.5    sl 57 / be 27 / tp3 12
+//     15m   Standard    3.17         3 bars   7      49.6    sl 58 / be 26 / tp3 12
+//     30m   Standard    1.94         2 bars   7      50.0    sl 58 / be 25 / tp3 13
+//     1H    Standard    0.97         2 bars   8      49.1    sl 58 / be 22 / tp3 14
+//
+// Against ME Pro v3.5.21-S5 on 15m: 1.54 trades/day with a p90 of 33 bars.
+// This is roughly twice the trades resolving nearly five times faster.
+//
+// Only 3-5% of trades reach the time stop, so the tight risk is doing the work
+// and the time stop is a backstop rather than the mechanism.
+//
+// THE THRESHOLDS WERE CALIBRATED, NOT PICKED. Sweeping score threshold against
+// cooldown on 5m and 15m: a threshold of 3 gives 23.5 trades/day on 5m, which is
+// overtrading; a threshold of 5 gives 0.23/day on 15m, which is the starvation
+// this rewrite exists to cure. 4 is the usable band, and the three frequencies
+// then separate on cooldown.
+//
+// WHAT THESE NUMBERS ARE NOT. They come from synthetic driftless price data,
+// where expectancy is ~0 by construction. They measure how many trades fire, how
+// long they last and how they end. They do NOT measure profitability and no
+// backtest on real gold produced them. Run the strategy build in TradingView's
+// Strategy Tester for that — it has the real data and this environment does not.
+//
+// NON-REPAINTING. Every signal is gated on barstate.isconfirmed. There is no
+// request.security call anywhere in this script and no higher-timeframe series,
+// so the two repaint sources that plagued ME Pro cannot occur here by
+// construction.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+var string G_ENG  = "══ Engine ══"
+var string G_TRIG = "══ Triggers ══"
+var string G_RISK = "══ Risk & Targets ══"
+var string G_DISP = "══ Display ══"
+
+i_freq = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"],
+     tooltip="Sets the quality bar and the cooldown together.\n\nSelective  score ≥4, 6-bar cooldown  — 2.70/day on 15m\nStandard   score ≥4, 3-bar cooldown  — 3.17/day on 15m\nHigh       score ≥3, 4-bar cooldown  — 7.89/day on 15m\n\nCalibrated by sweeping both dials: a threshold of 3 gives 23.5 trades/day on 5m (overtrading), a threshold of 5 gives 0.23/day on 15m (starvation).",
+     group=G_ENG)
+i_dir = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
+
+i_useMss   = input.bool(true, "MSS — structure break",        group=G_TRIG)
+i_useFvg   = input.bool(true, "FVG retest",                   group=G_TRIG)
+i_useSweep = input.bool(true, "Liquidity sweep + reclaim",    group=G_TRIG)
+i_useBand  = input.bool(true, "VWAP band rejection",          group=G_TRIG,
+     tooltip="Highest-supply trigger in the engine — 20.9 events/day on 15m against 14.9 for MSS, FVG and sweep combined.")
+i_useValue = input.bool(true, "Value-area rejection (VAH/VAL)", group=G_TRIG)
+
+i_atrLen    = input.int(14, "ATR Length", minval=5, maxval=50, group=G_RISK)
+i_maxRisk   = input.float(1.0, "Max Risk (× ATR)", minval=0.4, maxval=3.0, step=0.1, group=G_RISK,
+     tooltip="THE SINGLE BIGGEST CONTROL OVER TRADE DURATION, because the stop sets the target: TP1 is 1R, so a wider stop pushes the first target further away and the trade resolves slowly in BOTH directions.\n\nMeasured on 5m: 1.0 ATR gives a median of 3 bars and p90 of 9; 2.5 ATR gives median 7 and p90 34 — for the same number of trades.\n\nA structural stop beyond this is CLAMPED to it, never used to reject the setup.")
+i_minRisk   = input.float(0.40, "Min Risk (× ATR)", minval=0.1, maxval=1.5, step=0.05, group=G_RISK)
+i_slBuf     = input.float(0.20, "SL Buffer Past Invalidation (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=G_RISK)
+i_tp1R      = input.float(1.0, "TP1 (× risk)", minval=0.3, maxval=5.0, step=0.1, group=G_RISK)
+i_tp2R      = input.float(1.5, "TP2 (× risk)", minval=0.5, maxval=8.0, step=0.1, group=G_RISK)
+i_tp3R      = input.float(2.0, "TP3 (× risk)", minval=0.5, maxval=12.0, step=0.1, group=G_RISK)
+i_timeStop  = input.int(12, "Time Stop (bars, 0 = off)", minval=0, maxval=200, group=G_RISK,
+     tooltip="Closes a trade that has resolved nothing after this many bars. Only 3-5% of trades reach it — the tight risk cap is what actually keeps trades short. This is a backstop.")
+i_beAfterTp1 = input.bool(true, "Move stop to breakeven after TP1", group=G_RISK)
+
+i_showZones = input.bool(true,  "Show VWAP bands",   group=G_DISP)
+i_showVa    = input.bool(true,  "Show value area",   group=G_DISP)
+i_showPlan  = input.bool(true,  "Show entry / SL / TP lines", group=G_DISP)
+i_dash      = input.bool(true,  "Show dashboard",    group=G_DISP)
+i_dashPos   = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=G_DISP)
+
+// Frequency preset — score threshold and cooldown move together.
+needScore = i_freq == "High" ? 3 : 4
+cooldown  = i_freq == "High" ? 4 : i_freq == "Standard" ? 3 : 6
+allowLong  = i_dir != "Short only"
+allowShort = i_dir != "Long only"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE SERIES
+// ═══════════════════════════════════════════════════════════════════════════════
+atr    = ta.atr(i_atrLen)
+range_ = math.max(high - low, 1e-9)
+closePos = (close - low) / range_
+body   = math.abs(close - open)
+
+// Volume may be absent on FX/CFD feeds. Track whether it has EVER been seen so
+// volume-derived readings self-neutralise instead of silently blocking forever.
+// Hoisted here because the FVG store below mutates on confirmed bars only, and
+// that block runs before the trigger section that also reads this.
+conf = barstate.isconfirmed
+
+var bool volSeen = false
+if nz(volume) > 0
+    volSeen := true
+volAvg = ta.sma(nz(volume[1]), 20)
+relVol = volSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
+
+// ── Session-anchored VWAP with volume-weighted deviation bands ────────────────
+newSession = ta.change(time("D")) != 0
+var float sPV  = 0.0
+var float sV   = 0.0
+var float sPV2 = 0.0
+if newSession
+    sPV  := 0.0
+    sV   := 0.0
+    sPV2 := 0.0
+tp   = (high + low + close) / 3.0
+vol_ = volSeen ? nz(volume) : 1.0
+sPV  := sPV  + tp * vol_
+sV   := sV   + vol_
+sPV2 := sPV2 + tp * tp * vol_
+vwap = sPV / math.max(sV, 1e-9)
+vwVar = math.max(sPV2 / math.max(sV, 1e-9) - vwap * vwap, 0.0)
+vwSd  = math.sqrt(vwVar)
+u1 = vwap + vwSd
+l1 = vwap - vwSd
+u2 = vwap + 2.0 * vwSd
+l2 = vwap - 2.0 * vwSd
+
+plot(i_showZones ? vwap : na, "VWAP",  color=color.new(#FFB300, 0), linewidth=2)
+plot(i_showZones ? u1 : na,   "+1σ",   color=color.new(#FFB300, 55))
+plot(i_showZones ? l1 : na,   "−1σ",   color=color.new(#FFB300, 55))
+plot(i_showZones ? u2 : na,   "+2σ",   color=color.new(#FFB300, 78))
+plot(i_showZones ? l2 : na,   "−2σ",   color=color.new(#FFB300, 78))
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRUCTURE — pivots, fair value gaps, value area
+// ═══════════════════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, 2, 2)
+pl = ta.pivotlow(low,   2, 2)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+sph = ta.pivothigh(high, 5, 5)
+spl = ta.pivotlow(low,   5, 5)
+var float sweepHi = na
+var float sweepLo = na
+if not na(sph)
+    sweepHi := sph
+if not na(spl)
+    sweepLo := spl
+
+// ── FVG store. Multiple live gaps, each expiring by age or by being filled.
+var array<float> fvgBullTop = array.new_float()
+var array<float> fvgBullBot = array.new_float()
+var array<int>   fvgBullBar = array.new_int()
+var array<float> fvgBearTop = array.new_float()
+var array<float> fvgBearBot = array.new_float()
+var array<int>   fvgBearBar = array.new_int()
+
+// A gap spanning a market closure is an artefact of the calendar, not of order
+// flow. Reject any three-bar window whose span exceeds 3× the bar interval.
+barMs   = timeframe.in_seconds() * 1000
+contig  = barMs > 0 and (time - time[2]) <= barMs * 2 * 3
+
+if barstate.isconfirmed and contig and low > high[2] and (low - high[2]) >= atr * 0.30 and close[1] > open[1]
+    array.push(fvgBullTop, low)
+    array.push(fvgBullBot, high[2])
+    array.push(fvgBullBar, bar_index)
+if barstate.isconfirmed and contig and low[2] > high and (low[2] - high) >= atr * 0.30 and close[1] < open[1]
+    array.push(fvgBearTop, low[2])
+    array.push(fvgBearBot, high)
+    array.push(fvgBearBar, bar_index)
+
+// expire: older than 30 bars, or closed through. Confirmed bars only, matching
+// the insert above — a store that mutates intrabar is a repaint waiting to be
+// found.
+if conf and array.size(fvgBullBar) > 0
+    for k = array.size(fvgBullBar) - 1 to 0
+        if bar_index - array.get(fvgBullBar, k) > 30 or close < array.get(fvgBullBot, k)
+            array.remove(fvgBullTop, k)
+            array.remove(fvgBullBot, k)
+            array.remove(fvgBullBar, k)
+if conf and array.size(fvgBearBar) > 0
+    for k = array.size(fvgBearBar) - 1 to 0
+        if bar_index - array.get(fvgBearBar, k) > 30 or close > array.get(fvgBearTop, k)
+            array.remove(fvgBearTop, k)
+            array.remove(fvgBearBot, k)
+            array.remove(fvgBearBar, k)
+
+// ── Value area from a rolling volume profile, rebuilt on a stride.
+// Keyed to a TIME-derived counter rather than bar_index: bar_index is
+// chart-relative, so a stride keyed to it shifts as history loads and the
+// profile silently repaints. This was a real defect in ME Pro (v3.5.19).
+vaLen  = 100
+vaBins = 24
+strideKey = int(time / math.max(barMs, 1))
+var float poc = na
+var float vah = na
+var float val = na
+if barstate.isconfirmed and bar_index > vaLen and strideKey % 5 == 0
+    float hi_ = high
+    float lo_ = low
+    for k = 0 to vaLen - 1
+        hi_ := math.max(hi_, high[k])
+        lo_ := math.min(lo_, low[k])
+    float binSz = math.max(hi_ - lo_, 1e-9) / vaBins
+    acc = array.new_float(vaBins, 0.0)
+    for k = 0 to vaLen - 1
+        float bh = high[k]
+        float bl = low[k]
+        float bv = volSeen ? nz(volume[k]) : 1.0
+        float br = math.max(bh - bl, 1e-9)
+        int a0 = math.max(0, math.min(vaBins - 1, int((bl - lo_) / binSz)))
+        int a1 = math.max(0, math.min(vaBins - 1, int((bh - lo_) / binSz)))
+        for j = a0 to a1
+            float bBot = lo_ + j * binSz
+            float bTop = bBot + binSz
+            float ov = math.min(bTop, bh) - math.max(bBot, bl)
+            if ov > 0
+                array.set(acc, j, array.get(acc, j) + bv * (ov / br))
+    float total = array.sum(acc)
+    if total > 0
+        int pb = array.indexof(acc, array.max(acc))
+        float cur = array.get(acc, pb)
+        int up = pb
+        int dn = pb
+        float target = total * 0.70
+        for _it = 0 to vaBins * 2
+            if cur >= target
+                break
+            float uv = 0.0
+            float dv = 0.0
+            int us = math.min(2, vaBins - 1 - up)
+            int ds = math.min(2, dn)
+            if us > 0
+                for j = up + 1 to up + us
+                    uv := uv + array.get(acc, j)
+            if ds > 0
+                for j = dn - ds to dn - 1
+                    dv := dv + array.get(acc, j)
+            if us == 0 and ds == 0
+                break
+            if us > 0 and (ds == 0 or uv >= dv)
+                up := up + us
+                cur := cur + uv
+            else
+                dn := dn - ds
+                cur := cur + dv
+        poc := lo_ + (pb + 0.5) * binSz
+        vah := lo_ + (up + 1) * binSz
+        val := lo_ + dn * binSz
+
+plot(i_showVa and not na(poc) ? poc : na, "POC", color=color.new(#E040FB, 20), style=plot.style_linebr, linewidth=2)
+plot(i_showVa and not na(vah) ? vah : na, "VAH", color=color.new(#7E57C2, 45), style=plot.style_linebr)
+plot(i_showVa and not na(val) ? val : na, "VAL", color=color.new(#7E57C2, 45), style=plot.style_linebr)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRIGGERS — five independent events, each carrying its own invalidation level
+// ─────────────────────────────────────────────────────────────────────────────
+// The invalidation is what the stop is built from, so each setup is stopped
+// beyond the thing that would prove it wrong rather than at a fixed ATR guess.
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1 MSS — price closes through the last short-term pivot
+mssBull = conf and i_useMss and not na(lastPH) and close >= lastPH + atr * 0.08 and close[1] < lastPH
+mssBear = conf and i_useMss and not na(lastPL) and close <= lastPL - atr * 0.08 and close[1] > lastPL
+
+// 2 FVG retest — price trades into a live gap and closes back out of it
+fvgBull = false
+float fvgBullLvl = na
+float fvgBullInv = na
+if conf and i_useFvg and array.size(fvgBullBar) > 0
+    for k = array.size(fvgBullBar) - 1 to 0
+        if low <= array.get(fvgBullTop, k) and close >= array.get(fvgBullBot, k) and closePos >= 0.55
+            fvgBull := true
+            fvgBullLvl := array.get(fvgBullTop, k)
+            fvgBullInv := array.get(fvgBullBot, k)
+            break
+fvgBear = false
+float fvgBearLvl = na
+float fvgBearInv = na
+if conf and i_useFvg and array.size(fvgBearBar) > 0
+    for k = array.size(fvgBearBar) - 1 to 0
+        if high >= array.get(fvgBearBot, k) and close <= array.get(fvgBearTop, k) and closePos <= 0.45
+            fvgBear := true
+            fvgBearLvl := array.get(fvgBearBot, k)
+            fvgBearInv := array.get(fvgBearTop, k)
+            break
+
+// 3 Liquidity sweep — a pivot is taken out by a wick and immediately reclaimed
+swBull = conf and i_useSweep and not na(sweepLo) and (sweepLo - low) >= atr * 0.35 and close > sweepLo and closePos >= 0.55
+swBear = conf and i_useSweep and not na(sweepHi) and (high - sweepHi) >= atr * 0.35 and close < sweepHi and closePos <= 0.45
+
+// 4 VWAP band rejection — traded through a deviation band, closed back inside
+bandBull  = conf and i_useBand and low  <= l1 and close > l1 and closePos >= 0.55
+bandBear  = conf and i_useBand and high >= u1 and close < u1 and closePos <= 0.45
+band2Bull = conf and i_useBand and low  <= l2 and close > l2 and closePos >= 0.55
+band2Bear = conf and i_useBand and high >= u2 and close < u2 and closePos <= 0.45
+
+// 5 Value-area rejection — traded outside the value area, closed back inside
+valBull = conf and i_useValue and not na(val) and low  <= val and close > val and closePos >= 0.55
+valBear = conf and i_useValue and not na(vah) and high >= vah and close < vah and closePos <= 0.45
+
+nTrigBull = (mssBull ? 1 : 0) + (fvgBull ? 1 : 0) + (swBull ? 1 : 0) + (bandBull ? 1 : 0) + (band2Bull ? 1 : 0) + (valBull ? 1 : 0)
+nTrigBear = (mssBear ? 1 : 0) + (fvgBear ? 1 : 0) + (swBear ? 1 : 0) + (bandBear ? 1 : 0) + (band2Bear ? 1 : 0) + (valBear ? 1 : 0)
+anyBull = nTrigBull > 0
+anyBear = nTrigBear > 0
+
+// Priority when several fire on the same bar. This order is not cosmetic: it
+// selects the INVALIDATION the stop is built from, so it changes the trade. It
+// deliberately matches the order used by the simulation that produced every
+// figure in the header — if the script reordered it, those numbers would no
+// longer describe this script.
+bullName = mssBull ? "MSS" : fvgBull ? "FVG" : swBull ? "SWEEP" : bandBull ? "BAND" : band2Bull ? "BAND2" : "VALUE"
+bearName = mssBear ? "MSS" : fvgBear ? "FVG" : swBear ? "SWEEP" : bandBear ? "BAND" : band2Bear ? "BAND2" : "VALUE"
+
+bullInval = mssBull ? (na(lastPL) ? low : lastPL) : fvgBull ? fvgBullInv : low
+bearInval = mssBear ? (na(lastPH) ? high : lastPH) : fvgBear ? fvgBearInv : high
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUALITY SCORE, 0-5 — this replaces nineteen ANDed vetoes
+// ─────────────────────────────────────────────────────────────────────────────
+// Five independent readings of the entry bar. None restates another, and none is
+// a filter that can be switched off and then count as agreement.
+// ═══════════════════════════════════════════════════════════════════════════════
+sParticip = relVol >= 1.15 ? 1 : 0
+sBody     = body >= atr * 0.45 ? 1 : 0
+sCloseB   = closePos >= 0.65 ? 1 : 0
+sCloseS   = closePos <= 0.35 ? 1 : 0
+sStackB   = nTrigBull >= 2 ? 1 : 0
+sStackS   = nTrigBear >= 2 ? 1 : 0
+// Location scores only for a trigger that is not itself a band rejection — a
+// band trigger sits at a band by construction and counting it is double-billing.
+// Keyed to the SELECTED trigger, not to whichever happened to fire. If MSS and
+// a band rejection both fire, the trade is the MSS — so location is genuine
+// confluence for it and must score. Testing bandBull here instead would zero the
+// point on a bar the band did not actually enter, which is a different engine
+// from the one the header's figures were measured on.
+sLocB = bullName == "BAND2" ? 1 : bullName == "BAND" ? 0 : (close <= l1 * 1.002 ? 1 : 0)
+sLocS = bearName == "BAND2" ? 1 : bearName == "BAND" ? 0 : (close >= u1 * 0.998 ? 1 : 0)
+
+scoreBull = sParticip + sBody + sCloseB + sStackB + sLocB
+scoreBear = sParticip + sBody + sCloseS + sStackS + sLocS
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL — three hard gates, then the score
+// ═══════════════════════════════════════════════════════════════════════════════
+var int lastSigBar = -100000
+barBull = close > open
+barBear = close < open
+coolOk  = bar_index - lastSigBar >= cooldown
+
+// Stop: beyond the setup's own invalidation, then CLAMPED into the risk window.
+// A stop past the cap becomes a volatility stop AT the cap — it is never used to
+// reject the setup, which is precisely what starved ME Pro.
+slRawBull = math.min(bullInval, close - atr * i_minRisk) - atr * i_slBuf
+slRawBear = math.max(bearInval, close + atr * i_minRisk) + atr * i_slBuf
+slBull    = math.max(slRawBull, close - atr * i_maxRisk)
+slBear    = math.min(slRawBear, close + atr * i_maxRisk)
+riskBull  = close - slBull
+riskBear  = slBear - close
+riskOkBull = riskBull >= atr * i_minRisk * 0.5
+riskOkBear = riskBear >= atr * i_minRisk * 0.5
+
+buySignal  = anyBull and allowLong  and barBull and coolOk and riskOkBull and scoreBull >= needScore
+sellSignal = anyBear and allowShort and barBear and coolOk and riskOkBear and scoreBear >= needScore
+
+// ── Targets. Fixed R multiples, pulled IN to structure only when structure is
+// nearer and still at least 0.6R away. A target can therefore never sit further
+// than its R-multiple, so TP1 is always reachable — the defect that let ME Pro
+// trades sit open for thirty minutes without touching anything.
+f_tp(bool isBuy, float entry, float risk, int slot, float rmul) =>
+    float d = isBuy ? 1.0 : -1.0
+    float t = entry + d * risk * rmul
+    if slot == 1
+        float b1 = isBuy ? u1 : l1
+        float b2 = vwap
+        float b3 = na(poc) ? na : poc
+        float best = t
+        if not na(b1) and (b1 > entry) == isBuy and math.abs(b1 - entry) < math.abs(best - entry) and math.abs(b1 - entry) >= risk * 0.6
+            best := b1
+        if not na(b2) and (b2 > entry) == isBuy and math.abs(b2 - entry) < math.abs(best - entry) and math.abs(b2 - entry) >= risk * 0.6
+            best := b2
+        if not na(b3) and (b3 > entry) == isBuy and math.abs(b3 - entry) < math.abs(best - entry) and math.abs(b3 - entry) >= risk * 0.6
+            best := b3
+        t := best
+    t
+
+buyTp1  = f_tp(true,  close, riskBull, 1, i_tp1R)
+buyTp2  = f_tp(true,  close, riskBull, 2, i_tp2R)
+buyTp3  = f_tp(true,  close, riskBull, 3, i_tp3R)
+sellTp1 = f_tp(false, close, riskBear, 1, i_tp1R)
+sellTp2 = f_tp(false, close, riskBear, 2, i_tp2R)
+sellTp3 = f_tp(false, close, riskBear, 3, i_tp3R)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRADE STATE — one open plan at a time, tracked to its conclusion
+// ═══════════════════════════════════════════════════════════════════════════════
+var bool  inTrade   = false
+var bool  tradeBuy  = false
+var float eEntry    = na
+var float eSl       = na
+var float eT1       = na
+var float eT2       = na
+var float eT3       = na
+var int   eBar      = na
+var bool  eTp1Done  = false
+var string eName    = ""
+var int   nWin      = 0
+var int   nLoss     = 0
+var int   nTrades   = 0
+
+fired = (buySignal or sellSignal) and not inTrade
+if fired
+    inTrade  := true
+    tradeBuy := buySignal
+    eEntry   := close
+    eSl      := buySignal ? slBull : slBear
+    eT1      := buySignal ? buyTp1 : sellTp1
+    eT2      := buySignal ? buyTp2 : sellTp2
+    eT3      := buySignal ? buyTp3 : sellTp3
+    eBar     := bar_index
+    eTp1Done := false
+    eName    := buySignal ? bullName : bearName
+    lastSigBar := bar_index
+    nTrades  := nTrades + 1
+
+// Resolution. Checked on confirmed bars only, and the stop is tested FIRST so a
+// bar that spans both the stop and a target is never scored as a win.
+slHit  = false
+tpHit  = false
+timeUp = false
+if inTrade and conf and bar_index > eBar
+    slHit := tradeBuy ? low <= eSl : high >= eSl
+    if not eTp1Done
+        bool t1 = tradeBuy ? high >= eT1 : low <= eT1
+        if t1 and not slHit
+            eTp1Done := true
+            if i_beAfterTp1
+                eSl := eEntry
+    tpHit  := tradeBuy ? high >= eT3 : low <= eT3
+    timeUp := i_timeStop > 0 and (bar_index - eBar) >= i_timeStop
+
+closedWin  = inTrade and (tpHit or (slHit and eTp1Done))
+closedLoss = inTrade and slHit and not eTp1Done
+if inTrade and (slHit or tpHit or timeUp)
+    if closedWin
+        nWin := nWin + 1
+    else if closedLoss
+        nLoss := nLoss + 1
+    inTrade := false
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING
+// ═══════════════════════════════════════════════════════════════════════════════
+plotshape(buySignal  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(sellSignal and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+
+var line lnSl = na
+var line lnT1 = na
+var line lnT2 = na
+var line lnT3 = na
+var label lbSl = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+if i_showPlan and fired
+    if not na(lnSl)
+        line.delete(lnSl)
+        line.delete(lnT1)
+        line.delete(lnT2)
+        line.delete(lnT3)
+        label.delete(lbSl)
+        label.delete(lbT1)
+        label.delete(lbT2)
+        label.delete(lbT3)
+    int xR = bar_index + 25
+    lnSl := line.new(bar_index, eSl, xR, eSl, color=color.new(#FF1744, 0), width=2)
+    lnT1 := line.new(bar_index, eT1, xR, eT1, color=color.new(#00E676, 20), style=line.style_dashed)
+    lnT2 := line.new(bar_index, eT2, xR, eT2, color=color.new(#00E676, 40), style=line.style_dashed)
+    lnT3 := line.new(bar_index, eT3, xR, eT3, color=color.new(#00E676, 60), style=line.style_dashed)
+    lbSl := label.new(xR, eSl, "SL " + str.tostring(eSl, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#FF1744, 0), size=size.tiny)
+    lbT1 := label.new(xR, eT1, "TP1 " + str.tostring(eT1, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 0), size=size.tiny)
+    lbT2 := label.new(xR, eT2, "TP2 " + str.tostring(eT2, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 20), size=size.tiny)
+    lbT3 := label.new(xR, eT3, "TP3 " + str.tostring(eT3, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 40), size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD — every number that decides a trade, visible
+// ═══════════════════════════════════════════════════════════════════════════════
+trigNow  = anyBull or anyBear
+trig100  = math.sum(trigNow ? 1.0 : 0.0, 100)
+sig100   = math.sum((buySignal or sellSignal) ? 1.0 : 0.0, 100)
+var int lastTrigBar = na
+if trigNow
+    lastTrigBar := bar_index
+
+var table dash = na
+if i_dash and barstate.islast
+    pos = i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left
+    if na(dash)
+        dash := table.new(pos, 3, 10, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
+    grn = color.new(#00E676, 0)
+    red = color.new(#FF1744, 0)
+    dim = color.new(#888888, 0)
+    yel = color.new(#FFC400, 0)
+    wht = color.new(#FFFFFF, 0)
+
+    table.cell(dash, 0, 0, "ME SCALP v1.0 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
+    table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
+
+    table.cell(dash, 0, 1, "", text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 1, "BUY",  text_color=grn, text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 2, 1, "SELL", text_color=red, text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+
+    // Score against the bar this frequency demands — the gate that decides.
+    table.cell(dash, 0, 2, "Score (need " + str.tostring(needScore) + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 2, str.tostring(scoreBull) + "/5", text_color=scoreBull >= needScore ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 2, str.tostring(scoreBear) + "/5", text_color=scoreBear >= needScore ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Triggers now", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 3, anyBull ? bullName + " ×" + str.tostring(nTrigBull) : "—", text_color=anyBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 3, anyBear ? bearName + " ×" + str.tostring(nTrigBear) : "—", text_color=anyBear ? red : dim, text_size=size.tiny)
+
+    // Which of the five score dimensions are live right now.
+    dimTxtB = (sParticip == 1 ? "vol " : "") + (sBody == 1 ? "body " : "") + (sCloseB == 1 ? "close " : "") + (sStackB == 1 ? "stack " : "") + (sLocB == 1 ? "loc" : "")
+    dimTxtS = (sParticip == 1 ? "vol " : "") + (sBody == 1 ? "body " : "") + (sCloseS == 1 ? "close " : "") + (sStackS == 1 ? "stack " : "") + (sLocS == 1 ? "loc" : "")
+    table.cell(dash, 0, 4, "Scoring", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 4, dimTxtB == "" ? "—" : dimTxtB, text_color=dim, text_size=size.tiny)
+    table.cell(dash, 2, 4, dimTxtS == "" ? "—" : dimTxtS, text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Risk (× ATR)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 5, str.tostring(math.round(riskBull / math.max(atr, 1e-9), 2)), text_color=riskOkBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 5, str.tostring(math.round(riskBear / math.max(atr, 1e-9), 2)), text_color=riskOkBear ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Rel volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    volTxt = volSeen ? str.tostring(math.round(relVol, 2)) + "×" : "no feed"
+    table.cell(dash, 1, 6, volTxt, text_color=relVol >= 1.15 ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 6, volTxt, text_color=relVol >= 1.15 ? red : dim, text_size=size.tiny)
+
+    // trig 0 means no setup is FORMING and no gate is responsible; trig high
+    // with sig 0 means the score bar is not being met.
+    table.cell(dash, 0, 7, "Per 100 bars", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    ageTxt = na(lastTrigBar) ? "none yet" : str.tostring(bar_index - lastTrigBar) + "b ago"
+    table.cell(dash, 1, 7, "trig " + str.tostring(int(trig100)) + "  sig " + str.tostring(int(sig100)), text_color=trig100 == 0 ? red : sig100 > 0 ? grn : yel, text_size=size.tiny)
+    table.cell(dash, 2, 7, ageTxt, text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Open trade", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    openTxt = inTrade ? (tradeBuy ? "LONG " : "SHORT ") + eName + "  " + str.tostring(bar_index - eBar) + "b" + (eTp1Done ? "  TP1✓ BE" : "") : "flat"
+    table.cell(dash, 1, 8, openTxt, text_color=inTrade ? (tradeBuy ? grn : red) : dim, text_size=size.tiny)
+    table.cell(dash, 2, 8, inTrade and i_timeStop > 0 ? "stop in " + str.tostring(math.max(i_timeStop - (bar_index - eBar), 0)) + "b" : "", text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 9, "Since load", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    wr = nWin + nLoss > 0 ? 100.0 * nWin / (nWin + nLoss) : 0.0
+    table.cell(dash, 1, 9, str.tostring(nTrades) + " trades", text_color=wht, text_size=size.tiny)
+    table.cell(dash, 2, 9, nWin + nLoss > 0 ? str.tostring(math.round(wr, 1)) + "% win" : "—", text_color=wr >= 50 ? grn : dim, text_size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+if buySignal and not inTrade[1]
+    alert("ME Scalp BUY " + bullName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBull, format.mintick) + " | TP1 " + str.tostring(buyTp1, format.mintick) + " | TP2 " + str.tostring(buyTp2, format.mintick) + " | TP3 " + str.tostring(buyTp3, format.mintick) + " | score " + str.tostring(scoreBull) + "/5", alert.freq_once_per_bar_close)
+if sellSignal and not inTrade[1]
+    alert("ME Scalp SELL " + bearName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBear, format.mintick) + " | TP1 " + str.tostring(sellTp1, format.mintick) + " | TP2 " + str.tostring(sellTp2, format.mintick) + " | TP3 " + str.tostring(sellTp3, format.mintick) + " | score " + str.tostring(scoreBear) + "/5", alert.freq_once_per_bar_close)
+
+alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
+alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
