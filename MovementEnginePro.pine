@@ -1,7 +1,53 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v4.0 (band trigger rebuild)
+// © ME Institutional — Movement Engine Pro v4.1 (mode rebuild)
 //@version=6
-indicator("Movement Engine Pro v4.0", shorttitle="ME Pro v4.0", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v4.1", shorttitle="ME Pro v4.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v4.1 — EVERY MODE TRADES. MODE IS A STANDARD, NOT A TRIGGER BAN.
+// ─────────────────────────────────────────────────────────────────────────────
+// v4.0 fixed trigger supply and left one mode broken. Strict could only see MSS
+// — FVG, sweep and band were switched off for it — and on top of that it had a
+// location rule and an FRVP requirement no other mode carried. Three vetoes
+// stacked. Measured over 150 days x 6 seeds it produced 0.38 signals/day on 15m,
+// 0.21 on 30m and 0.07 on 1H. That is not a strict mode, it is a mode that does
+// not trade, and no market condition caused it: the location rule alone was the
+// SOLE cause of 1066 of 30m Strict's blocks and appeared in 69-74% of all of them.
+//
+// WHAT CHANGED. Every trigger is admitted in every mode. The mode now sets how
+// many INDEPENDENT READINGS of the entry bar must agree — participation, body
+// conviction, close location, two triggers stacking, and price at a band:
+//
+//     Aggressive / Scalp   0 of 5      Balanced   1 of 5      Strict   2 of 5
+//
+// A bar can satisfy that anywhere on the chart, where the old rule needed a rare
+// price location, which is the whole of the supply difference:
+//
+//     signals/day        15m     30m     1H      4H
+//     Strict v4.0        0.38    0.21    0.07    0.13
+//     Strict v4.1        1.45    1.08    0.63    0.31
+//
+// And the ladder now behaves the way a mode ladder is supposed to — fewer trades
+// AND better selection as it tightens, rather than fewer trades alone:
+//
+//     15m   Scalp 3.17/day 44.6%  ->  Balanced 1.68 46.9%  ->  Strict 1.45 46.5%
+//     4H    Scalp 0.50/day 47.6%  ->  Balanced 0.33 48.8%  ->  Strict 0.31 48.9%
+//
+// One correction inside the score: location counts only for a trigger that is
+// NOT itself a band rejection. A band trigger sits at a band by construction, so
+// scoring it there is counting one fact twice — and it made Strict and Balanced
+// emit identical signals on 1H and 4H, where band rejections are 74% of entries.
+//
+// v4.1 also adds the OUTER (2σ) band rejection as its own trigger. A 2σ
+// excursion never satisfies the 1σ close-back-inside test on the same bar, so
+// that supply was simply unreachable before: it is 26% of 5m and 17% of 15m
+// entries.
+//
+// WHAT IS STILL NOT PROVEN. Every figure above comes from synthetic driftless
+// OHLCV, where expectancy is ~0 by construction. The harness can measure trade
+// COUNT, spacing, and whether selection improves across the ladder. It cannot
+// measure profitability, and nothing here should be read as if it did.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v4.0 — REBUILT TRIGGER SET. VWAP IS NOW AN ENTRY, NOT JUST A FILTER.
@@ -1563,7 +1609,7 @@ i_pendBars   = input.int(8, "Pending Entry Window (bars)", minval=1, maxval=50,
      group=G_ENGINE)
 i_mode       = input.string("Balanced", "Engine Mode",
      options=["Scalp","Aggressive","Balanced","Strict"],
-     tooltip="Scalp: fastest non-repainting preset — 2-bar pivots, 1-bar momentum, fast CVD, no HTF/bias gate, both directions, cooldown 5, tight 0.5-2 ATR risk window, atr14-based clamped stops, sweep entries exempt from CVD/momentum trend gates (v3.5.1).\nAggressive: structure + OF only (no HTF/VWAP gate).\nBalanced: requires HTF trend + VWAP alignment.\nStrict: requires HTF + VWAP + FRVP value area.",
+     tooltip="v4.1: ALL FOUR TRIGGERS (MSS, FVG, sweep, band rejection) are live in EVERY mode. What the mode sets is how many independent readings of the entry bar must agree — relative volume ≥1.20, body ≥0.55 ATR, close in the top/bottom 30% of its range, two triggers stacking on the same bar, and price at a deviation band.\nScalp: 0 of 5 required, plus the overextension guard. Fastest preset — 2-bar pivots, 1-bar momentum, fast CVD, no HTF gate, cooldown 5, 0.5-2 ATR risk window, atr14 clamped stops.\nAggressive: 0 of 5, no HTF/VWAP gate at all.\nBalanced: 1 of 5, plus HTF trend and VWAP alignment.\nStrict: 2 of 5, plus HTF trend and VWAP alignment.\nBefore v4.1 the mode decided which TRIGGERS EXISTED — Strict saw only MSS, and carried a location rule and an FRVP requirement on top. It produced 0.38 signals/day on 15m and 0.07 on 1H: a mode that did not trade. Those three vetoes are gone; the same measurement now reads 1.45/day on 15m and 0.63 on 1H, with win rate still rising as the mode tightens.\nThe old Min Confluence Required input still applies on top of this and is a separate, manual floor.",
      group=G_ENGINE)
 
 // ── Market Structure ─────────────────────────────────────────────────────────
@@ -2521,6 +2567,43 @@ if bandBearEvent
     bandBearHigh := high
     bandBearLvl  := vwUpper1
 
+// v4.1: the OUTER band (2σ) rejection, a separate and rarer event. Measured at
+// 26% of 5m and 17% of 15m entries — supply the 1σ trigger cannot produce
+// because a 2σ excursion never touches the 1σ close-back-inside condition on
+// the same bar. Its invalidation is the rejecting bar's extreme, as above.
+band2BullEvent = i_bandTrig and barstate.isconfirmed and low  <= vwLower2 and close > vwLower2 and closePos >= 0.55
+band2BearEvent = i_bandTrig and barstate.isconfirmed and high >= vwUpper2 and close < vwUpper2 and closePos <= 0.45
+
+var int band2BullAge = 999
+var int band2BearAge = 999
+band2BullAge := band2BullEvent ? 0 : math.min(band2BullAge + 1, 999)
+band2BearAge := band2BearEvent ? 0 : math.min(band2BearAge + 1, 999)
+if band2BullEvent
+    band2BearAge := 999
+if band2BearEvent
+    band2BullAge := 999
+band2Bull = band2BullAge <= effTriggerAge
+band2Bear = band2BearAge <= effTriggerAge
+
+var float band2BullLow  = na
+var float band2BullLvl  = na
+var float band2BearHigh = na
+var float band2BearLvl  = na
+if band2BullEvent
+    band2BullLow := low
+    band2BullLvl := vwLower2
+if band2BearEvent
+    band2BearHigh := high
+    band2BearLvl  := vwUpper2
+
+// The band trigger is now either rejection, so the level and invalidation the
+// stop is built from must come from whichever fired MORE RECENTLY. Reading the
+// 1σ variables unconditionally would anchor a 2σ entry to a stale 1σ event.
+bandRefBullLvl  = band2BullAge < bandBullAge ? band2BullLvl  : bandBullLvl
+bandRefBullLow  = band2BullAge < bandBullAge ? band2BullLow  : bandBullLow
+bandRefBearLvl  = band2BearAge < bandBearAge ? band2BearLvl  : bandBearLvl
+bandRefBearHigh = band2BearAge < bandBearAge ? band2BearHigh : bandBearHigh
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FRVP — v3.4 ACCURACY REBUILD (v3.5.1 adds the refresh stride)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2711,8 +2794,13 @@ if i_frvpShow and barstate.islast and not na(pocPrice)
 
 // v3.5: Scalp gates only on the VWAP overextension guard (never chase an
 // extended move); Aggressive remains fully ungated.
-modePassBull = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBull and vwapOkBull and (i_mode != "Strict" or frvpBullOk))
-modePassBear = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBear and vwapOkBear and (i_mode != "Strict" or frvpBearOk))
+// v4.1: the Strict-only FRVP requirement is gone. It was a third veto stacked on
+// top of the trigger ban and the location rule, and with all three in place
+// Strict could not reach one trade a day on any timeframe. Selectivity now comes
+// from the confluence requirement below, which every mode is measured against on
+// the same five readings.
+modePassBull = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBull and vwapOkBull)
+modePassBear = i_mode == "Aggressive" ? true : isScalp ? notExtended : (htfOkBear and vwapOkBear)
 
 // v3.5.5: confluence score, 0-3. Was computed from the *Ok flags, which are
 // true whenever their filter is switched OFF — a disabled filter counted as
@@ -2738,25 +2826,62 @@ sellAligned = (htfBear ? 1 : 0) + (belowVwap ? 1 : 0) + (frvpBearOk ? 1 : 0)
 // v3.5.2/v3.5.4: ONE ATR reference — the stop is built, judged, displayed and
 // reported in the same units. Mixing atr14 and atrBase across those four
 // places is what silently blocked entries in every mode before v3.5.2.
-// v3.4.1: mode-gated trigger flags computed once, reused by trigger AND label
-buyTrigFvg   = i_mode != "Strict"     and fvgRetestBull
-sellTrigFvg  = i_mode != "Strict"     and fvgRetestBear
-buyTrigSweep = (i_mode == "Aggressive" or isScalp) and sweepBull
-sellTrigSweep= (i_mode == "Aggressive" or isScalp) and sweepBear
-// v4.0: available in every mode except Strict, which demands its entries come
-// from violated structure rather than from a statistical band.
-buyTrigBand  = i_mode != "Strict" and bandBull
-sellTrigBand = i_mode != "Strict" and bandBear
+// ═══════════════════════════════════════════════════════════════════════════════
+// v4.1 TRIGGER ADMISSION — every trigger, every mode
+// ─────────────────────────────────────────────────────────────────────────────
+// Through v4.0 the mode decided WHICH TRIGGERS EXIST. Strict saw only MSS: FVG,
+// sweep and band were all switched off for it, so Strict was starved by
+// construction, not by market conditions. Measured on 150 days x 6 seeds it
+// produced 0.38 signals/day on 15m, 0.21 on 30m and 0.07 on 1H — a mode that
+// does not trade. The location veto behind it was the sole cause of 1066 of
+// 30m Strict's blocks and appeared in 69-74% of all of them.
+//
+// Every trigger is now admitted in every mode. The mode instead sets HOW MANY
+// INDEPENDENT THINGS MUST AGREE (the confluence requirement below). That is a
+// condition any bar can satisfy, rather than one only a rare price location can,
+// which is what restores supply: 15m Strict 0.38 -> 1.45/day, 30m 0.21 -> 1.08,
+// 1H 0.07 -> 0.63, while win rate still rises with strictness
+// (Scalp 44.6% -> Balanced 46.9% -> Strict 46.5% on 15m; 47.6 -> 48.8 -> 48.9
+// on 4H). Trade count falls and selection quality rises across the ladder, which
+// is what mode is supposed to mean.
+buyTrigFvg   = fvgRetestBull
+sellTrigFvg  = fvgRetestBear
+buyTrigSweep = sweepBull
+sellTrigSweep= sweepBear
+buyTrigBand  = bandBull  or band2Bull
+sellTrigBand = bandBear  or band2Bear
 
 buyTrigger  = mssUp   or buyTrigFvg  or buyTrigSweep  or buyTrigBand
 sellTrigger = mssDown or sellTrigFvg or sellTrigSweep or sellTrigBand
+
+// ── Confluence score, 0-5 ──────────────────────────────────────────────────────
+// Five independent readings of the same bar. None is a restatement of another,
+// and none is a filter that can be switched off and then silently count as
+// agreement (the v3.5.5 defect).
+buyTrigCount  = (mssUp   ? 1 : 0) + (buyTrigFvg  ? 1 : 0) + (buyTrigSweep  ? 1 : 0) + (buyTrigBand  ? 1 : 0)
+sellTrigCount = (mssDown ? 1 : 0) + (sellTrigFvg ? 1 : 0) + (sellTrigSweep ? 1 : 0) + (sellTrigBand ? 1 : 0)
+// Location scores only for a trigger that is NOT itself a band rejection — a
+// band trigger sits at a band by definition, so counting it is double-counting.
+// Leaving it in made Strict and Balanced produce identical signals on 1H and 4H,
+// where band rejections supply 74% of entries.
+buyAtBand  = not buyTrigBand  and close <= vwLower1 * 1.002
+sellAtBand = not sellTrigBand and close >= vwUpper1 * 0.998
+
+confV4Buy  = (relVol >= 1.20 ? 1 : 0) + (bodySize >= atr14 * 0.55 ? 1 : 0) + (closePos >= 0.70 ? 1 : 0) + (buyTrigCount  >= 2 ? 1 : 0) + (buyAtBand  ? 1 : 0)
+confV4Sell = (relVol >= 1.20 ? 1 : 0) + (bodySize >= atr14 * 0.55 ? 1 : 0) + (closePos <= 0.30 ? 1 : 0) + (sellTrigCount >= 2 ? 1 : 0) + (sellAtBand ? 1 : 0)
+
+// Aggressive takes anything; Scalp takes any single trigger; Balanced wants one
+// corroborating reading; Strict wants two.
+confNeed = i_mode == "Strict" ? 2 : i_mode == "Balanced" ? 1 : 0
+v4ConfOkBuy  = confV4Buy  >= confNeed
+v4ConfOkSell = confV4Sell >= confNeed
 
 riskAtrRef = isScalp ? atr14 : atrBase
 // v3.5.32: each trigger's OWN reference level, hoisted above the stop block so
 // it can also serve as the ENTRY price in level-retest mode. Previously it was
 // computed further down and used only by the anti-chase cap.
-buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigBand  and not na(bandBullLvl) ? bandBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
-sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigBand and not na(bandBearLvl) ? bandBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
+buyChaseRef  = buyTrigSweep  and not na(sweepBullLvl) ? sweepBullLvl : buyTrigBand  and not na(bandRefBullLvl) ? bandRefBullLvl : buyTrigFvg  and not na(lBullTop) ? lBullTop : mssUp   ? lastPH : na
+sellChaseRef = sellTrigSweep and not na(sweepBearLvl) ? sweepBearLvl : sellTrigBand and not na(bandRefBearLvl) ? bandRefBearLvl : sellTrigFvg and not na(lBearBot) ? lBearBot : mssDown ? lastPL : na
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.32 ENTRY REFERENCE
@@ -2795,8 +2920,8 @@ slBuf     = isScalp ? riskAtrRef * math.min(i_slAtr, i_scalpSlCap) * slMult : ri
 //   sweep → beyond the sweep bar's extreme (the wick IS the invalidation)
 //   FVG   → beyond the far edge of the gap
 //   MSS   → the last pivot, as before (correct for continuation)
-buySlAnchor  = buyTrigSweep  and not na(sweepBullLow)  ? sweepBullLow  : buyTrigBand  and not na(bandBullLow)  ? bandBullLow  : buyTrigFvg  and not na(lBullBot) ? lBullBot : lastPL
-sellSlAnchor = sellTrigSweep and not na(sweepBearHigh) ? sweepBearHigh : sellTrigBand and not na(bandBearHigh) ? bandBearHigh : sellTrigFvg and not na(lBearTop) ? lBearTop : lastPH
+buySlAnchor  = buyTrigSweep  and not na(sweepBullLow)  ? sweepBullLow  : buyTrigBand  and not na(bandRefBullLow)  ? bandRefBullLow  : buyTrigFvg  and not na(lBullBot) ? lBullBot : lastPL
+sellSlAnchor = sellTrigSweep and not na(sweepBearHigh) ? sweepBearHigh : sellTrigBand and not na(bandRefBearHigh) ? bandRefBearHigh : sellTrigFvg and not na(lBearTop) ? lBearTop : lastPH
 
 buySLraw  = not na(buySlAnchor)  ? math.min(buySlAnchor - slBuf,  buyEntryRef - riskAtrRef * 0.5) : buyEntryRef - riskAtrRef * 1.5
 sellSLraw = not na(sellSlAnchor) ? math.max(sellSlAnchor + slBuf, sellEntryRef + riskAtrRef * 0.5) : sellEntryRef + riskAtrRef * 1.5
@@ -3128,8 +3253,11 @@ rrOkBuy  = effMinRR <= 0 or rrStrictBuy  or blendOkBuy
 rrOkSell = effMinRR <= 0 or rrStrictSell or blendOkSell
 
 // v3.5.12: confluence gate reads the score computed above; 0 disables it.
-confOkBuy  = buyAligned  >= effMinConf
-confOkSell = sellAligned >= effMinConf
+// v4.1: ANDed with the mode's own five-reading requirement. The two measure
+// different things — this one is the user's manual floor on directional
+// alignment, that one is what the selected mode demands of the bar itself.
+confOkBuy  = buyAligned  >= effMinConf and v4ConfOkBuy
+confOkSell = sellAligned >= effMinConf and v4ConfOkSell
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.32 LEVEL-RETEST ENTRIES
@@ -3638,7 +3766,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, (isHeikin ? "⛔ HEIKIN ASHI — LEVELS INVALID" : "ME PRO v4.0") + " — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, (isHeikin ? "⛔ HEIKIN ASHI — LEVELS INVALID" : "ME PRO v4.1") + " — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -3681,9 +3809,8 @@ if i_dashboard and barstate.islast
     f_cell(2, 8, ofSellTxt, ofBear ? red_ : buyPct < 50 ? wht : dim)
 
     table.cell(dash, 0, 9, "Band Reject", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 9, bandBull ? "▲ FRESH" : "—", bandBull ? grn : dim)
-    f_cell(2, 9, bandBear ? "▼ FRESH" : "—", bandBear ? red_ : dim)
-    table.cell(dash, 0, 9, "Band Reject", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    f_cell(1, 9, band2Bull ? "▲ 2σ" : bandBull ? "▲ 1σ" : "—", buyTrigBand  ? grn  : dim)
+    f_cell(2, 9, band2Bear ? "▼ 2σ" : bandBear ? "▼ 1σ" : "—", sellTrigBand ? red_ : dim)
 
 
     // v3.5.36: show the last CONFIRMED bar's reading — the live bar's volume is
@@ -3720,8 +3847,11 @@ if i_dashboard and barstate.islast
     // v3.5.5: confluence 0-3 (HTF side + VWAP side + value-area side).
     // These two values were computed every bar since v3.3 and never read.
     table.cell(dash, 0, 15, "Confluence", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    f_cell(1, 15, str.tostring(buyAligned)  + "/3", buyAligned  == 3 ? grn  : buyAligned  == 2 ? grn2 : dim)
-    f_cell(2, 15, str.tostring(sellAligned) + "/3", sellAligned == 3 ? red_ : sellAligned == 2 ? red2 : dim)
+    // v4.1: second figure is the MODE's requirement — the five-reading score
+    // against what this mode demands. This is the gate that decides the trade;
+    // the /3 beside it is the manual alignment floor.
+    f_cell(1, 15, str.tostring(buyAligned)  + "/3  " + str.tostring(confV4Buy)  + "≥" + str.tostring(confNeed), v4ConfOkBuy  ? grn  : dim)
+    f_cell(2, 15, str.tostring(sellAligned) + "/3  " + str.tostring(confV4Sell) + "≥" + str.tostring(confNeed), v4ConfOkSell ? red_ : dim)
 
     // v3.5.37: triggers formed vs signals produced, over the last 100 bars, plus
     // how long since the last trigger of any kind. If triggers is 0 the engine

@@ -53,6 +53,8 @@ def triggers_v4(bars, tf_sec, k1=1.0, k2=2.0, wick=0.4, fvg_min=0.35,
         # 4 NEW: VWAP band rejection — traded through, closed back inside
         if l[i]<=l1[i] and c[i]>l1[i] and cp>=.55: ev["buy"].append(("band",l1[i],l[i]))
         if h[i]>=u1[i] and c[i]<u1[i] and cp<=.45: ev["sell"].append(("band",u1[i],h[i]))
+        if l[i]<=l2[i] and c[i]>l2[i] and cp>=.55: ev["buy"].append(("band2",l2[i],l[i]))
+        if h[i]>=u2[i] and c[i]<u2[i] and cp<=.45: ev["sell"].append(("band2",u2[i],h[i]))
         out.append(ev)
     return out, (vw,u1,l1,u2,l2), atr
 
@@ -101,13 +103,32 @@ def run_v4(bars, tf_sec, mode="Scalp", freq="Selective",
             if wr > wick_max: why.append("wick")
             # 2 participation
             if relv < vol_floor: why.append("vol")
-            # 3 context, by mode
+            # 3 context, by mode — a CONFLUENCE SCORE, not a location veto.
+            #
+            # v4.0 gated Strict on location ("must be at the outer band"). Measured
+            # 0.38/day on 15m, 0.07/day on 1H: `loc` was the sole cause of 1066 of
+            # 30m Strict's blocks and appeared in 69-74% of all of them. It vetoed
+            # the `band` trigger, which is the bulk of v4's supply. Starved by
+            # construction.
+            #
+            # Strict now means "more independent things agree", which every mode can
+            # reach on any bar rather than only at a rare price location.
+            score = 0
+            if relv >= 1.20: score += 1                      # participation
+            if body >= A*0.55: score += 1                    # conviction
+            if (cp >= 0.70) if is_buy else (cp <= 0.30): score += 1   # close location in bar
+            if len(cand) >= 2: score += 1                    # two triggers stacked
+            # Location only counts as confluence for a trigger that is not itself a
+            # band rejection — a band trigger sits at a band by construction, so
+            # awarding it the point is double-counting. That is what made Strict and
+            # Balanced identical on 1H/4H, where band supplies 74% of entries.
+            if name not in ("band","band2"):
+                if (c[i] <= l1[i]*1.002) if is_buy else (c[i] >= u1[i]*0.998): score += 1
+            need = {"Scalp": 0, "Balanced": 1, "Strict": 2}[mode]
+            if score < need: why.append("conf")
             if mode in ("Balanced","Strict"):
                 if is_buy and c[i] < htf[i]: why.append("trend")
                 if (not is_buy) and c[i] > htf[i]: why.append("trend")
-            if mode == "Strict":
-                if is_buy and not (c[i] <= l1[i]*1.001 or name in ("sweep","fvg")): why.append("loc")
-                if (not is_buy) and not (c[i] >= u1[i]*0.999 or name in ("sweep","fvg")): why.append("loc")
             # 4 risk
             sl = (min(inval, c[i]-A*min_risk) - A*sl_buf) if is_buy else (max(inval, c[i]+A*min_risk) + A*sl_buf)
             risk = max((c[i]-sl) if is_buy else (sl-c[i]), A*0.1)
@@ -117,7 +138,7 @@ def run_v4(bars, tf_sec, mode="Scalp", freq="Selective",
             # coming back toward the mean. Giving it the same continuation ladder
             # as an MSS breakout measured -0.075R against MSS's -0.007R. Its
             # first target is the mean itself.
-            if name == "band":
+            if name in ("band","band2"):
                 struct=[vw[i]]
                 for band in ((u1[i],) if is_buy else (l1[i],)):
                     struct.append(band)
