@@ -98,6 +98,48 @@ strategy("ME Scalp Strategy v2.2", shorttitle="ME Scalp ST", overlay=true, max_b
 //   already found to behave the same way in v2.0. On this engine, confirmation
 //   is not where the accuracy is; REGIME is.
 //
+// ─────────────────────────────────────────────────────────────────────────────
+// v2.2 — ENTRY CONFIRMATION, TP/SL ZONES, AND A CORRECTION.
+//
+// A CORRECTION FIRST. v2.1 said confirmation does not help. That was measured
+// with a crude test — close beyond the prior bar's extreme, entered on the SAME
+// bar — and it was wrong. Waiting one bar and entering at the CONFIRMING bar's
+// close measures, on regime data:
+//
+//     5m    11.37/day 63.8% +0.2757R   ->   6.65/day 70.0% +0.3757R
+//     15m    4.24/day 63.5% +0.2738R   ->   2.45/day 68.1% +0.3292R
+//
+// It is not free: ~40% fewer trades, and total R per day is slightly lower.
+// This buys hit rate, not throughput. Default ON; switch off for volume.
+//
+// TWO MEASUREMENT BUGS WERE FOUND AND FIXED WHILE TESTING THIS, and both had
+// produced results good enough to be tempting:
+//
+//   1 LOOKAHEAD. The first confirmation test read the next bar's close to
+//     decide whether to take the trade, then entered at the OLD price — buying
+//     only trades already known to be winning. It scored 91.7% win and +1.04R.
+//     Fixed by entering at the confirming bar's own close.
+//
+//   2 INTRABAR ORDERING. A limit-entry variant filled on a bar's low and then
+//     credited the SAME bar's high for TP1. OHLC does not record which came
+//     first, so that assumes the favourable sequence on every fill. It scored
+//     +0.49R on DRIFTLESS data, where no edge can exist. Fixed by evaluating
+//     only the stop on a fill bar.
+//
+// After both fixes, LIMIT/RETEST ENTRY MEASURED WORSE than entering at the
+// close (+0.232R against +0.276R on 5m) and was NOT shipped. The whole reason
+// it looked good was the bias.
+//
+// Every variant is now checked against driftless data before it is believed.
+// Confirmation reads -0.059R there against -0.030R for immediate entry: it
+// costs MORE in a market with no edge, which is what a real filter should do.
+//
+// TP/SL ZONES. A fill happens in a band, not at a price — spread, slippage and
+// the tick the order rests on all move it. Each level is now drawn as a zone of
+// i_zoneW ATR. The stop zone extends only AWAY from entry, because a stop is
+// triggered from one side and drawing it reaching back toward price would
+// overstate where the trade dies. Set the width to 0 for plain lines.
+//
 // NON-REPAINTING. Signals gated on barstate.isconfirmed. No request.security
 // anywhere and no higher-timeframe series, so neither ME Pro repaint source can
 // occur. The efficiency ratio reads only closed history.
