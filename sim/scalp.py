@@ -111,7 +111,7 @@ def resolve(bars, i, is_buy, entry, sl, tps, tstop, be_after_tp1=True):
 def run(bars, tf_sec, freq="Standard",
         max_risk=1.0, min_risk=0.40, sl_buf=0.20,
         tp_r=(1.0, 1.5, 2.0), tstop=12, cooldown=2, need=None,
-        er_min=0.0, er_len=20, align=False, runner=0.0):
+        er_min=0.0, er_len=20, align=False, runner=0.0, confirm=0):
     h = [b[2] for b in bars]; l = [b[3] for b in bars]
     c = [b[4] for b in bars]; o = [b[1] for b in bars]; v = [b[5] for b in bars]
     atr = wilder_atr(h, l, c, 14)
@@ -167,6 +167,19 @@ def run(bars, tf_sec, freq="Standard",
                     up = c[i] > c[i-er_len]
                     if up != is_buy:
                         blocks["against"] = blocks.get("against", 0)+1; continue
+
+            # ── CONFIRMATION variants, measured rather than assumed:
+            #   1 the signal bar closes beyond the PRIOR bar's extreme
+            #   2 the signal bar closes beyond the prior TWO bars' extreme
+            if confirm > 0:
+                if is_buy:
+                    ref_ = max(h[i-1], h[i-2]) if confirm > 1 else h[i-1]
+                    if c[i] <= ref_:
+                        blocks["confirm"] = blocks.get("confirm", 0)+1; continue
+                else:
+                    ref_ = min(l[i-1], l[i-2]) if confirm > 1 else l[i-1]
+                    if c[i] >= ref_:
+                        blocks["confirm"] = blocks.get("confirm", 0)+1; continue
 
             # ── HARD GATE 1: the bar must agree with the direction traded
             if (c[i] > o[i]) != is_buy:
