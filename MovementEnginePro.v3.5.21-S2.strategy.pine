@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — Movement Engine Pro v3.5.21-S2 (Scalp loosened)
+// © ME Institutional — Movement Engine Pro v3.5.21-S3 (Scalp loosened + trigger diagnostics)
 //@version=6
-strategy("ME Pro Strategy v3.5.21-S2", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+strategy("ME Pro Strategy v3.5.21-S3", shorttitle="ME Pro ST", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v3.5.21-S2 — THREE MORE SCALP RESTRICTIONS REMOVED.
@@ -2063,6 +2063,8 @@ confOkSell = sellAligned >= effMinConf
 
 buySignal  = rawBuyPre  and rrOkBuy  and confOkBuy
 sellSignal = rawSellPre and rrOkSell and confOkSell
+
+sigCount100 = math.sum((buySignal or sellSignal) ? 1.0 : 0.0, 100)
 // v3.4.1: names respect mode gating — previously "FVG"/"SWEEP" could be
 // reported in modes where those triggers are disabled.
 buyType    = mssUp   ? "MSS" : buyTrigFvg   ? "FVG" : buyTrigSweep  ? "SWEEP" : "MSS"
@@ -2079,6 +2081,29 @@ if sellSignal
 
 // v3.5.2: name the gates that vetoed the most recent trigger — shown in the
 // dashboard "Last Block" row and (optionally) as on-chart ✕ labels.
+// ═══════════════════════════════════════════════════════════════════════════════
+// v3.5.21-S3 TRIGGER DIAGNOSTICS (display only — changes no signal)
+// ─────────────────────────────────────────────────────────────────────────────
+// "Zero trades on 15m while 5m fires" has exactly two possible causes and the
+// dashboard could not tell them apart:
+//
+//   triggers 0   no MSS / FVG retest / sweep is FORMING at all. No gate is
+//                involved; the structure detectors are finding nothing. Look at
+//                pivot length, FVG min size and sweep wick.
+//   triggers > 0 setups form and the gates reject them. "Last Block" names which.
+//
+// Without this row the only reading available was "Last Block: —", which is
+// ambiguous — it means the same thing whether nothing triggered or nothing was
+// ever evaluated. Counted over the last 100 bars.
+// ═══════════════════════════════════════════════════════════════════════════════
+trigNowAny   = buyTrigger or sellTrigger
+trigCount100 = math.sum(trigNowAny ? 1.0 : 0.0, 100)
+
+var int lastTrigBar = na
+if trigNowAny
+    lastTrigBar := bar_index
+barsSinceTrig = na(lastTrigBar) ? -1 : bar_index - lastTrigBar
+
 var string lastBlockReason = "—"
 if barstate.isconfirmed and buyTrigger and barBull and not buySignal
     string r = ""
@@ -2368,9 +2393,10 @@ if i_dashboard and barstate.islast
     tPos = (i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left)
 
     if na(dash)
-        dash := table.new(tPos, 3, 18, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
+        dash := table.new(tPos, 3, 19, bgcolor=color.rgb(10, 10, 15, 10), border_width=1, border_color=color.rgb(40, 40, 50))
         table.merge_cells(dash, 1, 16, 2, 16)
         table.merge_cells(dash, 1, 17, 2, 17)
+        table.merge_cells(dash, 1, 18, 2, 18)
 
     grn  = color.new(#00FF88, 0)
     red_ = color.new(#FF3366, 0)
@@ -2380,7 +2406,7 @@ if i_dashboard and barstate.islast
     grn2 = color.new(#00FF88, 50)
     red2 = color.new(#FF3366, 50)
 
-    table.cell(dash, 0, 0, "ME PRO v3.5.21-S2 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME PRO v3.5.21-S3 — " + str.upper(i_mode) + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
     table.cell(dash, 2, 0, "SELL", text_color=color.new(#FF3366, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
 
@@ -2467,6 +2493,14 @@ if i_dashboard and barstate.islast
     // v3.5.2: which gates vetoed the most recent trigger
     table.cell(dash, 0, 17, "Last Block", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
     table.cell(dash, 1, 17, lastBlockReason, text_color=lastBlockReason == "—" ? dim : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
+
+    // v3.5.21-S3: triggers formed vs signals produced over the last 100 bars,
+    // and how long since ANY trigger. trig 0 means the structure detectors are
+    // finding nothing and no gate is responsible; trig high with sig 0 means the
+    // gates are rejecting and the row above names which.
+    trigTxt = "trig " + str.tostring(int(trigCount100)) + "  sig " + str.tostring(int(sigCount100)) + (barsSinceTrig < 0 ? "  (none yet)" : "  last " + str.tostring(barsSinceTrig) + "b ago")
+    table.cell(dash, 0, 18, "Triggers /100b", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 18, trigTxt, text_color=trigCount100 == 0 ? red_ : sigCount100 > 0 ? grn : yel, text_size=size.tiny, bgcolor=color.rgb(15, 15, 22))
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // JSON ALERTS — v3.4.1: TPs are the SAME structure-based levels shown on chart
