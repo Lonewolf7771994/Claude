@@ -4,6 +4,47 @@
 strategy("ME Scalp Strategy v2.2", shorttitle="ME Scalp ST", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ⚠ RETRACTION — READ THIS BEFORE ANY PERFORMANCE CLAIM BELOW.
+// ─────────────────────────────────────────────────────────────────────────────
+// EVERY PERFORMANCE FIGURE IN THE v2.0 / v2.1 / v2.2 NOTES BELOW IS WITHDRAWN.
+// They are not conservative, not optimistic — they are invalid, and the sections
+// are kept only so the mistake is legible.
+//
+// WHAT HAPPENED. The synthetic generator those numbers came from had strong
+// momentum built into it (trend regimes at 0.55 sigma of persistent drift). A
+// BRAIN-DEAD rule — "buy if price is up over 20 bars, 1 ATR bracket", no
+// triggers, no VWAP, no FVG, no score — scored +0.214R at t=49.6 on that data.
+// That is essentially the same +0.29R this engine was credited with. The engine
+// was not finding an edge; it was reading back momentum I had put in the data
+// myself, and I then built the regime gate and alignment rule around it.
+//
+// This was the SECOND time. An earlier generator used phi=0.82 with the same
+// effect. Both times the tell was available and both times it was not checked.
+//
+// WHAT THE NUMBERS ARE ONCE THE GENERATOR IS CALIBRATED so that the naive rule
+// earns no more than it does on driftless data:
+//
+//     tf    freq        claimed     actual      win%    t
+//     5m    Standard    +0.3032     -0.0690     52.1    -4.64
+//     5m    Selective   +0.4065     -0.0610     51.9    -3.19
+//     15m   Standard    +0.2919     -0.0828     50.5    -3.56
+//     15m   Selective   +0.3715     -0.0975     50.2    -3.30
+//
+// NEGATIVE BEFORE COSTS. Then add costs. At 1.0 ATR risk on 5m XAUUSD (ATR
+// ~2 points) a 0.35-point spread is 0.175R per round trip, before commission.
+// The arithmetic is -0.069 - 0.175 = -0.24R per trade at ~4 trades a day. An
+// equity curve does not wobble around zero on that; it collapses. It did.
+//
+// WHAT IS STILL TRUE, because it does not depend on the generator's drift:
+//   - the mechanics: non-repainting, no request.security, no lookahead
+//   - trade COUNT, duration, and exit mix
+//   - the two execution bugs fixed in v2.1/v2.2 were real bugs
+//
+// WHAT IS NOT ESTABLISHED: that this engine has any edge at all. It does not
+// have one that has been demonstrated. Do not trade it on the numbers below.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ME SCALP v2.0 — regime-gated. Trade the move, not the noise.
 // ─────────────────────────────────────────────────────────────────────────────
 // v1.0 fired 7.29 trades/day on 5m at a mean of -0.002R. Two complaints came

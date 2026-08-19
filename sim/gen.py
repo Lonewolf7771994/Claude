@@ -55,7 +55,7 @@ def series(n, tf_sec, seed=1, price=4400.0, ann_vol=0.16,
 
 def series_regime(n, tf_sec, seed=1, price=4400.0, ann_vol=0.16,
                   vol_persist=0.94, vol_shock=0.06, wick_mult=1.6,
-                  mean_range=220, mean_trend=70, trend_k=0.55):
+                  mean_range=220, mean_trend=70, trend_k=0.19):
     """OHLCV with REGIMES — the property `series` lacks and real markets have.
 
     WHY THIS EXISTS. `series` uses phi=0.03, so it has essentially no sustained
@@ -67,6 +67,21 @@ def series_regime(n, tf_sec, seed=1, price=4400.0, ann_vol=0.16,
     A Markov chain alternates two states:
       range  mean-reverting toward a slow anchor, so price chops
       trend  a persistent drift of +/- trend_k sigma per bar
+
+    trend_k DEFAULT 0.19 IS CALIBRATED, NOT CHOSEN. It is the value at which a
+    BRAIN-DEAD momentum rule (buy if price is up over 20 bars and the move is
+    efficient; 1 ATR bracket) earns NO MORE than it does on the driftless
+    generator. Parity, not zero: the naive rule scores the stop first on a bar
+    that spans both, a constant pessimism worth about -0.15R. The test is in
+    null_test.py and MUST be run before believing any result from here.
+
+    THE ORIGINAL DEFAULT OF 0.55 WAS A DISASTER. At that setting the naive rule
+    scored +0.214R at t=49.6 on 5m — the data itself paid for trend following. I
+    then "discovered" that a regime filter plus trend alignment was worth +0.29R
+    and shipped it. It was my own generator's momentum, measured back to me. The
+    strategy went negative on the user's real backtest, which is the correct
+    result. This is the SECOND time this happened (an earlier version used
+    phi=0.82 with the same effect), so the guard is now permanent.
 
     THE DIRECTION OF EACH TREND IS DRAWN AT RANDOM WHEN THE REGIME STARTS and is
     never knowable in advance, so this adds NO free edge — buy-and-hold remains

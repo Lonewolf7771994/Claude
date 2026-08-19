@@ -41,14 +41,19 @@ indicator("Movement Engine Pro v3.5.21-S6", shorttitle="ME Pro v3.5.21-S6", over
 // RSI all keep their S5 values, the four-mode system is untouched, and every
 // non-Scalp mode still reads the raw i_* inputs.
 //
-// THE HONEST PART. Pace is now comparable; QUALITY IS NOT. On the same data
-// this engine measures roughly -0.01 to -0.08 mean R while ME Scalp v2.2
-// measures +0.27 to +0.38. The difference is the regime gate — ME Scalp refuses
-// to trade chop and only trades with the leg in progress, and that single
-// condition is worth more than every threshold in this file. You asked to keep
-// the modes and confirmation as they are, so that gate is NOT ported here. This
-// build gives you the ME Scalp trade RATE on the v3.5.21 engine. It does not
-// give you the ME Scalp edge, and no pace setting can.
+// THE HONEST PART, CORRECTED. This section previously said ME Scalp v2.2
+// measured +0.27 to +0.38 mean R against this engine's -0.01 to -0.08, and
+// concluded that its regime gate was worth porting. THAT COMPARISON WAS WRONG.
+// ME Scalp's figure came from a synthetic generator with momentum built into
+// it: a brain-dead "buy if price is up over 20 bars" rule scored +0.214R on the
+// same data, which is the whole of the supposed edge. Recalibrated so that
+// naive rule earns nothing, ME Scalp v2.2 measures -0.06 to -0.10R — negative,
+// like this engine, and it collapsed on a real backtest.
+//
+// So there is no known edge to port and nothing here is being held back from
+// you. The PACE work in this file stands on its own: the two bugs were real
+// bugs, and trade count and duration do not depend on the generator's drift.
+// Expectancy is unestablished for both engines.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
