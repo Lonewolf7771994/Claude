@@ -1,0 +1,190 @@
+//@version=6
+// =============================================================================
+//  Gold Trend-Pullback  —  XAUUSD
+//  Trades are taken on ONE locked timeframe (default 15m). On any other
+//  timeframe the strategy places no orders and says so on the chart, so a
+//  backtest can never be read off a timeframe it was not built for.
+//
+//  Method: trade with the trend, enter on a pullback, size by risk.
+//    Trend   price above/below the trend EMA, optionally confirmed on a
+//            higher timeframe.
+//    Trigger price pulls back to touch the fast EMA and closes back on the
+//            trend side of it, with RSI confirming.
+//    Exit    ATR stop and ATR target, optional break-even at 1R, flat at
+//            session end.
+//
+//  For research and backtesting. Not financial advice.
+// =============================================================================
+
+strategy(
+     title                 = "Gold Trend-Pullback — XAUUSD",
+     shorttitle            = "XAU TP",
+     overlay               = true,
+     initial_capital       = 10000,
+     currency              = currency.USD,
+     default_qty_type      = strategy.fixed,
+     default_qty_value     = 1,
+     pyramiding            = 0,
+     process_orders_on_close = true,
+     commission_type       = strategy.commission.cash_per_contract,
+     commission_value      = 0.0,
+     slippage              = 20,
+     margin_long           = 0,
+     margin_short          = 0)
+
+// ── Timeframe lock ──────────────────────────────────────────────────────────
+gTF = "1 · Timeframe lock"
+tfLock = input.string("15", "Take trades only on", group = gTF,
+     options = ["Any", "1", "3", "5", "15", "30", "60", "120", "240", "D"],
+     tooltip = "Pine timeframe codes: 15 = 15 minutes, 60 = 1 hour, D = daily. " +
+               "On any other timeframe the strategy stays flat and prints a notice.")
+
+tfOK = tfLock == "Any" or timeframe.period == tfLock
+
+// ── Session ─────────────────────────────────────────────────────────────────
+gS = "2 · Session"
+useSession = input.bool(true,        "Restrict trading to a session", group = gS)
+sessSpec   = input.session("0800-1700", "Session (exchange time)",    group = gS,
+     tooltip = "Gold's liquid hours are the London and New York overlap. " +
+               "Outside the session no new trades are opened.")
+flatOnEnd  = input.bool(true,        "Close open trade at session end", group = gS)
+
+inSession = not useSession or not na(time(timeframe.period, sessSpec))
+
+// ── Trend ───────────────────────────────────────────────────────────────────
+gT = "3 · Trend filter"
+trendLen = input.int(200, "Trend EMA length",  minval = 20, group = gT)
+pullLen  = input.int(20,  "Pullback EMA length", minval = 3, group = gT)
+useHTF   = input.bool(true, "Require higher-timeframe agreement", group = gT)
+htfSpec  = input.timeframe("60", "Higher timeframe", group = gT)
+
+emaTrend = ta.ema(close, trendLen)
+emaPull  = ta.ema(close, pullLen)
+
+htfTrend = request.security(syminfo.tickerid, htfSpec, ta.ema(close, trendLen),
+     lookahead = barmerge.lookahead_off)
+
+htfUp = not useHTF or close > htfTrend
+htfDn = not useHTF or close < htfTrend
+
+// ── Entry ───────────────────────────────────────────────────────────────────
+gE = "4 · Entry"
+rsiLen    = input.int(14,   "RSI length",            minval = 2,  group = gE)
+rsiFloor  = input.float(50, "RSI floor for longs",   minval = 0, maxval = 100, group = gE)
+rsiCeil   = input.float(50, "RSI ceiling for shorts", minval = 0, maxval = 100, group = gE)
+direction = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = gE)
+
+rsi = ta.rsi(close, rsiLen)
+
+// ── Risk ────────────────────────────────────────────────────────────────────
+gR = "5 · Risk"
+atrLen    = input.int(14,    "ATR length",              minval = 2, group = gR)
+stopMult  = input.float(1.5, "Stop distance = ATR ×",   minval = 0.1, step = 0.1, group = gR)
+tpMult    = input.float(3.0, "Target distance = ATR ×", minval = 0.1, step = 0.1, group = gR)
+riskPct   = input.float(1.0, "Risk per trade (% of equity)", minval = 0.01, step = 0.25, group = gR,
+     tooltip = "Position size is derived from the stop distance so every trade " +
+               "risks the same fraction of equity.")
+useBE     = input.bool(true, "Move stop to break-even at 1R", group = gR)
+maxPerDay = input.int(3,     "Maximum entries per day", minval = 1, group = gR)
+
+atr = ta.atr(atrLen)
+
+// ── Signals ─────────────────────────────────────────────────────────────────
+trendUp = close > emaTrend and htfUp
+trendDn = close < emaTrend and htfDn
+
+// a pullback that touched the fast EMA and closed back on the trend side
+pullLong  = low  <= emaPull and close > emaPull
+pullShort = high >= emaPull and close < emaPull
+
+allowLong  = direction != "Short only"
+allowShort = direction != "Long only"
+
+var int entriesToday = 0
+if ta.change(time("D")) != 0
+    entriesToday := 0
+
+flat    = strategy.position_size == 0
+canOpen = tfOK and inSession and flat and entriesToday < maxPerDay
+
+longSignal  = canOpen and allowLong  and trendUp and pullLong  and rsi > rsiFloor
+shortSignal = canOpen and allowShort and trendDn and pullShort and rsi < rsiCeil
+
+// ── Position management ─────────────────────────────────────────────────────
+var float stopPx  = na
+var float tpPx    = na
+var bool  beMoved = false
+
+sizeFor(dist) =>
+    dist <= 0 or na(dist) ? 0.0 : (strategy.equity * riskPct / 100.0) / dist
+
+if longSignal
+    stopPx  := close - atr * stopMult
+    tpPx    := close + atr * tpMult
+    beMoved := false
+    qty = sizeFor(close - stopPx)
+    if qty > 0
+        strategy.entry("Long", strategy.long, qty = qty)
+        entriesToday += 1
+
+if shortSignal
+    stopPx  := close + atr * stopMult
+    tpPx    := close - atr * tpMult
+    beMoved := false
+    qty = sizeFor(stopPx - close)
+    if qty > 0
+        strategy.entry("Short", strategy.short, qty = qty)
+        entriesToday += 1
+
+// break-even once price has travelled one unit of risk
+if strategy.position_size > 0 and useBE and not beMoved
+    oneR = strategy.position_avg_price - stopPx
+    if oneR > 0 and high >= strategy.position_avg_price + oneR
+        stopPx  := math.max(stopPx, strategy.position_avg_price)
+        beMoved := true
+
+if strategy.position_size < 0 and useBE and not beMoved
+    oneR = stopPx - strategy.position_avg_price
+    if oneR > 0 and low <= strategy.position_avg_price - oneR
+        stopPx  := math.min(stopPx, strategy.position_avg_price)
+        beMoved := true
+
+// Exits are submitted the same bar as the entry, not the bar after: with
+// process_orders_on_close the fill is not visible in strategy.position_size
+// until the next bar, so gating on it would leave one bar unprotected.
+// An exit naming an entry that does not exist is ignored by Pine.
+if not na(stopPx)
+    strategy.exit("Long exit",  from_entry = "Long",  stop = stopPx, limit = tpPx)
+    strategy.exit("Short exit", from_entry = "Short", stop = stopPx, limit = tpPx)
+
+sessionJustEnded = useSession and flatOnEnd and not inSession and inSession[1]
+if sessionJustEnded and strategy.position_size != 0
+    strategy.close_all(comment = "Session end")
+
+if flat and not longSignal and not shortSignal
+    stopPx  := na
+    tpPx    := na
+    beMoved := false
+
+// ── Plots ───────────────────────────────────────────────────────────────────
+plot(emaTrend, "Trend EMA",    color = color.new(#eb6834, 0),  linewidth = 2)
+plot(emaPull,  "Pullback EMA", color = color.new(#2a78d6, 0),  linewidth = 1)
+
+plot(stopPx, "Stop",   color = color.new(#d03b3b, 0), style = plot.style_linebr, linewidth = 1)
+plot(tpPx,   "Target", color = color.new(#0ca30c, 0), style = plot.style_linebr, linewidth = 1)
+
+bgcolor(useSession and inSession and tfOK ? color.new(#9a6f12, 94) : na, title = "Session")
+
+// ── Timeframe notice ────────────────────────────────────────────────────────
+var label warn = na
+if barstate.islast and not tfOK
+    label.delete(warn)
+    warn := label.new(bar_index, high,
+         "No trades on this timeframe.\nThis strategy is locked to " + tfLock +
+         ".\nSwitch the chart, or set “Take trades only on” to Any.",
+         style = label.style_label_down, color = color.new(#d03b3b, 10),
+         textcolor = color.white, size = size.normal)
+
+// ── Alerts ──────────────────────────────────────────────────────────────────
+alertcondition(longSignal,  "Long entry",  "XAUUSD long pullback entry")
+alertcondition(shortSignal, "Short entry", "XAUUSD short pullback entry")
