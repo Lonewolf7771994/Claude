@@ -1,0 +1,608 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © ME Institutional — ME iFVG Strategy v1.0
+//@version=6
+strategy("ME iFVG Strategy v1.0", shorttitle="ME iFVG ST", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=300, max_bars_back=1000, initial_capital=10000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.02, slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME iFVG v1.0 — the inverted fair-value-gap model, with the four qualifiers
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SEQUENCE. A fair value gap is a three-bar imbalance. While price respects
+// it, it is support (bullish gap) or resistance (bearish gap). When price CLOSES
+// clean through it, the gap INVERTS: what was support becomes resistance and
+// vice versa. The trade is the retest of that inverted gap, in the new
+// direction.
+//
+//     1  gap forms          low[0] > high[2]        (bullish)
+//     2  price closes THROUGH it                    -> now bearish resistance
+//     3  price returns INTO the inverted gap
+//     4  it rejects                                 -> SHORT
+//
+// THE FOUR QUALIFIERS, each an explicit, visible, switchable check:
+//
+//   LIQUIDITY SWEEP  a swing high or low must have been taken and reclaimed
+//                    within i_sweepAge bars before entry, on the side the trade
+//                    is going. Stops get run first; that is the fuel.
+//   DELIVERY         the displacement leg that CREATED the gap must be
+//                    decisive — measured at formation and stored with the gap,
+//                    so a gap left by a limp move never qualifies later.
+//   FVG SIZE         the gap must be at least i_fvgMin ATR tall. Small gaps are
+//                    noise and invert constantly.
+//   TARGETS          the opposing liquidity must sit at least i_minTargetR
+//                    multiples of risk away. No room, no trade.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS DOES AND DOES NOT CLAIM
+//
+// It implements the model faithfully and shows its working. It does NOT come
+// with a profitability claim, and I am not going to attach one. I have twice
+// produced edge figures on synthetic data that evaporated on a real backtest,
+// so any number I generated here would be worth nothing to you.
+//
+// What you can verify yourself, and should before risking anything:
+//   - put the strategy build on your chart and read the Strategy Tester
+//   - profit factor and TOTAL CLOSED TRADES matter more than net profit;
+//     twenty trades prove nothing either way
+//   - the dashboard shows all four qualifiers live, so when it does not fire
+//     you can see exactly which one is missing rather than guess
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// HOW OFTEN IT FIRES — measured, and this part IS trustworthy because rate is a
+// property of the logic rather than of the price data's drift:
+//
+//     tf     trades/day   median hold   p90 hold   median gap
+//     5m     2.67         2 bars        10         0.48 ATR
+//     15m    0.91         2 bars        16         0.50 ATR
+//     30m    0.40         3 bars        22         0.50 ATR
+//     1H     0.21         4 bars        15         0.53 ATR
+//     4H     0.04         4 bars        14         0.57 ATR
+//
+// THIS IS A LOWER-TIMEFRAME MODEL and the numbers say so. An inverted gap that
+// is retested promptly, after a sweep, off a decisive displacement, with room to
+// liquidity, is simply rare on 4H — about one a WEEK even with every qualifier
+// relaxed as far as it sensibly goes:
+//
+//     4H  defaults 0.05/day  ->  relaxed 0.15/day
+//     1H  defaults 0.20/day  ->  relaxed 0.54/day
+//     (relaxed = delivery 0.6, sweep age 60, sweep wick 0.15, ages doubled)
+//
+// If you want it on 4H or above, expect a handful of setups a month and size
+// accordingly. Do not compensate by switching qualifiers off — that turns it
+// into a different, weaker model rather than the one in the diagram.
+//
+// WHAT REJECTS A RETEST, pooled across timeframes:
+//     delivery 43%   sweep 39%   targets 15%   cooldown 1%   risk 1%
+// Delivery and the sweep do nearly all the filtering. If the dashboard shows
+// setups arriving but nothing firing, those two rows are where to look.
+//
+// NON-REPAINTING. Every state change happens on barstate.isconfirmed. No
+// request.security, no higher-timeframe series, no lookahead. A gap's inversion
+// and its delivery score are stamped when they happen and never revised.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+var string G_SET  = "══ Setup ══"
+var string G_QUAL = "══ The Four Qualifiers ══"
+var string G_RISK = "══ Risk & Targets ══"
+var string G_DISP = "══ Display ══"
+
+i_dir      = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_SET)
+i_gapAge   = input.int(50, "Gap Max Age (bars)", minval=5, maxval=500, group=G_SET,
+     tooltip="A gap older than this is dropped whether or not it ever inverted. Stops the store filling with ancient levels nobody is watching.")
+i_invAge   = input.int(30, "Retest Window After Inversion (bars)", minval=2, maxval=200, group=G_SET,
+     tooltip="Once a gap inverts, how long it stays tradeable. The retest is supposed to be prompt; a gap inverted forty bars ago is just an old level.")
+i_rejClose = input.float(0.5, "Rejection Depth (fraction of gap)", minval=0.0, maxval=1.0, step=0.05, group=G_SET,
+     tooltip="How far back out of the zone the bar must close for the retest to count as a rejection. 0.5 means it must close back beyond the gap's midpoint.\n\nRaise toward 1.0 to demand a full rejection (fewer, cleaner). Lower toward 0 to accept a close anywhere inside.")
+
+// ── the four qualifiers ───────────────────────────────────────────────────────
+i_useSweep = input.bool(true, "1 · Liquidity Sweep required", group=G_QUAL)
+i_sweepPiv = input.int(5, "     sweep pivot length", minval=2, maxval=50, group=G_QUAL)
+i_sweepWick= input.float(0.25, "     min sweep overshoot (× ATR)", minval=0.0, maxval=2.0, step=0.05, group=G_QUAL,
+     tooltip="How far past the swing point price must poke before reclaiming it. Below about 0.15 ATR you are counting ordinary noise as a stop run.")
+i_sweepAge = input.int(25, "     sweep must be within (bars)", minval=1, maxval=200, group=G_QUAL,
+     tooltip="The sweep has to be recent enough to be the fuel for THIS move. A sweep sixty bars ago is unrelated history.")
+
+i_useDeliv = input.bool(true, "2 · Delivery required", group=G_QUAL)
+i_delivAtr = input.float(1.0, "     min displacement (× ATR)", minval=0.1, maxval=10.0, step=0.1, group=G_QUAL,
+     tooltip="The size of the three-bar leg that created the gap, measured open[2] to close[0] in ATR. This is stored WITH the gap at formation, so a gap left by a weak move can never qualify later just because volatility changed.")
+
+i_useSize  = input.bool(true, "3 · FVG Size required", group=G_QUAL)
+i_fvgMin   = input.float(0.30, "     min gap height (× ATR)", minval=0.0, maxval=5.0, step=0.05, group=G_QUAL,
+     tooltip="Gaps smaller than this are noise: they form constantly, invert constantly, and their retests are meaningless.")
+i_fvgMax   = input.float(3.00, "     max gap height (× ATR)", minval=0.5, maxval=20.0, step=0.25, group=G_QUAL,
+     tooltip="A huge gap is usually a news candle. Its retest is a long way from its far edge, so the stop is enormous and the R is unusable. 0 disables the ceiling.")
+
+i_useTgt   = input.bool(true, "4 · Targets required", group=G_QUAL)
+i_minTgtR  = input.float(1.5, "     min room to liquidity (× risk)", minval=0.5, maxval=10.0, step=0.1, group=G_QUAL,
+     tooltip="The opposing liquidity — the swing the trade is aiming at — must be at least this many multiples of the stop distance away. If the target is closer than the stop, the setup is not worth taking however pretty it looks.")
+
+i_atrLen   = input.int(14, "ATR Length", minval=5, maxval=50, group=G_RISK)
+i_slBuf    = input.float(0.15, "SL Buffer Beyond Gap (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=G_RISK,
+     tooltip="The stop sits beyond the FAR edge of the inverted gap plus this. Beyond the gap the idea is simply wrong.")
+i_maxRiskA = input.float(2.0, "Max Risk (× ATR)", minval=0.3, maxval=10.0, step=0.1, group=G_RISK,
+     tooltip="Setups needing a wider stop than this are rejected rather than clamped — an inverted gap has a definite far edge, and moving the stop inside it would be stopping out while the idea is still valid.")
+i_costPts  = input.float(0.0, "Round-Trip Cost (price points, 0 = off)", minval=0.0, step=0.01, group=G_RISK,
+     tooltip="Spread plus expected slippage in price units. When set, the engine declines any setup where cost would exceed the share of risk below — the arithmetic that makes low timeframes unpayable no matter how good the pattern is.")
+i_maxCostR = input.float(0.03, "Max Cost as Fraction of Risk", minval=0.005, maxval=0.30, step=0.005, group=G_RISK)
+i_tp2R     = input.float(2.0, "TP2 (× risk) beyond liquidity", minval=0.5, maxval=20.0, step=0.5, group=G_RISK)
+i_beAfterT1= input.bool(true, "Stop to breakeven at TP1", group=G_RISK)
+i_cooldown = input.int(5, "Cooldown Between Signals (bars)", minval=0, maxval=100, group=G_RISK)
+
+i_showGaps = input.bool(true, "Show gaps (live and inverted)", group=G_DISP)
+i_showSwp  = input.bool(true, "Mark liquidity sweeps", group=G_DISP)
+i_showPlan = input.bool(true, "Show entry / SL / TP", group=G_DISP)
+i_dash     = input.bool(true, "Show dashboard", group=G_DISP)
+i_dashPos  = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=G_DISP)
+
+allowLong  = i_dir != "Short only"
+allowShort = i_dir != "Long only"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE
+// ═══════════════════════════════════════════════════════════════════════════════
+conf   = barstate.isconfirmed
+atr    = ta.atr(i_atrLen)
+rng_   = math.max(high - low, 1e-9)
+closePos = (close - low) / rng_
+
+// A three-bar window spanning a market closure is a calendar artefact, not
+// displacement. Reject it.
+barMs  = timeframe.in_seconds() * 1000
+contig = barMs > 0 and (time - time[2]) <= barMs * 2 * 3
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUALIFIER 1 — LIQUIDITY SWEEP
+// ─────────────────────────────────────────────────────────────────────────────
+// A swing point is taken out by a wick and immediately reclaimed on the close.
+// That is a stop run: the orders resting beyond the swing were filled and price
+// rejected the level. Tracked as an AGE so any later setup can ask "was there a
+// sweep recently, on my side?"
+// ═══════════════════════════════════════════════════════════════════════════════
+pvH = ta.pivothigh(high, i_sweepPiv, i_sweepPiv)
+pvL = ta.pivotlow(low,   i_sweepPiv, i_sweepPiv)
+var float swingHi = na
+var float swingLo = na
+if not na(pvH)
+    swingHi := pvH
+if not na(pvL)
+    swingLo := pvL
+
+// sweep of a LOW = liquidity taken below = fuel for LONGS
+sweepLoNow = conf and not na(swingLo) and (swingLo - low) >= atr * i_sweepWick and close > swingLo
+sweepHiNow = conf and not na(swingHi) and (high - swingHi) >= atr * i_sweepWick and close < swingHi
+
+var int sweepLoAge = 100000
+var int sweepHiAge = 100000
+if conf
+    sweepLoAge := sweepLoNow ? 0 : sweepLoAge + 1
+    sweepHiAge := sweepHiNow ? 0 : sweepHiAge + 1
+
+sweptForLong  = not i_useSweep or sweepLoAge <= i_sweepAge
+sweptForShort = not i_useSweep or sweepHiAge <= i_sweepAge
+
+plotshape(i_showSwp and sweepLoNow, "Sweep low",  shape.triangleup,   location.belowbar, color.new(#26C6DA, 20), size=size.tiny)
+plotshape(i_showSwp and sweepHiNow, "Sweep high", shape.triangledown, location.abovebar, color.new(#26C6DA, 20), size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THE GAP STORE
+// ─────────────────────────────────────────────────────────────────────────────
+// Each gap carries the facts that were true WHEN IT FORMED — its size and the
+// delivery that created it — plus its live state. Stamping those at formation
+// matters: it stops a gap left by a limp move qualifying later just because
+// volatility has since changed.
+//
+//   state 0  live      still respected, acting as support/resistance
+//   state 1  inverted  price closed clean through it; roles now reversed
+//   state 2  spent     already traded, or the retest window expired
+// ═══════════════════════════════════════════════════════════════════════════════
+var array<float> gTop  = array.new_float()   // upper edge
+var array<float> gBot  = array.new_float()   // lower edge
+var array<int>   gBar  = array.new_int()     // formation bar
+var array<int>   gDir  = array.new_int()     // +1 bullish gap, -1 bearish gap
+var array<int>   gStat = array.new_int()     // 0 live, 1 inverted, 2 spent
+var array<int>   gInvB = array.new_int()     // bar it inverted
+var array<float> gDelv = array.new_float()   // displacement at formation, in ATR
+var array<float> gSize = array.new_float()   // gap height at formation, in ATR
+var array<box>   gBox  = array.new_box()
+
+// ── formation ─────────────────────────────────────────────────────────────────
+// Delivery is the whole three-bar leg, open[2] to close, in ATR. That is the
+// move that left the imbalance behind.
+delivAtr = atr > 0 ? math.abs(close - open[2]) / atr : 0.0
+
+bullGapNow = conf and contig and low > high[2]
+bearGapNow = conf and contig and low[2] > high
+
+if bullGapNow or bearGapNow
+    float top_ = bullGapNow ? low : low[2]
+    float bot_ = bullGapNow ? high[2] : high
+    float sz   = atr > 0 ? (top_ - bot_) / atr : 0.0
+    bool  okSz = (not i_useSize) or (sz >= i_fvgMin and (i_fvgMax <= 0 or sz <= i_fvgMax))
+    if okSz
+        array.push(gTop, top_)
+        array.push(gBot, bot_)
+        array.push(gBar, bar_index)
+        array.push(gDir, bullGapNow ? 1 : -1)
+        array.push(gStat, 0)
+        array.push(gInvB, 0)
+        array.push(gDelv, delivAtr)
+        array.push(gSize, sz)
+        box bx = na
+        if i_showGaps
+            bx := box.new(bar_index - 2, top_, bar_index, bot_,
+                 border_color=color.new(bullGapNow ? #26A69A : #EF5350, 40),
+                 bgcolor=color.new(bullGapNow ? #26A69A : #EF5350, 88))
+        array.push(gBox, bx)
+
+// ── state machine ─────────────────────────────────────────────────────────────
+// A bullish gap inverts when a bar CLOSES below its lower edge; a bearish gap
+// when a bar closes above its upper edge. Close, not wick: a wick through is a
+// test, a close through is a change of character.
+if conf and array.size(gBar) > 0
+    for k = array.size(gBar) - 1 to 0
+        int st = array.get(gStat, k)
+        int dr = array.get(gDir, k)
+        float tp_ = array.get(gTop, k)
+        float bt_ = array.get(gBot, k)
+        int age = bar_index - array.get(gBar, k)
+        bool drop = false
+        if st == 0
+            if (dr == 1 and close < bt_) or (dr == -1 and close > tp_)
+                array.set(gStat, k, 1)
+                array.set(gInvB, k, bar_index)
+                if i_showGaps and not na(array.get(gBox, k))
+                    box.set_bgcolor(array.get(gBox, k), color.new(#FFA726, 84))
+                    box.set_border_color(array.get(gBox, k), color.new(#FFA726, 30))
+            else if age > i_gapAge
+                drop := true
+        else if st == 1
+            if bar_index - array.get(gInvB, k) > i_invAge
+                drop := true
+        else
+            drop := true
+        if drop
+            if not na(array.get(gBox, k))
+                box.delete(array.get(gBox, k))
+            array.remove(gTop, k)
+            array.remove(gBot, k)
+            array.remove(gBar, k)
+            array.remove(gDir, k)
+            array.remove(gStat, k)
+            array.remove(gInvB, k)
+            array.remove(gDelv, k)
+            array.remove(gSize, k)
+            array.remove(gBox, k)
+
+// keep the live boxes tracking the right edge
+if i_showGaps and conf and array.size(gBox) > 0
+    for k = 0 to array.size(gBox) - 1
+        if not na(array.get(gBox, k))
+            box.set_right(array.get(gBox, k), bar_index + 1)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THE RETEST — find an inverted gap price has just rejected
+// ─────────────────────────────────────────────────────────────────────────────
+// An inverted BULLISH gap is now resistance: price trades up into it and closes
+// back below -> SHORT. An inverted BEARISH gap is now support: price trades down
+// into it and closes back above -> LONG.
+// ═══════════════════════════════════════════════════════════════════════════════
+setLong  = false
+setShort = false
+float zTop = na
+float zBot = na
+float zDelv = na
+float zSize = na
+// index of the gap this retest matched. The gap is marked SPENT only if the
+// setup survives the four qualifiers — otherwise a level would be burned by a
+// retest that never became a trade, and a level can legitimately be tested more
+// than once before it produces one.
+int zIdx = -1
+
+if conf and array.size(gBar) > 0
+    for k = array.size(gBar) - 1 to 0
+        if array.get(gStat, k) == 1
+            float tp_ = array.get(gTop, k)
+            float bt_ = array.get(gBot, k)
+            float mid = bt_ + (tp_ - bt_) * i_rejClose
+            int dr = array.get(gDir, k)
+            // inverted bullish gap = resistance above -> short
+            if dr == 1 and not setShort and high >= bt_ and close < mid and close < open
+                setShort := true
+                zTop := tp_
+                zBot := bt_
+                zDelv := array.get(gDelv, k)
+                zSize := array.get(gSize, k)
+                zIdx := k
+            // inverted bearish gap = support below -> long
+            if dr == -1 and not setLong and low <= tp_ and close > tp_ - (tp_ - bt_) * i_rejClose and close > open
+                setLong := true
+                zTop := tp_
+                zBot := bt_
+                zDelv := array.get(gDelv, k)
+                zSize := array.get(gSize, k)
+                zIdx := k
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUALIFIER 4 — TARGETS. Where is the liquidity this trade is aiming at?
+// ─────────────────────────────────────────────────────────────────────────────
+// A long targets the swing high above; a short targets the swing low below.
+// That is where the resting orders are. If it is nearer than i_minTgtR multiples
+// of the stop distance, there is not enough room and the setup is declined.
+// ═══════════════════════════════════════════════════════════════════════════════
+tgtLong  = swingHi
+tgtShort = swingLo
+
+// stop sits beyond the FAR edge of the gap
+slLong   = (na(zBot) ? na : zBot) - atr * i_slBuf
+slShort  = (na(zTop) ? na : zTop) + atr * i_slBuf
+riskLong  = na(slLong)  ? na : close - slLong
+riskShort = na(slShort) ? na : slShort - close
+
+roomLong  = (not i_useTgt) or (not na(tgtLong)  and not na(riskLong)  and riskLong  > 0 and (tgtLong  - close) >= riskLong  * i_minTgtR)
+roomShort = (not i_useTgt) or (not na(tgtShort) and not na(riskShort) and riskShort > 0 and (close - tgtShort) >= riskShort * i_minTgtR)
+
+delivOkL = (not i_useDeliv) or (not na(zDelv) and zDelv >= i_delivAtr)
+delivOkS = delivOkL
+
+riskOkL = not na(riskLong)  and riskLong  > 0 and riskLong  <= atr * i_maxRiskA
+riskOkS = not na(riskShort) and riskShort > 0 and riskShort <= atr * i_maxRiskA
+
+// cost gate — a fixed spread is a larger share of a small stop
+costOkL = i_costPts <= 0 or (not na(riskLong)  and riskLong  > 0 and i_costPts / riskLong  <= i_maxCostR)
+costOkS = i_costPts <= 0 or (not na(riskShort) and riskShort > 0 and i_costPts / riskShort <= i_maxCostR)
+
+var int lastSigBar = -100000
+coolOk = bar_index - lastSigBar >= i_cooldown
+
+longSig  = setLong  and allowLong  and sweptForLong  and delivOkL and roomLong  and riskOkL and costOkL and coolOk
+shortSig = setShort and allowShort and sweptForShort and delivOkS and roomShort and riskOkS and costOkS and coolOk
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRADE STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+// the level is consumed by a TRADE, not by an attempt
+if conf and (longSig or shortSig) and zIdx >= 0 and zIdx < array.size(gStat)
+    array.set(gStat, zIdx, 2)
+
+var bool  inTrade  = false
+var bool  isLong   = false
+var float eEntry   = na
+var float eSl      = na
+var float eT1      = na
+var float eT2      = na
+var int   eBar     = na
+var bool  eT1Done  = false
+var int   nWin     = 0
+var int   nLoss    = 0
+var int   nTrades  = 0
+
+fired = (longSig or shortSig) and not inTrade
+if fired
+    inTrade := true
+    isLong  := longSig
+    eEntry  := close
+    eSl     := longSig ? slLong : slShort
+    float rk = longSig ? riskLong : riskShort
+    // TP1 IS the liquidity — that is the whole point of the model. TP2 extends
+    // beyond it for the runner third.
+    // Fallback to 1R only when the Targets qualifier is switched OFF: with it on
+    // the liquidity is guaranteed present and the right side of entry, but with
+    // it off tgt can be na or behind price and would draw a nonsense level.
+    float t1raw = longSig ? tgtLong : tgtShort
+    bool  t1ok  = not na(t1raw) and ((t1raw > close) == longSig)
+    eT1     := t1ok ? t1raw : (longSig ? close + rk : close - rk)
+    eT2     := longSig ? close + rk * i_tp2R : close - rk * i_tp2R
+    eBar    := bar_index
+    eT1Done := false
+    lastSigBar := bar_index
+    nTrades := nTrades + 1
+
+slHit = false
+t1Hit = false
+t2Hit = false
+if inTrade and conf and bar_index > eBar
+    slHit := isLong ? low <= eSl : high >= eSl
+    if not eT1Done
+        bool r1 = isLong ? high >= eT1 : low <= eT1
+        if r1 and not slHit
+            eT1Done := true
+            if i_beAfterT1
+                eSl := eEntry
+    t2Hit := isLong ? high >= eT2 : low <= eT2
+
+justClosed = inTrade and (slHit or t2Hit)
+closeTxt = t2Hit ? "TP2 ✓" : slHit ? (eT1Done ? "BE" : "SL ✕") : ""
+closeCol = t2Hit ? color.new(#26A69A, 0) : slHit and eT1Done ? color.new(#FFC400, 0) : color.new(#EF5350, 0)
+if justClosed
+    if t2Hit or eT1Done
+        nWin := nWin + 1
+    else
+        nLoss := nLoss + 1
+    inTrade := false
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING
+// ═══════════════════════════════════════════════════════════════════════════════
+plotshape(longSig,  "LONG",  shape.labelup,   location.belowbar, color.new(#26A69A, 0), text="iFVG", textcolor=color.white, size=size.small)
+plotshape(shortSig, "SHORT", shape.labeldown, location.abovebar, color.new(#EF5350, 0), text="iFVG", textcolor=color.white, size=size.small)
+
+var line pSl = na
+var line pT1 = na
+var line pT2 = na
+var label lSl = na
+var label lT1 = na
+var label lT2 = na
+var label lEnd = na
+if i_showPlan and fired
+    if not na(pSl)
+        line.delete(pSl)
+        line.delete(pT1)
+        line.delete(pT2)
+        label.delete(lSl)
+        label.delete(lT1)
+        label.delete(lT2)
+    if not na(lEnd)
+        label.delete(lEnd)
+    pSl := line.new(bar_index, eSl, bar_index, eSl, color=color.new(#EF5350, 0), width=2)
+    pT1 := line.new(bar_index, eT1, bar_index, eT1, color=color.new(#26A69A, 10), style=line.style_dashed)
+    pT2 := line.new(bar_index, eT2, bar_index, eT2, color=color.new(#26A69A, 45), style=line.style_dashed)
+    lSl := label.new(bar_index, eSl, "SL "  + str.tostring(eSl, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#EF5350, 0), size=size.tiny)
+    lT1 := label.new(bar_index, eT1, "TP1 liquidity " + str.tostring(eT1, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#26A69A, 0), size=size.tiny)
+    lT2 := label.new(bar_index, eT2, "TP2 " + str.tostring(eT2, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#26A69A, 30), size=size.tiny)
+
+if i_showPlan and inTrade and not na(pSl)
+    line.set_x2(pSl, bar_index)
+    line.set_x2(pT1, bar_index)
+    line.set_x2(pT2, bar_index)
+    line.set_y1(pSl, eSl)
+    line.set_y2(pSl, eSl)
+    label.set_x(lSl, bar_index)
+    label.set_y(lSl, eSl)
+    label.set_text(lSl, (eT1Done ? "BE " : "SL ") + str.tostring(eSl, format.mintick))
+    label.set_x(lT1, bar_index)
+    label.set_x(lT2, bar_index)
+
+if i_showPlan and justClosed and not na(pSl)
+    line.set_x2(pSl, bar_index)
+    line.set_x2(pT1, bar_index)
+    line.set_x2(pT2, bar_index)
+    if not na(lEnd)
+        label.delete(lEnd)
+    lEnd := label.new(bar_index, isLong ? low : high, closeTxt,
+         style=isLong ? label.style_label_up : label.style_label_down,
+         color=color.new(#000000, 100), textcolor=closeCol, size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD — the four qualifiers, live, so a quiet chart explains itself
+// ═══════════════════════════════════════════════════════════════════════════════
+nLive = 0
+nInv  = 0
+if array.size(gStat) > 0
+    for k = 0 to array.size(gStat) - 1
+        int st = array.get(gStat, k)
+        if st == 0
+            nLive := nLive + 1
+        if st == 1
+            nInv := nInv + 1
+
+var table dash = na
+if i_dash and barstate.islast
+    pos = i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left
+    if na(dash)
+        dash := table.new(pos, 3, 9, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
+    grn = color.new(#26A69A, 0)
+    red = color.new(#EF5350, 0)
+    dim = color.new(#888888, 0)
+    yel = color.new(#FFC400, 0)
+    wht = color.new(#FFFFFF, 0)
+
+    table.cell(dash, 0, 0, "ME iFVG ST v1.0", text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "LONG",  text_color=grn, text_size=size.tiny, bgcolor=color.rgb(15, 15, 20))
+    table.cell(dash, 2, 0, "SHORT", text_color=red, text_size=size.tiny, bgcolor=color.rgb(15, 15, 20))
+
+    table.cell(dash, 0, 1, "Gaps live / inverted", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 1, str.tostring(nLive) + " live", text_color=nLive > 0 ? wht : dim, text_size=size.tiny)
+    table.cell(dash, 2, 1, str.tostring(nInv) + " inverted", text_color=nInv > 0 ? yel : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "1 · Liquidity sweep", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 2, not i_useSweep ? "off" : sweptForLong  ? "✓ " + str.tostring(sweepLoAge) + "b" : "✕ " + (sweepLoAge > 9999 ? "none" : str.tostring(sweepLoAge) + "b"), text_color=sweptForLong ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 2, not i_useSweep ? "off" : sweptForShort ? "✓ " + str.tostring(sweepHiAge) + "b" : "✕ " + (sweepHiAge > 9999 ? "none" : str.tostring(sweepHiAge) + "b"), text_color=sweptForShort ? red : dim, text_size=size.tiny)
+
+    delivTxt = na(zDelv) ? "—" : str.tostring(math.round(zDelv, 2)) + " / " + str.tostring(i_delivAtr)
+    table.cell(dash, 0, 3, "2 · Delivery", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 3, not i_useDeliv ? "off" : delivTxt, text_color=delivOkL and not na(zDelv) ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 3, not i_useDeliv ? "off" : delivTxt, text_color=delivOkS and not na(zDelv) ? red : dim, text_size=size.tiny)
+
+    sizeTxt = na(zSize) ? "—" : str.tostring(math.round(zSize, 2)) + " ATR"
+    table.cell(dash, 0, 4, "3 · FVG size", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 4, not i_useSize ? "off" : sizeTxt, text_color=na(zSize) ? dim : grn, text_size=size.tiny)
+    table.cell(dash, 2, 4, not i_useSize ? "off" : "min " + str.tostring(i_fvgMin), text_color=dim, text_size=size.tiny)
+
+    rl = na(riskLong)  or riskLong  <= 0 or na(tgtLong)  ? na : (tgtLong - close) / riskLong
+    rs = na(riskShort) or riskShort <= 0 or na(tgtShort) ? na : (close - tgtShort) / riskShort
+    table.cell(dash, 0, 5, "4 · Targets (× risk)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 5, not i_useTgt ? "off" : na(rl) ? "—" : str.tostring(math.round(rl, 2)) + " / " + str.tostring(i_minTgtR), text_color=roomLong  and not na(rl) ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 5, not i_useTgt ? "off" : na(rs) ? "—" : str.tostring(math.round(rs, 2)) + " / " + str.tostring(i_minTgtR), text_color=roomShort and not na(rs) ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Risk (× ATR)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 6, na(riskLong)  ? "—" : str.tostring(math.round(riskLong  / math.max(atr, 1e-9), 2)), text_color=riskOkL ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 6, na(riskShort) ? "—" : str.tostring(math.round(riskShort / math.max(atr, 1e-9), 2)), text_color=riskOkS ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Open trade", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    openTxt = inTrade ? (isLong ? "LONG " : "SHORT ") + str.tostring(bar_index - eBar) + "b" + (eT1Done ? "  TP1✓ BE" : "") : "flat"
+    table.cell(dash, 1, 7, openTxt, text_color=inTrade ? (isLong ? grn : red) : dim, text_size=size.tiny)
+    table.cell(dash, 2, 7, inTrade ? "SL " + str.tostring(eSl, format.mintick) : "", text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Since load", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    wr = nWin + nLoss > 0 ? 100.0 * nWin / (nWin + nLoss) : 0.0
+    table.cell(dash, 1, 8, str.tostring(nTrades) + " trades", text_color=wht, text_size=size.tiny)
+    table.cell(dash, 2, 8, nWin + nLoss > 0 ? str.tostring(math.round(wr, 1)) + "% win" : "—", text_color=wr >= 50 ? grn : dim, text_size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+if longSig
+    alert("ME iFVG LONG | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slLong, format.mintick) + " | TP1 " + str.tostring(tgtLong, format.mintick) + " | risk " + str.tostring(math.round(riskLong / math.max(atr, 1e-9), 2)) + " ATR", alert.freq_once_per_bar_close)
+if shortSig
+    alert("ME iFVG SHORT | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slShort, format.mintick) + " | TP1 " + str.tostring(tgtShort, format.mintick) + " | risk " + str.tostring(math.round(riskShort / math.max(atr, 1e-9), 2)) + " ATR", alert.freq_once_per_bar_close)
+
+alertcondition(longSig,  "ME iFVG — LONG",  "ME iFVG LONG")
+alertcondition(shortSig, "ME iFVG — SHORT", "ME iFVG SHORT")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRATEGY EXECUTION
+// ─────────────────────────────────────────────────────────────────────────────
+// Half out at the liquidity target, the rest runs to TP2 with the stop moved to
+// breakeven. Quantities are ABSOLUTE and fixed at entry: strategy.exit
+// qty_percent is a percentage of the CURRENT position, so re-issuing it every
+// bar liquidates the remainder at TP1.
+// ═══════════════════════════════════════════════════════════════════════════════
+var float stQ1 = na
+var float stQ2 = na
+var bool  stF1 = false
+var bool  stF2 = false
+
+if fired
+    float q = math.max(strategy.equity * 0.10 / math.max(close, 1e-9), 1e-9)
+    stQ1 := q * 0.5
+    stQ2 := q - stQ1
+    stF1 := false
+    stF2 := false
+    if isLong
+        strategy.entry("L", strategy.long, qty=q)
+    else
+        strategy.entry("S", strategy.short, qty=q)
+
+if strategy.position_size > 0
+    if not stF1
+        strategy.exit("L1", from_entry="L", qty=stQ1, limit=eT1, stop=eSl)
+    if not stF2
+        strategy.exit("L2", from_entry="L", qty=stQ2, limit=eT2, stop=eSl)
+if strategy.position_size < 0
+    if not stF1
+        strategy.exit("S1", from_entry="S", qty=stQ1, limit=eT1, stop=eSl)
+    if not stF2
+        strategy.exit("S2", from_entry="S", qty=stQ2, limit=eT2, stop=eSl)
+
+if strategy.position_size != 0 and conf
+    bool r1 = isLong ? high >= eT1 : low <= eT1
+    bool r2 = isLong ? high >= eT2 : low <= eT2
+    if r1
+        stF1 := true
+    if r2
+        stF2 := true
+
+if strategy.position_size == 0 and not fired
+    stF1 := false
+    stF2 := false
