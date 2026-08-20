@@ -7,6 +7,10 @@ port deviates it is marked APPROX and stated in the report.
 import math
 from dataclasses import dataclass, field
 
+# Set to 0.0 to reproduce the exact-cap comparison bug (risk == cap fails `<=`
+# by one ULP). Kept switchable so the bug's cost can be measured, not asserted.
+RISK_TOL = 1e-9
+
 # ── indicators ──────────────────────────────────────────────────────────────
 def wilder_atr(h, l, c, n):
     out=[float('nan')]*len(c); tr=[]
@@ -363,7 +367,7 @@ def _eval(bars, S, cfg, e, PH, PL, ef, es, rs, v, vavg, cvd_hist, last_sig, bloc
         # A clamped stop lands EXACTLY on the cap, and `<=` then fails by one
         # floating-point ULP — which was rejecting ~47% of setups here and is
         # the same latent defect the Pine carries.
-        tol = 1e-9
+        tol = RISK_TOL
         if not (refA*e["min_risk"]*(1-tol) <= risk <= refA*e["max_risk"]*(1+tol)):
             why.append("risk")
         mchase = cfg.loose_max_chase if (scalp and cfg.loose) else cfg.max_chase
