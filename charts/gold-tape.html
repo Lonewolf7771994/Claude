@@ -15,7 +15,7 @@
   --hair:rgba(22,21,15,0.11);
   --hair-strong:rgba(22,21,15,0.20);
   --brass:#9a6f12;
-  --brass-soft:rgba(154,111,18,0.13);
+  --brass-soft:rgba(154,111,18,0.13);--zn-sup:rgba(208,59,59,0.10);--zn-sup-e:rgba(208,59,59,0.34);--zn-dem:rgba(12,163,12,0.10);--zn-dem-e:rgba(12,163,12,0.34);--zn-act:rgba(154,111,18,0.15);--zn-act-e:rgba(154,111,18,0.50);
   --ma-fast:#2a78d6;
   --ma-slow:#eb6834;
   --bb:rgba(86,84,74,0.085);
@@ -40,7 +40,7 @@
     --hair:rgba(247,246,241,0.12);
     --hair-strong:rgba(247,246,241,0.22);
     --brass:#d9a53c;
-    --brass-soft:rgba(217,165,60,0.16);
+    --brass-soft:rgba(217,165,60,0.16);--zn-sup:rgba(230,103,103,0.13);--zn-sup-e:rgba(230,103,103,0.40);--zn-dem:rgba(47,187,47,0.12);--zn-dem-e:rgba(47,187,47,0.40);--zn-act:rgba(217,165,60,0.16);--zn-act-e:rgba(217,165,60,0.52);
     --ma-fast:#3987e5;
     --ma-slow:#d95926;
     --bb:rgba(184,181,168,0.085);
@@ -65,7 +65,7 @@
   --hair:rgba(247,246,241,0.12);
   --hair-strong:rgba(247,246,241,0.22);
   --brass:#d9a53c;
-  --brass-soft:rgba(217,165,60,0.16);
+  --brass-soft:rgba(217,165,60,0.16);--zn-sup:rgba(230,103,103,0.13);--zn-sup-e:rgba(230,103,103,0.40);--zn-dem:rgba(47,187,47,0.12);--zn-dem-e:rgba(47,187,47,0.40);--zn-act:rgba(217,165,60,0.16);--zn-act-e:rgba(217,165,60,0.52);
   --ma-fast:#3987e5;
   --ma-slow:#d95926;
   --bb:rgba(184,181,168,0.085);
@@ -174,6 +174,17 @@ text{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tab
 .rsiline{fill:none;stroke:var(--brass);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
 .rsiband{fill:var(--brass-soft);}
 .cross{stroke:var(--ink-1);stroke-width:1;opacity:.55;shape-rendering:crispEdges;}
+.znS{fill:var(--zn-sup);} .znD{fill:var(--zn-dem);} .znA{fill:var(--zn-act);}
+.znSe{stroke:var(--zn-sup-e);} .znDe{stroke:var(--zn-dem-e);} .znAe{stroke:var(--zn-act-e);}
+.znEdge{fill:none;stroke-width:1;shape-rendering:crispEdges;}
+.znLab{font-size:9.5px;fill:var(--ink-2);letter-spacing:.09em;}
+.rcol{display:flex;flex-direction:column;gap:22px;}
+.chk{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);cursor:pointer;user-select:none;}
+.chk input{accent-color:var(--brass);width:14px;height:14px;cursor:pointer;margin:0;}
+.chk input:focus-visible{outline:2px solid var(--brass);outline-offset:2px;}
+.ztag{display:inline-flex;align-items:center;gap:6px;}
+.ztag .sw{width:9px;height:9px;flex:none;}
+.zfresh{font-family:"IBM Plex Mono",monospace;font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--brass);}
 .dot{fill:var(--brass);stroke:var(--surface);stroke-width:2;}
 .pxtag{fill:var(--ink-1);}
 .pxtagtx{fill:var(--surface);font-size:11px;font-weight:600;}
@@ -278,6 +289,7 @@ footer b{color:var(--ink-2);font-weight:600;}
 
   <div class="controls">
     <div class="seg" role="group" aria-label="Chart date range" id="rangeSeg"></div>
+    <label class="chk"><input type="checkbox" id="zoneToggle" checked> Show zones</label>
     <span class="hint">Hover or focus the chart and use ← → to step through sessions.</span>
   </div>
 
@@ -305,6 +317,15 @@ footer b{color:var(--ink-2);font-weight:600;}
       <div class="sub">Observations computed from the 365 sessions plotted above — not a recommendation.</div>
       <ul class="reads" id="reads"></ul>
     </div>
+    <div class="rcol">
+    <div class="panel">
+      <h2>Live zones</h2>
+      <div class="sub">Supply and demand bands built from swing pivots, drawn on the chart above.</div>
+      <table class="ladder">
+        <thead><tr><th>Zone</th><th class="r">Range</th><th class="r">Tests</th><th class="r">Distance</th></tr></thead>
+        <tbody id="zoneTbl"></tbody>
+      </table>
+    </div>
     <div class="panel">
       <h2>Level ladder</h2>
       <div class="sub">Structural prices above and below the last close.</div>
@@ -312,6 +333,7 @@ footer b{color:var(--ink-2);font-weight:600;}
         <thead><tr><th>Level</th><th class="r">Price</th><th class="r">From close</th></tr></thead>
         <tbody id="ladder"></tbody>
       </table>
+    </div>
     </div>
   </div>
 
@@ -331,8 +353,13 @@ footer b{color:var(--ink-2);font-weight:600;}
     provider's own indicator snapshot at the matching bar.</p>
     <p><b>Two caveats worth knowing.</b> Reported volume changes source on 21 Jul 2026 — from roughly 5–10 million
     shares a day to five-figure prints — which is a feed change, not a collapse in trading. Volume is therefore not
-    charted. The provider's intraday last print was 414.50 against the 415.26 daily close used throughout; the
+    charted. The provider's intraday last print was 414.65 against the 415.26 daily close used throughout; the
     difference is the timing of the snapshot.</p>
+    <p><b>How the zones are drawn.</b> Swing pivots are found where a bar&#39;s high (or low) exceeds every bar
+    five sessions either side. Pivots within 0.55 ATR of each other are clustered, and each cluster becomes a
+    band 0.6 ATR wide around its mean — a fixed width, so no zone can quietly widen into a meaningless
+    30-point block. &ldquo;Tests&rdquo; counts sessions that traded into the band after it formed. Bands more than
+    15% from the last close are dropped as untradeable from here.</p>
     <p><b>Not financial advice.</b> Informational only. GLD tracks gold but is not gold: it carries fund expenses,
     trades only in US market hours, and can diverge from spot XAUUSD.</p>
   </footer>
@@ -343,7 +370,8 @@ const DATA = [["2025-03-10",267.62,268.44,265.64,266.04,7593900,null,null,null,n
 const D={d:0,o:1,h:2,l:3,c:4,v:5,s20:6,s50:7,s200:8,bu:9,bl:10,r:11,mh:12};
 const RANGES=[["1M",21],["3M",63],["6M",126],["1Y",252],["MAX",DATA.length]];
 const SVGNS="http://www.w3.org/2000/svg";
-let state={bars:252,idx:null};
+const ZONES = [{"type":"supply","lo":441.55,"hi":446.02,"mid":443.78,"width":4.48,"widthAtr":0.6,"formed":"2026-02-17","pivots":2,"touches":7,"lastTouch":"2026-04-20","fresh":false,"distPct":6.87},{"type":"supply","lo":417.9,"hi":424.79,"mid":421.34,"width":6.89,"widthAtr":0.92,"formed":"2025-12-26","pivots":3,"touches":20,"lastTouch":"2026-05-29","fresh":false,"distPct":1.46},{"type":"active","lo":411.04,"hi":415.52,"mid":413.28,"width":4.48,"widthAtr":0.6,"formed":"2026-05-04","pivots":1,"touches":13,"lastTouch":"2026-08-20","fresh":false,"distPct":-0.48},{"type":"demand","lo":400.43,"hi":404.91,"mid":402.67,"width":4.48,"widthAtr":0.6,"formed":"2025-10-20","pivots":2,"touches":21,"lastTouch":"2026-08-18","fresh":false,"distPct":-3.03},{"type":"demand","lo":365.28,"hi":369.76,"mid":367.52,"width":4.48,"widthAtr":0.6,"formed":"2025-11-17","pivots":2,"touches":14,"lastTouch":"2026-08-03","fresh":false,"distPct":-11.5},{"type":"demand","lo":360.11,"hi":364.58,"mid":362.35,"width":4.48,"widthAtr":0.6,"formed":"2025-10-28","pivots":3,"touches":6,"lastTouch":"2026-07-17","fresh":false,"distPct":-12.74}];
+let state={bars:252,idx:null,zones:true};
 
 const N=(v,d=2)=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
 const PCT=v=>(v>=0?"+":"")+v.toFixed(2)+"%";
@@ -392,6 +420,18 @@ tiles.forEach(t=>{
 
 const reads=[
   ["It just took back the 200-day.","Closes of 413.84 and 415.26 on 19 and 20 August put price above the 200-day average of "+N(last[D.s200])+" for the first time since 4 June — two sessions, so it is a reclaim, not yet a trend."],
+  (function(){
+    const act=ZONES.find(z=>z.type==="active");
+    const sup=ZONES.filter(z=>z.type==="supply").sort((a,b)=>a.lo-b.lo)[0];
+    const dem=ZONES.filter(z=>z.type==="demand").sort((a,b)=>b.hi-a.hi)[0];
+    const head="The rally is running straight into supply.";
+    let body="The first band overhead is "+N(sup.lo)+"–"+N(sup.hi)+", "+PCT(sup.distPct)+" away and tested "+sup.touches+
+      " times, and the upper Bollinger at "+N(last[D.bu])+" sits inside it — two obstacles at the same price. ";
+    body+= act ? "Price is currently inside the "+N(act.lo)+"–"+N(act.hi)+" band it has traded through "+act.touches+" times. "
+                : "Price is between bands. ";
+    body+="First support back is "+N(dem.lo)+"–"+N(dem.hi)+" at "+PCT(dem.distPct)+".";
+    return [head,body];
+  })(),
   ["The longer-term signal still says downtrend.","The 50-day crossed below the 200-day on 30 June and sits "+N(last[D.s200]-last[D.s50])+" points under it. That death cross does not unwind until the 50-day turns up through it."],
   ["Momentum is stretched into the move.","RSI is "+last[D.r].toFixed(1)+" and the close sits at "+bbPctB.toFixed(0)+"% of the Bollinger channel, just under the upper band at "+N(last[D.bu])+". Rallies that arrive here usually pause or need a base."],
   ["The bigger picture is a broken blow-off.","Gold spiked to "+N(peak[D.h])+" on 29 January, then fell "+Math.abs((trough[D.l]/peak[D.h]-1)*100).toFixed(1)+"% into the "+N(trough[D.l])+" low on 24 June. It has recovered "+PCT((last[D.c]/trough[D.l]-1)*100)+" since and is still "+Math.abs((last[D.c]/peak[D.h]-1)*100).toFixed(1)+"% below that high."],
@@ -420,6 +460,28 @@ levels.forEach(([n,p])=>{
   const b=document.createElement("td"); b.className="num r"; b.textContent=N(p);
   const c=document.createElement("td"); c.className="far r"; c.textContent=isNow?"—":PCT((p/last[D.c]-1)*100);
   tr.append(a,b,c); lb.appendChild(tr);
+});
+
+/* ---------- zone table ---------- */
+const zt=document.getElementById("zoneTbl");
+ZONES.forEach(z=>{
+  const tr=document.createElement("tr");
+  if(z.type==="active") tr.className="here";
+  const a=document.createElement("td");
+  const tag=document.createElement("span"); tag.className="ztag";
+  const sw=document.createElement("span"); sw.className="sw";
+  sw.style.background=z.type==="supply"?"var(--zn-sup-e)":z.type==="demand"?"var(--zn-dem-e)":"var(--zn-act-e)";
+  tag.append(sw,document.createTextNode(z.type==="active"?"Price inside":z.type==="supply"?"Supply":"Demand"));
+  a.appendChild(tag);
+  if(z.fresh){const f=document.createElement("div"); f.className="zfresh"; f.textContent="untested"; a.appendChild(f);}
+  const b=document.createElement("td"); b.className="num r"; b.textContent=N(z.lo)+"–"+N(z.hi);
+  const c=document.createElement("td"); c.className="far r"; c.textContent=z.touches;
+  const d=document.createElement("td"); d.className="far r";
+  d.textContent=z.type==="active"?"here":(z.distPct>0?"+":"")+z.distPct+"%";
+  tr.append(a,b,c,d); zt.appendChild(tr);
+});
+document.getElementById("zoneToggle").addEventListener("change",e=>{
+  state.zones=e.target.checked; draw(); hideTip();
 });
 
 /* ---------- range control ---------- */
@@ -466,6 +528,28 @@ function draw(){
     const y=Y(t);
     g.appendChild(el("line",{class:"gridline",x1:PAD.l,x2:PAD.l+plotW,y1:y,y2:y}));
     const tx=el("text",{class:"tk",x:PAD.l+plotW+7,y:y+3.5}); tx.textContent=N(t,0); g.appendChild(tx);
+  });
+
+  // ---- zones: drawn first so price always sits on top ----
+  if(state.zones) ZONES.forEach(z=>{
+    const yHi=Y(z.hi), yLo=Y(z.lo);
+    if(yLo < PAD.t || yHi > PAD.t+plotH) return;            // wholly outside the view
+    const top=Math.max(PAD.t,yHi), bot=Math.min(PAD.t+plotH,yLo);
+    if(bot-top < 0.5) return;
+    const k=z.type==="supply"?"S":z.type==="demand"?"D":"A";
+    g.appendChild(el("rect",{class:"zn"+k,x:PAD.l,y:top,width:plotW,height:bot-top}));
+    g.appendChild(el("path",{class:"znEdge zn"+k+"e",
+      d:"M"+PAD.l+" "+top.toFixed(1)+"H"+(PAD.l+plotW)+"M"+PAD.l+" "+bot.toFixed(1)+"H"+(PAD.l+plotW)}));
+    // every band gets named; thin ones drop the numbers, which the table carries
+    const hgt=bot-top;
+    if(hgt >= 6 && !narrow){
+      const full = hgt >= 13;
+      const t=el("text",{class:"znLab",x:PAD.l+6,y:(top+bot)/2+(full?3.3:2.9)});
+      if(!full) t.setAttribute("style","font-size:8.5px");
+      const name=z.type==="active"?"IN ZONE":z.type.toUpperCase();
+      t.textContent=full ? name+"  "+N(z.lo)+"–"+N(z.hi) : name;
+      g.appendChild(t);
+    }
   });
 
   // Bollinger envelope
