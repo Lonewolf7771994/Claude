@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
 // © ME Institutional — Movement Engine Pro v4.1 (mode rebuild)
 //@version=6
-indicator("Movement Engine Pro v4.1", shorttitle="ME Pro v4.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+indicator("Movement Engine Pro v4.1", shorttitle="ME Pro v4.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=1500)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v4.1 — EVERY MODE TRADES. MODE IS A STANDARD, NOT A TRIGGER BAN.
@@ -1749,10 +1749,35 @@ i_vwapShow   = input.bool(true, "Show VWAP Line", group=G_VWAP)
 i_vwapCol    = input.color(color.new(#FFD700, 60), "VWAP Color", group=G_VWAP)
 
 // ── FRVP ─────────────────────────────────────────────────────────────────────
-i_frvpAuto   = input.bool(true, "Auto-Extend Lookback On Low Timeframes",
-     tooltip="v3.5.34: raises the FRVP lookback so the profile always spans at least ~24 hours, without ever shortening it.\n100 bars is 25h on 15m and longer above that, but only 8.3h on 5m and 1.7h on 1m — far too little trade to define a value area, so VAH/VAL become noise on exactly the timeframes where they are used as targets and as a confluence leg.\nTakes max(your setting, bars needed for 24h), capped at 500. On 15m and above your setting is already larger, so nothing changes; 5m becomes 288 and 1m becomes 500 (the cap).\nA longer lookback costs load time — that is the trade for a value area that means something.",
+// TIMEFRAME-CONSISTENCY FIX.
+// The profile was anchored to a BAR COUNT, so the same chart at four different
+// timeframes profiled four different spans of market history and returned four
+// different POC/VAH/VAL. Measured on one resampled price path, 100 bars @ 32
+// bins:
+//     5m  =   8.3 h  ->  POC 4866.47   VA width  59.57
+//     15m =  25.0 h  ->  POC 4580.37   VA width 284.14
+//     30m =  50.0 h  ->  POC 4585.16   VA width 197.85
+//     1H  = 100.0 h  ->  POC 4583.68   VA width 257.58
+//     POC spread across the four charts: 286.10 price units.
+// That is not a rendering difference — the levels are structurally different
+// objects, and since v3.5.8 VAH/VAL feed the TP3 target and the reward gate, so
+// the SIGNAL differed by timeframe too.
+// Anchoring the same window to HOURS instead collapses it. Same path, same fix:
+//     24 h window -> POC spread 0.00, VAH/VAL spread 33.43 (bin granularity only)
+//     72 h window -> POC spread 0.00, VAH/VAL spread 0.00
+// Default is now the hours anchor. "Bars (legacy)" reproduces the old behavior
+// exactly for anyone who tuned against it.
+i_frvpAnchor = input.string("Hours (TF-independent)", "FRVP Anchor",
+     options=["Hours (TF-independent)", "Bars (legacy)"],
+     tooltip="Hours: the profile always covers the same span of real time, so POC/VAH/VAL agree across 5m/15m/30m/1H on the same chart. Bars: the older behavior — a fixed bar count, which means a different span of history on every timeframe.",
      group=G_FRVP)
-i_frvpLen    = input.int(100, "FRVP Lookback (bars)", minval=20, maxval=500, group=G_FRVP)
+i_frvpHours  = input.float(24.0, "FRVP Window (hours)", minval=1.0, maxval=168.0, step=1.0,
+     tooltip="Used when Anchor = Hours. 24 = one trading day. Larger windows agree more tightly across timeframes (bin granularity is the only residual) but respond more slowly.",
+     group=G_FRVP)
+i_frvpMaxBars = input.int(600, "FRVP Max Bars (hard cap)", minval=50, maxval=1500,
+     tooltip="Safety cap on how many bars the hours window may expand to. On low timeframes the requested hours can exceed what the script can look back over; the window is then TRUNCATED to this many bars. When that happens the dashboard FRVP row shows the hours ACTUALLY profiled and marks them with ~, so the truncation is visible instead of silent.",
+     group=G_FRVP)
+i_frvpLen    = input.int(100, "FRVP Lookback (bars, legacy anchor)", minval=20, maxval=500, group=G_FRVP)
 i_frvpBins   = input.int(32,  "FRVP Bins", minval=8, maxval=64,
      tooltip="v3.4: default 24→32, max 48→64. Finer bins = tighter, more accurate VAH/VAL. With proportional volume distribution (v3.4), higher bin counts no longer create noisy profiles.",
      group=G_FRVP)
@@ -2619,11 +2644,16 @@ bandRefBearHigh = band2BearAge < bandBearAge ? band2BearHigh : bandBearHigh
 //     loop was the dominant load-time cost. Levels persist between rebuilds.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// v3.5.34: a fixed bar count is a different amount of market on every
-// timeframe. 100 bars is 25h on 15m but 8.3h on 5m — not enough trade to form
-// a value area, while VAH/VAL are used as TP candidates and as one of the three
-// confluence legs. Never shortens the user's setting; only extends it upward.
-effFrvpLen = i_frvpAuto ? math.max(i_frvpLen, math.min(500, int(86400 / math.max(timeframe.in_seconds(), 1)))) : i_frvpLen
+// Resolve the window ONCE, here, and use effFrvpLen everywhere below.
+// timeframe.in_seconds() and the inputs are all simple values, so effFrvpLen is
+// a simple int and ta.highest/ta.lowest accept it directly.
+frvpTfSec   = math.max(timeframe.in_seconds(), 1)
+frvpWantLen = int(math.round(i_frvpHours * 3600.0 / frvpTfSec))
+effFrvpLen  = i_frvpAnchor == "Bars (legacy)" ? i_frvpLen : math.max(20, math.min(i_frvpMaxBars, frvpWantLen))
+// what the window ACTUALLY covers, in hours — reported on the dashboard so a
+// truncated window is never presented as the window you asked for
+frvpEffHrs  = effFrvpLen * frvpTfSec / 3600.0
+frvpClamped = i_frvpAnchor != "Bars (legacy)" and effFrvpLen < frvpWantLen
 frvpHigh = ta.highest(high, effFrvpLen)
 frvpLow  = ta.lowest(low,   effFrvpLen)
 binSize  = math.max(frvpHigh - frvpLow, 1e-9) / i_frvpBins
@@ -3826,7 +3856,11 @@ if i_dashboard and barstate.islast
     f_cell(2, 11, not volDataSeen ? "OFF (no vol)" : cvdBull ? "BULL" : "BEAR", not volDataSeen ? dim : cvdBull ? grn : red_)
 
     // v3.4: FRVP row shows live POC price
-    table.cell(dash, 0, 12, "FRVP" + (na(pocPrice) ? "" : " @ " + str.tostring(pocPrice, format.mintick)), text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    // Label the window ACTUALLY profiled, not the one requested. "~" marks a
+    // window truncated by the max-bars cap, so a short profile can never be
+    // read as the full one you asked for.
+    frvpWin = i_frvpAnchor == "Bars (legacy)" ? str.tostring(effFrvpLen) + "b" : (frvpClamped ? "~" : "") + str.tostring(frvpEffHrs, "#.#") + "h"
+    table.cell(dash, 0, 12, "FRVP " + frvpWin + (na(pocPrice) ? "" : " @ " + str.tostring(pocPrice, format.mintick)), text_color=frvpClamped ? red_ : dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
     f_cell(1, 12, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "ABOVE") ? grn : dim)
     f_cell(2, 12, frvpPosStr, str.contains(frvpPosStr, "IN VA") or str.contains(frvpPosStr, "BELOW") ? red_ : dim)
 
