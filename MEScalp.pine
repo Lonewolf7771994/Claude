@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — ME Scalp v2.3
+// © ME Institutional — ME Scalp v2.3.1
 //@version=6
-indicator("ME Scalp v2.3", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+indicator("ME Scalp v2.3.1", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v2.3 — THE COST GATE. Built from REAL backtest results, not simulation.
@@ -600,9 +600,16 @@ coolOk  = bar_index - lastSigBar >= cooldown
 // pay and the engine declines to trade it, rather than bleeding quietly.
 // ═══════════════════════════════════════════════════════════════════════════════
 costFloorPts = i_costPts <= 0 ? 0.0 : i_costPts / math.max(i_maxCostR, 1e-6)
-minRiskPts   = math.max(atr * i_minRisk, costFloorPts)
 maxRiskPts   = atr * i_maxRisk
 costViable   = costFloorPts <= maxRiskPts
+// v2.3.1: the cost floor is applied ONLY where it can actually be met. v2.3
+// forced the stop out to the floor unconditionally, so on a timeframe the gate
+// was already rejecting, every level and the dashboard's risk figure were built
+// from a stop ~3 ATR away — a number that belongs to no real trade and matches
+// nothing on the chart. Blocking was correct; the figures shown while blocking
+// were not. When the floor cannot be met the levels stay on the ordinary ATR
+// basis and costViable does the rejecting on its own.
+minRiskPts   = costViable ? math.max(atr * i_minRisk, costFloorPts) : atr * i_minRisk
 
 slRawBull = math.min(bullInval, close - minRiskPts) - atr * i_slBuf
 slRawBear = math.max(bearInval, close + minRiskPts) + atr * i_slBuf
@@ -925,7 +932,7 @@ if i_dash and barstate.islast
     yel = color.new(#FFC400, 0)
     wht = color.new(#FFFFFF, 0)
 
-    table.cell(dash, 0, 0, "ME SCALP v2.3 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME SCALP v2.3.1 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
     table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
 
@@ -952,8 +959,10 @@ if i_dash and barstate.islast
     table.cell(dash, 2, 4, inTrend ? (i_align ? (legUp ? "longs only" : "shorts only") : "both") : "standing aside", text_color=dim, text_size=size.tiny)
 
     table.cell(dash, 0, 5, "Risk (× ATR)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
-    table.cell(dash, 1, 5, str.tostring(math.round(riskBull / math.max(atr, 1e-9), 2)), text_color=riskOkBull ? grn : dim, text_size=size.tiny)
-    table.cell(dash, 2, 5, str.tostring(math.round(riskBear / math.max(atr, 1e-9), 2)), text_color=riskOkBear ? red : dim, text_size=size.tiny)
+    rTxtB = costViable ? str.tostring(math.round(riskBull / math.max(atr, 1e-9), 2)) : "— blocked"
+    rTxtS = costViable ? str.tostring(math.round(riskBear / math.max(atr, 1e-9), 2)) : "— blocked"
+    table.cell(dash, 1, 5, rTxtB, text_color=riskOkBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 5, rTxtS, text_color=riskOkBear ? red : dim, text_size=size.tiny)
 
     // v2.3: the row that decides whether this timeframe can pay at all.
     costPct = riskBull > 0 ? 100.0 * i_costPts / riskBull : na
