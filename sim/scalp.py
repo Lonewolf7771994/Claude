@@ -285,9 +285,17 @@ def run(bars, tf_sec, freq="Standard",
                     blocks["hold"] = blocks.get("hold", 0)+1; continue
                 ei = ei + 1
                 entry = nxt[4]
-                sl = min(sl, entry - A*min_risk) if is_buy else max(sl, entry + A*min_risk)
+                # floor AND cap, both from the actual entry. Flooring only lets
+                # risk grow by however far the confirming bar ran, which makes
+                # the target ladder unreachable while the stop stays in range.
+                if is_buy:
+                    sl = min(sl, entry - A*min_risk)
+                    sl = max(sl, entry - A*max_risk)
+                else:
+                    sl = max(sl, entry + A*min_risk)
+                    sl = min(sl, entry + A*max_risk)
                 risk = (entry - sl) if is_buy else (sl - entry)
-                if risk < A*min_risk:
+                if risk < A*min_risk*0.999:
                     blocks["thin"] = blocks.get("thin", 0)+1; continue
                 d3 = 1.0 if is_buy else -1.0
                 tps = [entry + d3*risk*r_ for r_ in eff_tp]

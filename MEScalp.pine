@@ -1,7 +1,33 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — ME Scalp v2.3.1
+// © ME Institutional — ME Scalp v2.3.2
 //@version=6
-indicator("ME Scalp v2.3.1", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+indicator("ME Scalp v2.3.2", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v2.3.2 — THE RISK CAP WAS BEING BYPASSED.
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: a loss on 15m and 30m where the stop was hit directly, no target was
+// touched, and the levels did not match the chart. Both halves were one bug.
+//
+//   entSlB = i_confirmBar ? math.min(armSl, close - atr*i_minRisk) : slBull
+//                           ^^^^^^^^ floors the risk, never CAPS it
+//
+// The stop stayed on the setup bar while the entry moved to the confirming
+// bar's close, so risk became (however far that bar ran) + 1.0 ATR, unbounded.
+// Confirmation only passes on strong bars, so the breach was selected FOR — and
+// confirmation was ON by default.
+//
+// At 2.5 ATR of risk, TP1 (0.8R) is 2.0 ATR away and TP3 is 5.0 ATR away,
+// neither reachable inside a 12-bar time stop, while the stop remains easily
+// reachable. The only outcomes left are the stop or the clock, which is exactly
+// what was reported, and the dashboard printed ~2.5 against a 1.0 ATR cap:
+// the unreal reading.
+//
+// CONFIRMATION IS ALSO OFF BY DEFAULT NOW. Its +0.3757R-vs-+0.2757R
+// justification was wrong twice: measured on the momentum-loaded generator, and
+// measured while this bug inflated the denominator. With both fixed it is
+// inside noise on every timeframe, for half the trades.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v2.3 — THE COST GATE. Built from REAL backtest results, not simulation.
@@ -244,8 +270,8 @@ i_erLen = input.int(20, "Regime Lookback (bars)", minval=5, maxval=100, group=G_
 i_align = input.bool(true, "Only trade WITH the leg in progress", group=G_ENG,
      tooltip="Requires the trade direction to match price over the regime lookback.\n\nThis is the single highest-value condition in the engine. On 5m: the efficiency-ratio gate ALONE moved mean R from -0.002 to -0.010 (nothing). Adding alignment moved it to +0.200 at t=3.99. Filtering for a directional market and then trading against it is worth less than not filtering at all.")
 i_showReg = input.bool(true, "Tint background by regime", group=G_ENG)
-i_confirmBar = input.bool(true, "Confirm entry on the next bar", group=G_ENG,
-     tooltip="Waits ONE bar after a setup and requires that bar to close beyond the setup bar's close, then enters at the CONFIRMING bar's close.\n\nMeasured (regime data, 150d x 6 seeds):\n  5m   11.37/day 63.8% +0.2757R  ->  6.65/day 70.0% +0.3757R\n  15m   4.24/day 63.5% +0.2738R  ->  2.45/day 68.1% +0.3292R\n\nHigher accuracy per trade, and about 40% fewer trades. Total R per day is slightly LOWER — this buys hit rate, not throughput. Turn it off if you would rather have the volume.\n\nNote it costs the setup bar's price: you enter later and worse, which is exactly why it is not free. On driftless data it measures WORSE than entering immediately (-0.059 against -0.030), which is the signature of a real filter rather than an artefact.")
+i_confirmBar = input.bool(false, "Confirm entry on the next bar", group=G_ENG,
+     tooltip="Waits ONE bar after a setup, requires that bar to close beyond the setup bar's close, then enters at the CONFIRMING bar's close.\n\nDEFAULT IS NOW OFF and the previous claim for it is WITHDRAWN. v2.2 measured confirmation at +0.3757R against +0.2757R and shipped it on. That figure was wrong twice over: it came from a generator with momentum baked into it, AND it was measured while the risk cap was being bypassed on this exact code path, which inflated the R denominator.\n\nRe-measured with both faults fixed:\n  15m  immediate -0.0233R  ->  confirmed -0.0153R\n  30m  immediate +0.0137R  ->  confirmed +0.0136R\n  1H   immediate -0.0517R  ->  confirmed -0.0520R\n\nInside noise on every timeframe, for half the trades. Kept as an option because entering a bar later is a legitimate preference, but no measurement supports paying for it.")
 i_zoneW = input.float(0.10, "TP/SL Zone Width (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=G_DISP,
      tooltip="Draws each target and the stop as a ZONE rather than a hairline, because fills happen in a band, not at a price. 0 = plain lines.")
 
@@ -723,8 +749,22 @@ if i_confirmBar and conf and (rawBuy or rawSell) and not (cfmBuy or cfmSell)
 entBuy  = i_confirmBar ? cfmBuy  : rawBuy
 entSell = i_confirmBar ? cfmSell : rawSell
 entPx   = close
-entSlB  = i_confirmBar ? math.min(armSl, close - atr * i_minRisk) : slBull
-entSlS  = i_confirmBar ? math.max(armSl, close + atr * i_minRisk) : slBear
+// v2.3.2 RISK CAP UNDER CONFIRMATION. This read math.min(armSl, ...), which
+// FLOORS the risk and never caps it. The stop stayed anchored to the setup bar
+// while the entry moved to the confirming bar's close — which by definition is
+// further away — so risk became (however far the confirming bar ran) + 1.0 ATR,
+// with no upper bound. Confirmation only passes on strong bars, so the breach
+// was selected FOR, and confirmation shipped ON by default.
+//
+// This does not merely widen the stop, it makes the ladder unreachable. At 2.5
+// ATR of risk TP1 (0.8R) sits 2.0 ATR away and TP3 5.0 ATR away, neither
+// reachable inside a 12-bar time stop, while the stop stays comfortably in
+// range. The only outcomes left are the stop or the clock. It also made the
+// dashboard print ~2.5 against a stated 1.0 ATR cap.
+//
+// Both bounds are now measured from the ACTUAL entry.
+entSlB  = i_confirmBar ? math.max(math.min(armSl, close - minRiskPts), close - maxRiskPts) : slBull
+entSlS  = i_confirmBar ? math.min(math.max(armSl, close + minRiskPts), close + maxRiskPts) : slBear
 entRkB  = entPx - entSlB
 entRkS  = entSlS - entPx
 entName = i_confirmBar ? armName : (entBuy ? bullName : bearName)
@@ -932,7 +972,7 @@ if i_dash and barstate.islast
     yel = color.new(#FFC400, 0)
     wht = color.new(#FFFFFF, 0)
 
-    table.cell(dash, 0, 0, "ME SCALP v2.3.1 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME SCALP v2.3.2 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
     table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
 
