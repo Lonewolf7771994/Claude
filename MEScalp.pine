@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
-// © ME Institutional — ME Scalp v2.3.3
+// © ME Institutional — ME Scalp v2.4
 //@version=6
-indicator("ME Scalp v2.3.3", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+indicator("ME Scalp v2.4", shorttitle="ME Scalp", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v2.3.2 — THE RISK CAP WAS BEING BYPASSED.
@@ -281,6 +281,8 @@ i_useSweep = input.bool(true, "Liquidity sweep + reclaim",    group=G_TRIG)
 i_useBand  = input.bool(true, "VWAP band rejection",          group=G_TRIG,
      tooltip="Highest-supply trigger in the engine — 20.9 events/day on 15m against 14.9 for MSS, FVG and sweep combined.")
 i_useValue = input.bool(true, "Value-area rejection (VAH/VAL)", group=G_TRIG)
+i_bandMinW = input.float(0.30, "Min Band Width (× ATR) before a band counts", minval=0.0, maxval=2.0, step=0.05, group=G_TRIG,
+     tooltip="A band is only a level if it has WIDTH. At session open the deviation is computed from a single sample, so u1 == l1 == VWAP and \"low <= l1\" is trivially true — the trigger fires on arithmetic, not on a rejection.\n\nMeasured band width as a multiple of ATR, by bar of session:\n  bar0 0.00   bar1 0.09   bar2 0.24   bar3 0.32\n  bar4 0.39   bar5 0.45   bar6 0.51   bar7 0.58\n\nZero at the open, and still under 0.6 ATR seven bars in. 22.3%% of ALL 15m band triggers fired inside that degenerate window, and band is the highest-supply trigger in the engine.\n\nSet 0 to disable the check and reproduce the old behaviour.")
 
 i_atrLen    = input.int(14, "ATR Length", minval=5, maxval=50, group=G_RISK)
 i_maxRisk   = input.float(1.0, "Max Risk (× ATR)", minval=0.4, maxval=3.0, step=0.1, group=G_RISK,
@@ -547,11 +549,15 @@ if conf and i_useFvg and array.size(fvgBearBar) > 0
 swBull = conf and i_useSweep and not na(sweepLo) and (sweepLo - low) >= atr * 0.35 and close > sweepLo and closePos >= 0.55
 swBear = conf and i_useSweep and not na(sweepHi) and (high - sweepHi) >= atr * 0.35 and close < sweepHi and closePos <= 0.45
 
-// 4 VWAP band rejection — traded through a deviation band, closed back inside
-bandBull  = conf and i_useBand and low  <= l1 and close > l1 and closePos >= 0.55
-bandBear  = conf and i_useBand and high >= u1 and close < u1 and closePos <= 0.45
-band2Bull = conf and i_useBand and low  <= l2 and close > l2 and closePos >= 0.55
-band2Bear = conf and i_useBand and high >= u2 and close < u2 and closePos <= 0.45
+// 4 VWAP band rejection — traded through a deviation band, closed back inside.
+// bandWide guards the session open, where the deviation is built from one
+// sample and the bands collapse onto VWAP. Without it a zero-width band makes
+// "low <= l1" trivially true and the trigger fires on arithmetic.
+bandWide  = (u1 - l1) >= atr * i_bandMinW
+bandBull  = conf and i_useBand and bandWide and low  <= l1 and close > l1 and closePos >= 0.55
+bandBear  = conf and i_useBand and bandWide and high >= u1 and close < u1 and closePos <= 0.45
+band2Bull = conf and i_useBand and bandWide and low  <= l2 and close > l2 and closePos >= 0.55
+band2Bear = conf and i_useBand and bandWide and high >= u2 and close < u2 and closePos <= 0.45
 
 // 5 Value-area rejection — traded outside the value area, closed back inside
 valBull = conf and i_useValue and not na(val) and low  <= val and close > val and closePos >= 0.55
@@ -593,8 +599,8 @@ sStackS   = nTrigBear >= 2 ? 1 : 0
 // confluence for it and must score. Testing bandBull here instead would zero the
 // point on a bar the band did not actually enter, which is a different engine
 // from the one the header's figures were measured on.
-sLocB = bullName == "BAND2" ? 1 : bullName == "BAND" ? 0 : (close <= l1 * 1.002 ? 1 : 0)
-sLocS = bearName == "BAND2" ? 1 : bearName == "BAND" ? 0 : (close >= u1 * 0.998 ? 1 : 0)
+sLocB = bullName == "BAND2" ? 1 : bullName == "BAND" ? 0 : (bandWide and close <= l1 * 1.002 ? 1 : 0)
+sLocS = bearName == "BAND2" ? 1 : bearName == "BAND" ? 0 : (bandWide and close >= u1 * 0.998 ? 1 : 0)
 
 scoreBull = sParticip + sBody + sCloseB + sStackB + sLocB
 scoreBear = sParticip + sBody + sCloseS + sStackS + sLocS
@@ -972,7 +978,7 @@ if i_dash and barstate.islast
     yel = color.new(#FFC400, 0)
     wht = color.new(#FFFFFF, 0)
 
-    table.cell(dash, 0, 0, "ME SCALP v2.3.3 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, "ME SCALP v2.4 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
     table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
 

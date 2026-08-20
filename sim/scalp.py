@@ -26,7 +26,7 @@ from flow import vwap_bands, zones
 
 
 def triggers(bars, atr, vw, u1, l1, u2, l2, Z, VAH, VAL,
-             wick=0.35, mss_follow=0.08, swing=2, sweep_len=5):
+             wick=0.35, mss_follow=0.08, swing=2, sweep_len=5, band_min_w=0.0):
     """Five independent entry events. Each carries its own invalidation level,
     so the stop is defined by the setup rather than by a fixed ATR guess."""
     n = len(bars)
@@ -65,8 +65,12 @@ def triggers(bars, atr, vw, u1, l1, u2, l2, Z, VAH, VAL,
             ev["buy"].append(("sweep", SPL, l[i]))
         if SPH and (h[i] - SPH) >= A * wick and c[i] < SPH and cp <= .45:
             ev["sell"].append(("sweep", SPH, h[i]))
-        # 4 VWAP band rejection — the highest-supply event in the engine
-        for tag, lo, up in (("band", l1, u1), ("band2", l2, u2)):
+        # 4 VWAP band rejection — the highest-supply event in the engine.
+        # A band is only a level if it has WIDTH. At session open the deviation
+        # is computed from one sample, so u1==l1==vwap and "low <= l1" is
+        # trivially true — the trigger fires on arithmetic, not on a rejection.
+        bandOk = (u1[i] - l1[i]) >= A * band_min_w
+        for tag, lo, up in ((("band", l1, u1), ("band2", l2, u2)) if bandOk else ()):
             if l[i] <= lo[i] and c[i] > lo[i] and cp >= .55:
                 ev["buy"].append((tag, lo[i], l[i]))
             if h[i] >= up[i] and c[i] < up[i] and cp <= .45:
@@ -119,14 +123,14 @@ def run(bars, tf_sec, freq="Standard",
         max_risk=1.0, min_risk=0.40, sl_buf=0.20,
         tp_r=(1.0, 1.5, 2.0), tstop=12, cooldown=2, need=None,
         er_min=0.0, er_len=20, align=False, runner=0.0, confirm=0,
-        entry_mode="close", pend_bars=3, hold=0):
+        entry_mode="close", pend_bars=3, hold=0, band_min_w=0.0):
     h = [b[2] for b in bars]; l = [b[3] for b in bars]
     c = [b[4] for b in bars]; o = [b[1] for b in bars]; v = [b[5] for b in bars]
     atr = wilder_atr(h, l, c, 14)
     vw, u1, l1, u2, l2 = vwap_bands(bars, 1.0, 2.0)
     Z = zones(bars, atr, 0.30, 30)
     POC, VAH, VAL = frvp(bars)
-    T = triggers(bars, atr, vw, u1, l1, u2, l2, Z, VAH, VAL)
+    T = triggers(bars, atr, vw, u1, l1, u2, l2, Z, VAH, VAL, band_min_w=band_min_w)
     vavg = sma_prior(v, 20)
 
     # Kaufman efficiency ratio: net movement divided by path travelled.
