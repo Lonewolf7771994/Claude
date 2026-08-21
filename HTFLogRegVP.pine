@@ -1,0 +1,939 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © BigBeluga — HTF Log-Regression Volume Profile (base indicator)
+// © ME Institutional — ME Scalp v2.2 trade logic overlay
+
+//@version=6
+indicator("HTF Log-Regression VP + ME Scalp [BigBeluga × ME]",
+     shorttitle="HTF LogReg VP+Scalp", overlay=true,
+     max_lines_count=500, max_boxes_count=500,
+     max_polylines_count=100, max_labels_count=200,
+     max_bars_back=5000)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BIGBELUGA INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+group_htf    = "HTF Session"
+group_chan   = "Channel & Dimensions"
+group_lines  = "VP Visuals & Colors"
+group_stats  = "Volume Profile & Statistics"
+group_hist   = "History & Extension"
+
+bool   auto_htf      = input.bool(true, "Auto HTF (Adaptive to Chart Timeframe)", group=group_htf)
+string manual_htf    = input.timeframe("D", "Manual Higher Timeframe Session", active=not auto_htf, group=group_htf)
+float  channel_width = input.float(1, "Channel Width (StDev for VP)", group=group_chan)
+int    line_w        = input.int(2, "Line Width", group=group_lines)
+bool   mid_disp      = input.bool(true, "Display Mid/Open Line", group=group_lines)
+color  col_high      = input.color(color.blue, "High Line Color", group=group_lines)
+color  col_mid       = input.color(color.gray, "Mid Line Color", group=group_lines)
+color  col_low       = input.color(color.blue, "Low Line Color", group=group_lines)
+color  col_bull      = input.color(color.green, "Bullish Color", group=group_lines)
+color  col_bear      = input.color(color.red, "Bearish Color", group=group_lines)
+color  col_chan_upper = input.color(color.new(color.gray, 0), "Channel Upper Line Color", group=group_lines)
+string style_chan_upper = input.string(line.style_dashed, "Channel Upper Line Style",
+     options=[line.style_solid, line.style_dashed, line.style_dotted], group=group_lines)
+color  col_chan_lower = input.color(color.new(color.gray, 0), "Channel Lower Line Color", group=group_lines)
+string style_chan_lower = input.string(line.style_dashed, "Channel Lower Line Style",
+     options=[line.style_solid, line.style_dashed, line.style_dotted], group=group_lines)
+bool   show_stats    = input.bool(true, "Show Statistics Label", group=group_stats)
+bool   show_vp       = input.bool(true, "Show Volume Profile", group=group_stats)
+int    bin_count     = input.int(30, "Volume Profile Bins", minval=5, maxval=100, group=group_stats)
+int    max_w         = input.int(15, "Volume Profile Max Width (Bars)", group=group_stats)
+bool   show_poc      = input.bool(true, "Show POC Line", group=group_stats)
+bool   extend_ch     = input.bool(true, "Extend Levels Forward", group=group_hist)
+int    ext_bars      = input.int(25, "Extension Bars", group=group_hist)
+int    max_history   = input.int(10, "Max Historical Sessions to Keep", minval=1, maxval=50, group=group_hist)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+var string G_ENG  = "══ ME Engine ══"
+var string G_TRIG = "══ ME Triggers ══"
+var string G_RISK = "══ ME Risk & Targets ══"
+var string G_DISP = "══ ME Display ══"
+
+i_freq = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"],
+     tooltip="Efficiency-ratio threshold.\nSelective ER>=0.40 | Standard ER>=0.32 | High ER>=0.25",
+     group=G_ENG)
+i_dir = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
+i_erLen = input.int(20, "Regime Lookback (bars)", minval=5, maxval=100, group=G_ENG)
+i_align = input.bool(true, "Only trade WITH the leg in progress", group=G_ENG)
+i_showReg = input.bool(true, "Tint background by regime", group=G_ENG)
+
+i_useMss   = input.bool(true, "MSS — structure break",        group=G_TRIG)
+i_useFvg   = input.bool(true, "FVG retest",                   group=G_TRIG)
+i_useSweep = input.bool(true, "Liquidity sweep + reclaim",    group=G_TRIG)
+i_useBand  = input.bool(true, "VWAP band rejection",          group=G_TRIG)
+i_useValue = input.bool(true, "Value-area rejection (VAH/VAL)", group=G_TRIG)
+
+i_atrLen    = input.int(14, "ATR Length", minval=5, maxval=50, group=G_RISK)
+i_stopMode  = input.string("Structure + ATR targets", "Stop Placement",
+     options=["Structure + ATR targets", "Structure + R targets", "Clamp to Max Risk (v2.1)"],
+     tooltip="Structure modes place the stop BEYOND invalidation. Clamp mode squeezes it to Max Risk (the v2.1 defect).",
+     group=G_RISK)
+i_structPad = input.float(0.25, "Structure Pad Beyond Invalidation (x ATR)", minval=0.0, maxval=1.5, step=0.05, group=G_RISK)
+i_structMax = input.float(4.0, "Structure Backstop — REJECT beyond (x ATR)", minval=1.0, maxval=10.0, step=0.25, group=G_RISK)
+i_maxRisk   = input.float(1.0, "Max Risk (x ATR) — v2.1 clamp mode only", minval=0.4, maxval=3.0, step=0.1, group=G_RISK)
+i_minRisk   = input.float(0.40, "Min Risk (x ATR)", minval=0.1, maxval=1.5, step=0.05, group=G_RISK)
+i_slBuf     = input.float(0.20, "SL Buffer Past Invalidation (x ATR)", minval=0.0, maxval=1.0, step=0.05, group=G_RISK)
+i_tp1R      = input.float(0.8, "TP1 (x ATR or x risk)", minval=0.3, maxval=5.0, step=0.1, group=G_RISK)
+i_tp2R      = input.float(1.4, "TP2 (x ATR or x risk)", minval=0.5, maxval=8.0, step=0.1, group=G_RISK)
+i_tp3R      = input.float(2.0, "TP3 (x ATR or x risk)", minval=0.5, maxval=12.0, step=0.1, group=G_RISK)
+i_timeStop  = input.int(12, "Time Stop (bars, 0 = off)", minval=0, maxval=200, group=G_RISK)
+i_beAfterTp1 = input.bool(true, "Move stop to breakeven after TP1", group=G_RISK)
+i_useHTFSnap = input.bool(true, "Snap TP1 to HTF levels (channel/POC/mid)",
+     tooltip="When enabled, TP1 can snap to the nearest HTF structural level (regression channel edge, session mid, VP POC) if it is closer than the default target and at least 0.6 units from entry.",
+     group=G_RISK)
+
+i_showMEZones = input.bool(true, "Show VWAP bands", group=G_DISP)
+i_showMEVa    = input.bool(true, "Show value area", group=G_DISP)
+i_showPlan    = input.bool(true, "Show entry / SL / TP lines", group=G_DISP)
+i_meDash      = input.bool(true, "Show ME dashboard", group=G_DISP)
+i_dashPos     = input.string("Top Right", "Dashboard Position",
+     options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=G_DISP)
+
+erMin     = i_freq == "High" ? 0.25 : i_freq == "Standard" ? 0.32 : 0.40
+needScore = 1
+cooldown  = 3
+allowLong  = i_dir != "Short only"
+allowShort = i_dir != "Long only"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BIGBELUGA HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+f_get_auto_htf() =>
+    string tf = timeframe.period
+    string res = "D"
+    int_val = str.tonumber(tf)
+    if not na(int_val)
+        if int_val <= 1
+            res := "240"
+        else if int_val < 15
+            res := "720"
+        else if int_val >= 15 and int_val < 60
+            res := "2D"
+        else if int_val >= 60 and int_val < 240
+            res := "1W"
+        else if int_val >= 240 and int_val < 1440
+            res := "1M"
+        else
+            res := "12M"
+    else
+        if tf == "1D"
+            res := "2M"
+        else if tf == "2D" or tf == "3D"
+            res := "3M"
+        else if tf == "W" or tf == "1W" or tf == "1M"
+            res := "12M"
+        else
+            res := "D"
+    res
+
+f_format_vol(val) =>
+    val >= 1e9 ? str.tostring(val / 1e9, "#.##") + "B" :
+     val >= 1e6 ? str.tostring(val / 1e6, "#.##") + "M" :
+     val >= 1e3 ? str.tostring(val / 1e3, "#.##") + "K" :
+     str.tostring(val, "#.##")
+
+f_get_tf_label(tf_str) =>
+    string res = tf_str
+    if tf_str == "D" or tf_str == "1D"
+        res := "Daily"
+    else if tf_str == "W" or tf_str == "1W"
+        res := "Weekly"
+    else if tf_str == "M" or tf_str == "1M"
+        res := "Monthly"
+    else
+        int_val = str.tonumber(tf_str)
+        if not na(int_val)
+            if int_val >= 60 and int_val % 60 == 0
+                res := str.tostring(int_val / 60) + "h"
+            else
+                res := tf_str + "m"
+    res
+
+f_log_regression(src, length) =>
+    float sum_X   = 0.0
+    float sum_Y   = 0.0
+    float sumXSqr = 0.0
+    float sumXY   = 0.0
+    for i = 0 to length - 1
+        val = math.log(src[i])
+        per = i + 1.0
+        sum_X    += per
+        sum_Y    += val
+        sumXSqr += per * per
+        sumXY   += val * per
+    slope     = (length * sumXY - sum_X * sum_Y) / (length * sumXSqr - sum_X * sum_X)
+    intercept = (sum_Y - slope * sum_X) / length
+    [slope, intercept]
+
+string htf_period = auto_htf ? f_get_auto_htf() : manual_htf
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BIGBELUGA SESSION TYPE + STORAGE
+// ═══════════════════════════════════════════════════════════════════════════════
+type SessionDrawings
+    line high_line
+    line low_line
+    line mid_line
+    label stats_lbl
+    polyline vp_poly
+    line poc_line
+    line vp_upper_line
+    line vp_lower_line
+
+var SessionDrawings[] historical_sessions = array.new<SessionDrawings>()
+
+var line active_high = na
+var line active_low  = na
+var line active_mid  = na
+var line active_high_ext = na
+var line active_low_ext  = na
+var line active_mid_ext  = na
+var label active_stats = na
+var polyline active_vp = na
+var line active_poc  = na
+var line active_vp_upper = na
+var line active_vp_lower = na
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BIGBELUGA SESSION DETECTION + REGRESSION + VP
+// ═══════════════════════════════════════════════════════════════════════════════
+bool is_new_htf = timeframe.change(htf_period)
+
+var int htf_length = 1
+if is_new_htf
+    if not na(active_high)
+        array.unshift(historical_sessions, SessionDrawings.new(active_high, active_low, active_mid, active_stats, active_vp, active_poc, active_vp_upper, active_vp_lower))
+        if array.size(historical_sessions) > max_history
+            SessionDrawings removed = array.pop(historical_sessions)
+            line.delete(removed.high_line)
+            line.delete(removed.low_line)
+            line.delete(removed.mid_line)
+            label.delete(removed.stats_lbl)
+            polyline.delete(removed.vp_poly)
+            line.delete(removed.poc_line)
+            line.delete(removed.vp_upper_line)
+            line.delete(removed.vp_lower_line)
+    active_high := na
+    active_low  := na
+    active_mid  := na
+    active_stats := na
+    active_vp   := na
+    active_poc  := na
+    active_vp_upper := na
+    active_vp_lower := na
+    htf_length  := 1
+else
+    htf_length += 1
+
+int start_idx   = bar_index[htf_length - 1]
+int mid_bar_idx = start_idx + math.round((htf_length - 1) / 2)
+
+[slope, intercept] = f_log_regression(close, htf_length)
+
+float reg_start = math.exp(intercept + slope * htf_length)
+float reg_end   = math.exp(intercept)
+float deviation = ta.stdev(close, htf_length)
+
+float htf_high = ta.highest(high, htf_length)
+float htf_low  = ta.lowest(low, htf_length)
+float htf_mid  = (htf_high + htf_low) / 2
+
+float upper_start = reg_start + deviation * channel_width
+float upper_end   = reg_end + deviation * channel_width
+float lower_start = reg_start - deviation * channel_width
+float lower_end   = reg_end - deviation * channel_width
+
+// VP bin accumulation — always computed so the VP POC is available for TP snapping
+float buy_vol  = 0.0
+float sell_vol = 0.0
+float[] bin_vols = array.new_float(bin_count, 0.0)
+
+for i = 0 to htf_length - 1
+    if close[i] > open[i]
+        buy_vol += volume[i]
+    else if close[i] < open[i]
+        sell_vol += volume[i]
+    float hist_reg_mid    = math.exp(intercept + slope * i)
+    float hist_upper_line = hist_reg_mid + deviation * channel_width
+    float hist_lower_line = hist_reg_mid - deviation * channel_width
+    float hist_height     = hist_upper_line - hist_lower_line
+    if close[i] >= hist_lower_line and close[i] <= hist_upper_line
+        float bar_bin_step = hist_height / bin_count
+        int bin_index = math.floor((close[i] - hist_lower_line) / bar_bin_step)
+        bin_index := math.min(math.max(bin_index, 0), bin_count - 1)
+        array.set(bin_vols, bin_index, array.get(bin_vols, bin_index) + volume[i])
+
+float max_bin_vol = array.max(bin_vols)
+int vp_poc_bin = max_bin_vol > 0 ? bin_vols.indexof(max_bin_vol) : -1
+float vpPocPrice = vp_poc_bin >= 0
+     ? lower_end + (vp_poc_bin + 0.5) * (upper_end - lower_end) / bin_count
+     : na
+
+float total_vol = buy_vol + sell_vol
+float delta_pct = total_vol > 0 ? ((buy_vol - sell_vol) / total_vol) * 100 : 0.0
+string buy_str   = f_format_vol(buy_vol)
+string sell_str  = f_format_vol(sell_vol)
+string delta_str = (delta_pct >= 0 ? "+" : "") + str.tostring(delta_pct, "#.#") + "%"
+string tf_header = f_get_tf_label(htf_period)
+string stats_text = tf_header + "\nBuy: " + buy_str + "\nSell: " + sell_str + "\nDelta: " + delta_str
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — CORE SERIES
+// ═══════════════════════════════════════════════════════════════════════════════
+meAtr   = ta.atr(i_atrLen)
+range_  = math.max(high - low, 1e-9)
+closePos = (close - low) / range_
+body    = math.abs(close - open)
+conf    = barstate.isconfirmed
+
+var bool volSeen = false
+if nz(volume) > 0
+    volSeen := true
+volAvg = ta.sma(nz(volume[1]), 20)
+relVol = volSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — REGIME (Kaufman efficiency ratio)
+// ═══════════════════════════════════════════════════════════════════════════════
+erNet  = math.abs(close - close[i_erLen])
+erPath = math.sum(math.abs(close - close[1]), i_erLen)
+effRatio = erPath > 0 ? erNet / erPath : 0.0
+legUp   = close > close[i_erLen]
+inTrend = effRatio >= erMin
+
+bgcolor(i_showReg and inTrend ? color.new(legUp ? #00E676 : #FF1744, 93) : na, title="Regime")
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — SESSION VWAP WITH DEVIATION BANDS
+// ═══════════════════════════════════════════════════════════════════════════════
+newSession = ta.change(time("D")) != 0
+var float sPV  = 0.0
+var float sV   = 0.0
+var float sPV2 = 0.0
+if newSession
+    sPV  := 0.0
+    sV   := 0.0
+    sPV2 := 0.0
+tp_   = (high + low + close) / 3.0
+vol_  = volSeen ? nz(volume) : 1.0
+sPV  := sPV  + tp_ * vol_
+sV   := sV   + vol_
+sPV2 := sPV2 + tp_ * tp_ * vol_
+meVwap = sPV / math.max(sV, 1e-9)
+vwVar  = math.max(sPV2 / math.max(sV, 1e-9) - meVwap * meVwap, 0.0)
+vwSd   = math.sqrt(vwVar)
+u1 = meVwap + vwSd
+l1 = meVwap - vwSd
+u2 = meVwap + 2.0 * vwSd
+l2 = meVwap - 2.0 * vwSd
+
+plot(i_showMEZones ? meVwap : na, "VWAP",  color=color.new(#FFB300, 0), linewidth=2)
+plot(i_showMEZones ? u1 : na,   "+1sd",   color=color.new(#FFB300, 55))
+plot(i_showMEZones ? l1 : na,   "-1sd",   color=color.new(#FFB300, 55))
+plot(i_showMEZones ? u2 : na,   "+2sd",   color=color.new(#FFB300, 78))
+plot(i_showMEZones ? l2 : na,   "-2sd",   color=color.new(#FFB300, 78))
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — STRUCTURE (pivots, FVG, value area)
+// ═══════════════════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, 2, 2)
+pl = ta.pivotlow(low, 2, 2)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+sph = ta.pivothigh(high, 5, 5)
+spl = ta.pivotlow(low, 5, 5)
+var float sweepHi = na
+var float sweepLo = na
+if not na(sph)
+    sweepHi := sph
+if not na(spl)
+    sweepLo := spl
+
+var array<float> fvgBullTop = array.new_float()
+var array<float> fvgBullBot = array.new_float()
+var array<int>   fvgBullBar = array.new_int()
+var array<float> fvgBearTop = array.new_float()
+var array<float> fvgBearBot = array.new_float()
+var array<int>   fvgBearBar = array.new_int()
+
+barMs   = timeframe.in_seconds() * 1000
+contig  = barMs > 0 and (time - time[2]) <= barMs * 2 * 3
+
+if barstate.isconfirmed and contig and low > high[2] and (low - high[2]) >= meAtr * 0.30 and close[1] > open[1]
+    array.push(fvgBullTop, low)
+    array.push(fvgBullBot, high[2])
+    array.push(fvgBullBar, bar_index)
+if barstate.isconfirmed and contig and low[2] > high and (low[2] - high) >= meAtr * 0.30 and close[1] < open[1]
+    array.push(fvgBearTop, low[2])
+    array.push(fvgBearBot, high)
+    array.push(fvgBearBar, bar_index)
+
+if conf and array.size(fvgBullBar) > 0
+    for k = array.size(fvgBullBar) - 1 to 0
+        if bar_index - array.get(fvgBullBar, k) > 30 or close < array.get(fvgBullBot, k)
+            array.remove(fvgBullTop, k)
+            array.remove(fvgBullBot, k)
+            array.remove(fvgBullBar, k)
+if conf and array.size(fvgBearBar) > 0
+    for k = array.size(fvgBearBar) - 1 to 0
+        if bar_index - array.get(fvgBearBar, k) > 30 or close > array.get(fvgBearTop, k)
+            array.remove(fvgBearTop, k)
+            array.remove(fvgBearBot, k)
+            array.remove(fvgBearBar, k)
+
+// Rolling value area
+vaLen  = 100
+vaBins = 24
+strideKey = int(time / math.max(barMs, 1))
+var float mePoc = na
+var float meVah = na
+var float meVal = na
+if barstate.isconfirmed and bar_index > vaLen and strideKey % 5 == 0
+    float hi_ = high
+    float lo_ = low
+    for k = 0 to vaLen - 1
+        hi_ := math.max(hi_, high[k])
+        lo_ := math.min(lo_, low[k])
+    float binSz = math.max(hi_ - lo_, 1e-9) / vaBins
+    acc = array.new_float(vaBins, 0.0)
+    for k = 0 to vaLen - 1
+        float bh = high[k]
+        float bl = low[k]
+        float bv = volSeen ? nz(volume[k]) : 1.0
+        float br = math.max(bh - bl, 1e-9)
+        int a0 = math.max(0, math.min(vaBins - 1, int((bl - lo_) / binSz)))
+        int a1 = math.max(0, math.min(vaBins - 1, int((bh - lo_) / binSz)))
+        for j = a0 to a1
+            float bBot = lo_ + j * binSz
+            float bTop = bBot + binSz
+            float ov = math.min(bTop, bh) - math.max(bBot, bl)
+            if ov > 0
+                array.set(acc, j, array.get(acc, j) + bv * (ov / br))
+    float total = array.sum(acc)
+    if total > 0
+        int pb = array.indexof(acc, array.max(acc))
+        float cur = array.get(acc, pb)
+        int up = pb
+        int dn = pb
+        float target = total * 0.70
+        for _it = 0 to vaBins * 2
+            if cur >= target
+                break
+            float uv = 0.0
+            float dv = 0.0
+            int us = math.min(2, vaBins - 1 - up)
+            int ds = math.min(2, dn)
+            if us > 0
+                for j = up + 1 to up + us
+                    uv := uv + array.get(acc, j)
+            if ds > 0
+                for j = dn - ds to dn - 1
+                    dv := dv + array.get(acc, j)
+            if us == 0 and ds == 0
+                break
+            if us > 0 and (ds == 0 or uv >= dv)
+                up := up + us
+                cur := cur + uv
+            else
+                dn := dn - ds
+                cur := cur + dv
+        mePoc := lo_ + (pb + 0.5) * binSz
+        meVah := lo_ + (up + 1) * binSz
+        meVal := lo_ + dn * binSz
+
+plot(i_showMEVa and not na(mePoc) ? mePoc : na, "ME POC", color=color.new(#E040FB, 20), style=plot.style_linebr, linewidth=2)
+plot(i_showMEVa and not na(meVah) ? meVah : na, "ME VAH", color=color.new(#7E57C2, 45), style=plot.style_linebr)
+plot(i_showMEVa and not na(meVal) ? meVal : na, "ME VAL", color=color.new(#7E57C2, 45), style=plot.style_linebr)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — TRIGGERS
+// ═══════════════════════════════════════════════════════════════════════════════
+mssBull = conf and i_useMss and not na(lastPH) and close >= lastPH + meAtr * 0.08 and close[1] < lastPH
+mssBear = conf and i_useMss and not na(lastPL) and close <= lastPL - meAtr * 0.08 and close[1] > lastPL
+
+fvgBull = false
+float fvgBullLvl = na
+float fvgBullInv = na
+if conf and i_useFvg and array.size(fvgBullBar) > 0
+    for k = array.size(fvgBullBar) - 1 to 0
+        if low <= array.get(fvgBullTop, k) and close >= array.get(fvgBullBot, k) and closePos >= 0.55
+            fvgBull := true
+            fvgBullLvl := array.get(fvgBullTop, k)
+            fvgBullInv := array.get(fvgBullBot, k)
+            break
+fvgBear = false
+float fvgBearLvl = na
+float fvgBearInv = na
+if conf and i_useFvg and array.size(fvgBearBar) > 0
+    for k = array.size(fvgBearBar) - 1 to 0
+        if high >= array.get(fvgBearBot, k) and close <= array.get(fvgBearTop, k) and closePos <= 0.45
+            fvgBear := true
+            fvgBearLvl := array.get(fvgBearBot, k)
+            fvgBearInv := array.get(fvgBearTop, k)
+            break
+
+swBull = conf and i_useSweep and not na(sweepLo) and (sweepLo - low) >= meAtr * 0.35 and close > sweepLo and closePos >= 0.55
+swBear = conf and i_useSweep and not na(sweepHi) and (high - sweepHi) >= meAtr * 0.35 and close < sweepHi and closePos <= 0.45
+
+bandBull  = conf and i_useBand and low  <= l1 and close > l1 and closePos >= 0.55
+bandBear  = conf and i_useBand and high >= u1 and close < u1 and closePos <= 0.45
+band2Bull = conf and i_useBand and low  <= l2 and close > l2 and closePos >= 0.55
+band2Bear = conf and i_useBand and high >= u2 and close < u2 and closePos <= 0.45
+
+valBull = conf and i_useValue and not na(meVal) and low  <= meVal and close > meVal and closePos >= 0.55
+valBear = conf and i_useValue and not na(meVah) and high >= meVah and close < meVah and closePos <= 0.45
+
+nTrigBull = (mssBull ? 1 : 0) + (fvgBull ? 1 : 0) + (swBull ? 1 : 0) + (bandBull ? 1 : 0) + (band2Bull ? 1 : 0) + (valBull ? 1 : 0)
+nTrigBear = (mssBear ? 1 : 0) + (fvgBear ? 1 : 0) + (swBear ? 1 : 0) + (bandBear ? 1 : 0) + (band2Bear ? 1 : 0) + (valBear ? 1 : 0)
+anyBull = nTrigBull > 0
+anyBear = nTrigBear > 0
+
+bullName = mssBull ? "MSS" : fvgBull ? "FVG" : swBull ? "SWEEP" : bandBull ? "BAND" : band2Bull ? "BAND2" : "VALUE"
+bearName = mssBear ? "MSS" : fvgBear ? "FVG" : swBear ? "SWEEP" : bandBear ? "BAND" : band2Bear ? "BAND2" : "VALUE"
+bullInval = mssBull ? (na(lastPL) ? low : lastPL) : fvgBull ? fvgBullInv : low
+bearInval = mssBear ? (na(lastPH) ? high : lastPH) : fvgBear ? fvgBearInv : high
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — QUALITY SCORE
+// ═══════════════════════════════════════════════════════════════════════════════
+sParticip = relVol >= 1.15 ? 1 : 0
+sBody     = body >= meAtr * 0.45 ? 1 : 0
+sCloseB   = closePos >= 0.65 ? 1 : 0
+sCloseS   = closePos <= 0.35 ? 1 : 0
+sStackB   = nTrigBull >= 2 ? 1 : 0
+sStackS   = nTrigBear >= 2 ? 1 : 0
+sLocB = bullName == "BAND2" ? 1 : bullName == "BAND" ? 0 : (close <= l1 * 1.002 ? 1 : 0)
+sLocS = bearName == "BAND2" ? 1 : bearName == "BAND" ? 0 : (close >= u1 * 0.998 ? 1 : 0)
+scoreBull = sParticip + sBody + sCloseB + sStackB + sLocB
+scoreBear = sParticip + sBody + sCloseS + sStackS + sLocS
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — STOP PLACEMENT (v2.2 structure-first)
+// ═══════════════════════════════════════════════════════════════════════════════
+var int lastSigBar = -100000
+barBull = close > open
+barBear = close < open
+coolOk  = bar_index - lastSigBar >= cooldown
+
+legacyClamp = i_stopMode == "Clamp to Max Risk (v2.1)"
+structPad   = legacyClamp ? 0.0 : meAtr * i_structPad
+slRawBull = math.min(bullInval, close - meAtr * i_minRisk) - meAtr * i_slBuf - structPad
+slRawBear = math.max(bearInval, close + meAtr * i_minRisk) + meAtr * i_slBuf + structPad
+
+slBull = legacyClamp ? math.max(slRawBull, close - meAtr * i_maxRisk) : slRawBull
+slBear = legacyClamp ? math.min(slRawBear, close + meAtr * i_maxRisk) : slRawBear
+riskBull = close - slBull
+riskBear = slBear - close
+
+intrudeBull = (slBull - bullInval) / math.max(meAtr, 1e-9)
+intrudeBear = (bearInval - slBear) / math.max(meAtr, 1e-9)
+
+riskOkBull = riskBull >= meAtr * i_minRisk * 0.5 and (legacyClamp or riskBull <= meAtr * i_structMax)
+riskOkBear = riskBear >= meAtr * i_minRisk * 0.5 and (legacyClamp or riskBear <= meAtr * i_structMax)
+
+regimeOkBuy  = inTrend and (not i_align or legUp)
+regimeOkSell = inTrend and (not i_align or not legUp)
+
+buySignal  = anyBull and allowLong  and barBull and coolOk and riskOkBull and scoreBull >= needScore and regimeOkBuy
+sellSignal = anyBear and allowShort and barBear and coolOk and riskOkBear and scoreBear >= needScore and regimeOkSell
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — TARGETS (enhanced with HTF structural levels)
+// ═══════════════════════════════════════════════════════════════════════════════
+f_tp(bool isBuy, float entry, float risk, float unit, int slot, float rmul) =>
+    float d = isBuy ? 1.0 : -1.0
+    float t = entry + d * unit * rmul
+    if slot == 1
+        float best = t
+        // ME Scalp structural snaps — VWAP, session VWAP bands, rolling VA POC
+        float _b1 = isBuy ? u1 : l1
+        if not na(_b1) and (_b1 > entry) == isBuy and math.abs(_b1 - entry) < math.abs(best - entry) and math.abs(_b1 - entry) >= unit * 0.6
+            best := _b1
+        float _b2 = meVwap
+        if not na(_b2) and (_b2 > entry) == isBuy and math.abs(_b2 - entry) < math.abs(best - entry) and math.abs(_b2 - entry) >= unit * 0.6
+            best := _b2
+        if not na(mePoc) and (mePoc > entry) == isBuy and math.abs(mePoc - entry) < math.abs(best - entry) and math.abs(mePoc - entry) >= unit * 0.6
+            best := mePoc
+        // HTF structural snaps — regression channel edge, session mid, VP POC
+        if i_useHTFSnap
+            float _ch = isBuy ? upper_end : lower_end
+            if not na(_ch) and (_ch > entry) == isBuy and math.abs(_ch - entry) < math.abs(best - entry) and math.abs(_ch - entry) >= unit * 0.6
+                best := _ch
+            if not na(htf_mid) and (htf_mid > entry) == isBuy and math.abs(htf_mid - entry) < math.abs(best - entry) and math.abs(htf_mid - entry) >= unit * 0.6
+                best := htf_mid
+            if not na(vpPocPrice) and (vpPocPrice > entry) == isBuy and math.abs(vpPocPrice - entry) < math.abs(best - entry) and math.abs(vpPocPrice - entry) >= unit * 0.6
+                best := vpPocPrice
+        t := best
+    t
+
+atrTargets = i_stopMode == "Structure + ATR targets"
+unitBull   = atrTargets ? meAtr : riskBull
+unitBear   = atrTargets ? meAtr : riskBear
+
+buyTp1  = f_tp(true,  close, riskBull, unitBull, 1, i_tp1R)
+buyTp2  = f_tp(true,  close, riskBull, unitBull, 2, i_tp2R)
+buyTp3  = f_tp(true,  close, riskBull, unitBull, 3, i_tp3R)
+sellTp1 = f_tp(false, close, riskBear, unitBear, 1, i_tp1R)
+sellTp2 = f_tp(false, close, riskBear, unitBear, 2, i_tp2R)
+sellTp3 = f_tp(false, close, riskBear, unitBear, 3, i_tp3R)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP — TRADE STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+var bool  inTrade   = false
+var bool  tradeBuy  = false
+var float eEntry    = na
+var float eSl       = na
+var float eT1       = na
+var float eT2       = na
+var float eT3       = na
+var int   eBar      = na
+var bool  eTp1Done  = false
+var string eName    = ""
+var int   nWin      = 0
+var int   nLoss     = 0
+var int   nTrades   = 0
+
+fired = (buySignal or sellSignal) and not inTrade
+if fired
+    inTrade  := true
+    tradeBuy := buySignal
+    eEntry   := close
+    eSl      := buySignal ? slBull : slBear
+    eT1      := buySignal ? buyTp1 : sellTp1
+    eT2      := buySignal ? buyTp2 : sellTp2
+    eT3      := buySignal ? buyTp3 : sellTp3
+    eBar     := bar_index
+    eTp1Done := false
+    eName    := buySignal ? bullName : bearName
+    lastSigBar := bar_index
+    nTrades  := nTrades + 1
+
+slHit  = false
+tpHit  = false
+timeUp = false
+if inTrade and conf and bar_index > eBar
+    slHit := tradeBuy ? low <= eSl : high >= eSl
+    if not eTp1Done
+        bool t1 = tradeBuy ? high >= eT1 : low <= eT1
+        if t1 and not slHit
+            eTp1Done := true
+            if i_beAfterTp1
+                eSl := eEntry
+    tpHit  := tradeBuy ? high >= eT3 : low <= eT3
+    timeUp := i_timeStop > 0 and (bar_index - eBar) >= i_timeStop
+
+closedWin  = inTrade and (tpHit or (slHit and eTp1Done))
+closedLoss = inTrade and slHit and not eTp1Done
+justClosed = inTrade and (slHit or tpHit or timeUp)
+closeTxt   = tpHit ? "TP3" : slHit ? (eTp1Done ? "BE" : "SL") : "TIME"
+closeCol   = tpHit ? color.new(#00E676, 0) : slHit and eTp1Done ? color.new(#FFC400, 0) : slHit ? color.new(#FF1744, 0) : color.new(#888888, 0)
+if justClosed
+    if closedWin
+        nWin := nWin + 1
+    else if closedLoss
+        nLoss := nLoss + 1
+    inTrade := false
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BIGBELUGA DRAWING — session lines, VP, POC, channel
+// ═══════════════════════════════════════════════════════════════════════════════
+if na(active_high)
+    active_high := line.new(start_idx, htf_high, bar_index, htf_high, width=line_w, color=col_high)
+else
+    active_high.set_xy1(start_idx, htf_high)
+    active_high.set_xy2(bar_index, htf_high)
+    active_high.set_width(line_w)
+
+if na(active_low)
+    active_low := line.new(start_idx, htf_low, bar_index, htf_low, width=line_w, color=col_low)
+else
+    active_low.set_xy1(start_idx, htf_low)
+    active_low.set_xy2(bar_index, htf_low)
+    active_low.set_width(line_w)
+
+if mid_disp
+    if na(active_mid)
+        active_mid := line.new(start_idx, htf_mid, bar_index, htf_mid, color=col_mid, style=line.style_dashed)
+    else
+        active_mid.set_xy1(start_idx, htf_mid)
+        active_mid.set_xy2(bar_index, htf_mid)
+else
+    line.delete(active_mid)
+
+if extend_ch
+    if na(active_high_ext)
+        active_high_ext := line.new(bar_index, htf_high, bar_index + ext_bars, htf_high, color=col_high, style=line.style_dashed, width=line_w)
+    else
+        active_high_ext.set_xy1(bar_index, htf_high)
+        active_high_ext.set_xy2(bar_index + ext_bars, htf_high)
+        active_high_ext.set_width(line_w)
+    if na(active_low_ext)
+        active_low_ext := line.new(bar_index, htf_low, bar_index + ext_bars, htf_low, color=col_low, style=line.style_dashed, width=line_w)
+    else
+        active_low_ext.set_xy1(bar_index, htf_low)
+        active_low_ext.set_xy2(bar_index + ext_bars, htf_low)
+        active_low_ext.set_width(line_w)
+    if mid_disp
+        if na(active_mid_ext)
+            active_mid_ext := line.new(bar_index, htf_mid, bar_index + ext_bars, htf_mid, color=col_mid, style=line.style_dotted)
+        else
+            active_mid_ext.set_xy1(bar_index, htf_mid)
+            active_mid_ext.set_xy2(bar_index + ext_bars, htf_mid)
+    else
+        line.delete(active_mid_ext)
+else
+    line.delete(active_high_ext)
+    line.delete(active_low_ext)
+    line.delete(active_mid_ext)
+
+if show_stats
+    if na(active_stats)
+        active_stats := label.new(mid_bar_idx, htf_high, text=stats_text, style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.white, size=size.small)
+    else
+        active_stats.set_xy(mid_bar_idx, htf_high)
+        active_stats.set_text(stats_text)
+else
+    label.delete(active_stats)
+
+if show_vp
+    float total_start_height = upper_start - lower_start
+    float start_bin_step     = total_start_height / bin_count
+    float channel_slope_per_bar = (reg_end - reg_start) / htf_length
+
+    if max_bin_vol > 0
+        float poc_offset_from_bottom = (vp_poc_bin + 0.5) * start_bin_step
+        float poc_start_y = lower_start + poc_offset_from_bottom
+        float poc_end_y   = lower_end + poc_offset_from_bottom
+        bool is_poc_up = poc_end_y >= poc_start_y
+        color dynamic_color = is_poc_up ? col_bull : col_bear
+
+        chart.point[] vp_points = array.new<chart.point>()
+        for idx = 0 to bin_count - 1
+            float current_vol = array.get(bin_vols, idx)
+            int calculated_width_bars = math.round((current_vol / max_bin_vol) * max_w)
+            float price_bottom_start = lower_start + (idx * start_bin_step)
+            float price_top_start    = price_bottom_start + start_bin_step
+            float price_bottom_projected = price_bottom_start + (channel_slope_per_bar * calculated_width_bars)
+            float price_top_projected    = price_top_start + (channel_slope_per_bar * calculated_width_bars)
+            array.push(vp_points, chart.point.from_index(start_idx, price_bottom_start))
+            array.push(vp_points, chart.point.from_index(start_idx + calculated_width_bars, price_bottom_projected))
+            array.push(vp_points, chart.point.from_index(start_idx + calculated_width_bars, price_top_projected))
+            array.push(vp_points, chart.point.from_index(start_idx, price_top_start))
+
+        polyline.delete(active_vp)
+        active_vp := polyline.new(vp_points, line_color=dynamic_color,
+             fill_color=color.new(dynamic_color, 85), closed=true, line_width=1, force_overlay=true)
+
+        if na(active_vp_upper)
+            active_vp_upper := line.new(start_idx, upper_start, bar_index, upper_end, color=col_chan_upper, style=style_chan_upper, width=1)
+        else
+            line.set_xy1(active_vp_upper, start_idx, upper_start)
+            line.set_xy2(active_vp_upper, bar_index, upper_end)
+            line.set_color(active_vp_upper, col_chan_upper)
+            line.set_style(active_vp_upper, style_chan_upper)
+
+        if na(active_vp_lower)
+            active_vp_lower := line.new(start_idx, lower_start, bar_index, lower_end, color=col_chan_lower, style=style_chan_lower, width=1)
+        else
+            line.set_xy1(active_vp_lower, start_idx, lower_start)
+            line.set_xy2(active_vp_lower, bar_index, lower_end)
+            line.set_color(active_vp_lower, col_chan_lower)
+            line.set_style(active_vp_lower, style_chan_lower)
+
+        if show_poc
+            slopePoc = (poc_start_y - poc_end_y) / (bar_index - start_idx)
+            if na(active_poc)
+                active_poc := line.new(start_idx + 15, poc_start_y - slopePoc * 15, bar_index, poc_end_y, color=dynamic_color, width=2, style=line.style_solid)
+            else
+                line.set_xy1(active_poc, start_idx + 15, poc_start_y - slopePoc * 15)
+                line.set_xy2(active_poc, bar_index, poc_end_y)
+                line.set_color(active_poc, dynamic_color)
+        else
+            line.delete(active_poc)
+    else
+        polyline.delete(active_vp)
+        line.delete(active_poc)
+        line.delete(active_vp_upper)
+        line.delete(active_vp_lower)
+else
+    polyline.delete(active_vp)
+    line.delete(active_poc)
+    line.delete(active_vp_upper)
+    line.delete(active_vp_lower)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP DRAWING — signals, plan lines
+// ═══════════════════════════════════════════════════════════════════════════════
+plotshape(buySignal  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(sellSignal and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+
+var line lnSl = na
+var line lnT1 = na
+var line lnT2 = na
+var line lnT3 = na
+var label lbSl = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+var label lbEnd = na
+
+if i_showPlan and fired
+    if not na(lnSl)
+        line.delete(lnSl)
+        line.delete(lnT1)
+        line.delete(lnT2)
+        line.delete(lnT3)
+        label.delete(lbSl)
+        label.delete(lbT1)
+        label.delete(lbT2)
+        label.delete(lbT3)
+    if not na(lbEnd)
+        label.delete(lbEnd)
+    lnSl := line.new(bar_index, eSl, bar_index, eSl, color=color.new(#FF1744, 0), width=2)
+    lnT1 := line.new(bar_index, eT1, bar_index, eT1, color=color.new(#00E676, 20), style=line.style_dashed)
+    lnT2 := line.new(bar_index, eT2, bar_index, eT2, color=color.new(#00E676, 40), style=line.style_dashed)
+    lnT3 := line.new(bar_index, eT3, bar_index, eT3, color=color.new(#00E676, 60), style=line.style_dashed)
+    lbSl := label.new(bar_index, eSl, "SL " + str.tostring(eSl, format.mintick),
+         style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#FF1744, 0), size=size.tiny)
+    lbT1 := label.new(bar_index, eT1, "TP1 " + str.tostring(eT1, format.mintick),
+         style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 0), size=size.tiny)
+    lbT2 := label.new(bar_index, eT2, "TP2 " + str.tostring(eT2, format.mintick),
+         style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 20), size=size.tiny)
+    lbT3 := label.new(bar_index, eT3, "TP3 " + str.tostring(eT3, format.mintick),
+         style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 40), size=size.tiny)
+
+if i_showPlan and inTrade and not na(lnSl)
+    line.set_x2(lnSl, bar_index)
+    line.set_x2(lnT1, bar_index)
+    line.set_x2(lnT2, bar_index)
+    line.set_x2(lnT3, bar_index)
+    line.set_y1(lnSl, eSl)
+    line.set_y2(lnSl, eSl)
+    label.set_x(lbSl, bar_index)
+    label.set_y(lbSl, eSl)
+    label.set_text(lbSl, (eTp1Done ? "BE " : "SL ") + str.tostring(eSl, format.mintick))
+    label.set_x(lbT1, bar_index)
+    label.set_x(lbT2, bar_index)
+    label.set_x(lbT3, bar_index)
+
+if i_showPlan and justClosed and not na(lnSl)
+    line.set_x2(lnSl, bar_index)
+    line.set_x2(lnT1, bar_index)
+    line.set_x2(lnT2, bar_index)
+    line.set_x2(lnT3, bar_index)
+    if not na(lbEnd)
+        label.delete(lbEnd)
+    lbEnd := label.new(bar_index, tradeBuy ? low : high, closeTxt,
+         style=tradeBuy ? label.style_label_up : label.style_label_down,
+         color=color.new(#000000, 100), textcolor=closeCol, size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════
+trigNow = anyBull or anyBear
+sig100  = math.sum((buySignal or sellSignal) ? 1.0 : 0.0, 100)
+
+var table dash = na
+if i_meDash and barstate.islast
+    pos = i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left
+    if na(dash)
+        dash := table.new(pos, 3, 10, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
+    grn = color.new(#00E676, 0)
+    red = color.new(#FF1744, 0)
+    dim = color.new(#888888, 0)
+    yel = color.new(#FFC400, 0)
+    wht = color.new(#FFFFFF, 0)
+
+    table.cell(dash, 0, 0, "ME SCALP + HTF VP", text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, tf_header, text_color=yel, bgcolor=color.rgb(15, 15, 20), text_size=size.small)
+    table.cell(dash, 2, 0, str.upper(i_freq), text_color=dim, bgcolor=color.rgb(15, 15, 20), text_size=size.small)
+
+    table.cell(dash, 0, 1, "", text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 1, "BUY", text_color=grn, text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 2, 1, "SELL", text_color=red, text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+
+    table.cell(dash, 0, 2, "Score (need " + str.tostring(needScore) + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 2, str.tostring(scoreBull) + "/5", text_color=scoreBull >= needScore ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 2, str.tostring(scoreBear) + "/5", text_color=scoreBear >= needScore ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Triggers now", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 3, anyBull ? bullName + " x" + str.tostring(nTrigBull) : "---", text_color=anyBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 3, anyBear ? bearName + " x" + str.tostring(nTrigBear) : "---", text_color=anyBear ? red : dim, text_size=size.tiny)
+
+    regTxt = inTrend ? (legUp ? "TREND UP" : "TREND DN") : "CHOP"
+    table.cell(dash, 0, 4, "Regime", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 4, regTxt + " " + str.tostring(math.round(effRatio, 2)), text_color=inTrend ? (legUp ? grn : red) : yel, text_size=size.tiny)
+    table.cell(dash, 2, 4, inTrend ? (i_align ? (legUp ? "longs" : "shorts") : "both") : "aside", text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Risk (x ATR)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 5, str.tostring(math.round(riskBull / math.max(meAtr, 1e-9), 2)), text_color=riskOkBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 5, str.tostring(math.round(riskBear / math.max(meAtr, 1e-9), 2)), text_color=riskOkBear ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, legacyClamp ? "Stop: CLAMP" : atrTargets ? "Stop: struct+ATR" : "Stop: struct+R", text_color=legacyClamp ? yel : dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 6, (intrudeBull > 0 ? "! +" : "") + str.tostring(math.round(intrudeBull, 2)), text_color=intrudeBull > 0 ? yel : grn, text_size=size.tiny)
+    table.cell(dash, 2, 6, (intrudeBear > 0 ? "! +" : "") + str.tostring(math.round(intrudeBear, 2)), text_color=intrudeBear > 0 ? yel : red, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "VP Delta", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 7, delta_str, text_color=delta_pct > 0 ? grn : delta_pct < 0 ? red : dim, text_size=size.tiny)
+    vpPocTxt = not na(vpPocPrice) ? "POC " + str.tostring(vpPocPrice, format.mintick) : "---"
+    table.cell(dash, 2, 7, vpPocTxt, text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Open trade", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    openTxt = inTrade ? (tradeBuy ? "LONG " : "SHORT ") + eName + " " + str.tostring(bar_index - eBar) + "b" + (eTp1Done ? " TP1 BE" : "") : "flat"
+    table.cell(dash, 1, 8, openTxt, text_color=inTrade ? (tradeBuy ? grn : red) : dim, text_size=size.tiny)
+    table.cell(dash, 2, 8, inTrade and i_timeStop > 0 ? "stop in " + str.tostring(math.max(i_timeStop - (bar_index - eBar), 0)) + "b" : "", text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 9, "Since load", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    wr = nWin + nLoss > 0 ? 100.0 * nWin / (nWin + nLoss) : 0.0
+    table.cell(dash, 1, 9, str.tostring(nTrades) + " trades", text_color=wht, text_size=size.tiny)
+    table.cell(dash, 2, 9, nWin + nLoss > 0 ? str.tostring(math.round(wr, 1)) + "% win" : "---", text_color=wr >= 50 ? grn : dim, text_size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+if buySignal and not inTrade[1]
+    alert("ME Scalp BUY " + bullName + " | entry " + str.tostring(close, format.mintick) +
+     " | SL " + str.tostring(slBull, format.mintick) +
+     " | TP1 " + str.tostring(buyTp1, format.mintick) +
+     " | TP2 " + str.tostring(buyTp2, format.mintick) +
+     " | TP3 " + str.tostring(buyTp3, format.mintick) +
+     " | score " + str.tostring(scoreBull) + "/5",
+     alert.freq_once_per_bar_close)
+if sellSignal and not inTrade[1]
+    alert("ME Scalp SELL " + bearName + " | entry " + str.tostring(close, format.mintick) +
+     " | SL " + str.tostring(slBear, format.mintick) +
+     " | TP1 " + str.tostring(sellTp1, format.mintick) +
+     " | TP2 " + str.tostring(sellTp2, format.mintick) +
+     " | TP3 " + str.tostring(sellTp3, format.mintick) +
+     " | score " + str.tostring(scoreBear) + "/5",
+     alert.freq_once_per_bar_close)
+
+alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
+alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
