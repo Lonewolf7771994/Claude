@@ -1,0 +1,515 @@
+<title>Hard Money Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;450;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --plane:#f4f2ec; --surface:#fffefb;
+  --ink-1:#16150f; --ink-2:#56544a; --muted:#6e6b5f; --tick:#8a8779;
+  --grid:#e6e3d9; --axis:#c9c5b6;
+  --hair:rgba(22,21,15,0.11); --hair-strong:rgba(22,21,15,0.20);
+  --brass:#9a6f12; --brass-soft:rgba(154,111,18,0.13);
+  --ema-f:#2a78d6; --ema-s:#eb6834;
+  --good-ink:#0a7d0a; --bad-ink:#b62f2f;
+  --zn-sup:rgba(208,59,59,0.10); --zn-sup-e:rgba(208,59,59,0.34);
+  --zn-dem:rgba(12,163,12,0.10); --zn-dem-e:rgba(12,163,12,0.34);
+  --zn-act:rgba(154,111,18,0.15); --zn-act-e:rgba(154,111,18,0.50);
+  --ghost:rgba(22,21,15,0.045);
+  --shadow:0 1px 2px rgba(22,21,15,.05), 0 8px 24px -18px rgba(22,21,15,.35);
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  color-scheme: dark;
+  --plane:#0e0e0c; --surface:#1a1a17;
+  --ink-1:#f7f6f1; --ink-2:#b8b5a8; --muted:#928f85; --tick:#86837a;
+  --grid:#2b2b26; --axis:#3d3c36;
+  --hair:rgba(247,246,241,0.12); --hair-strong:rgba(247,246,241,0.22);
+  --brass:#d9a53c; --brass-soft:rgba(217,165,60,0.16);
+  --ema-f:#3987e5; --ema-s:#d95926;
+  --good-ink:#2fbb2f; --bad-ink:#e66767;
+  --zn-sup:rgba(230,103,103,0.13); --zn-sup-e:rgba(230,103,103,0.40);
+  --zn-dem:rgba(47,187,47,0.12); --zn-dem-e:rgba(47,187,47,0.40);
+  --zn-act:rgba(217,165,60,0.16); --zn-act-e:rgba(217,165,60,0.52);
+  --ghost:rgba(247,246,241,0.05);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -18px rgba(0,0,0,.8);
+}}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --plane:#0e0e0c; --surface:#1a1a17;
+  --ink-1:#f7f6f1; --ink-2:#b8b5a8; --muted:#928f85; --tick:#86837a;
+  --grid:#2b2b26; --axis:#3d3c36;
+  --hair:rgba(247,246,241,0.12); --hair-strong:rgba(247,246,241,0.22);
+  --brass:#d9a53c; --brass-soft:rgba(217,165,60,0.16);
+  --ema-f:#3987e5; --ema-s:#d95926;
+  --good-ink:#2fbb2f; --bad-ink:#e66767;
+  --zn-sup:rgba(230,103,103,0.13); --zn-sup-e:rgba(230,103,103,0.40);
+  --zn-dem:rgba(47,187,47,0.12); --zn-dem-e:rgba(47,187,47,0.40);
+  --zn-act:rgba(217,165,60,0.16); --zn-act-e:rgba(217,165,60,0.52);
+  --ghost:rgba(247,246,241,0.05);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -18px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--plane);color:var(--ink-1);
+  font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:1180px;margin:0 auto;padding:26px 20px 60px;}
+h1,h2{font-family:"Bricolage Grotesque","IBM Plex Sans",sans-serif;margin:0;font-weight:600;letter-spacing:-.015em;text-wrap:balance;}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);}
+
+.masthead{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:baseline;justify-content:space-between;padding-bottom:14px;border-bottom:1px solid var(--hair);}
+.brandrow{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}
+.brand{font-family:"Bricolage Grotesque",sans-serif;font-size:27px;font-weight:700;letter-spacing:-.02em;line-height:1;}
+.brandsub{color:var(--ink-2);font-size:13.5px;}
+.livedot{display:inline-flex;align-items:center;gap:6px;font-family:"IBM Plex Mono",monospace;font-size:11px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--brass);}
+.livedot i{width:7px;height:7px;border-radius:50%;background:var(--brass);display:block;}
+
+.switch{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:20px 0 18px;}
+.seg{display:inline-flex;border:1px solid var(--hair-strong);background:var(--surface);}
+.seg button{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.05em;background:none;border:0;
+  border-right:1px solid var(--hair);color:var(--ink-2);padding:8px 15px;cursor:pointer;transition:background .12s,color .12s;}
+.seg button:last-child{border-right:0;}
+.seg button:hover{background:var(--ghost);color:var(--ink-1);}
+.seg button[aria-pressed="true"]{background:var(--ink-1);color:var(--surface);}
+.seg button:focus-visible,.chk input:focus-visible,.plotwrap:focus-visible{outline:2px solid var(--brass);outline-offset:2px;}
+.chk{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);cursor:pointer;user-select:none;}
+.chk input{accent-color:var(--brass);width:14px;height:14px;margin:0;cursor:pointer;}
+.hint{font-size:12.5px;color:var(--muted);}
+
+.quote{display:flex;flex-wrap:wrap;align-items:flex-end;gap:22px 36px;margin-bottom:20px;}
+.qmain .big{font-size:52px;font-weight:600;line-height:.95;letter-spacing:-.03em;}
+.delta{display:inline-flex;align-items:center;gap:6px;font-size:16px;font-weight:600;padding-bottom:5px;}
+.up{color:var(--good-ink);} .dn{color:var(--bad-ink);}
+.tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--hair);border:1px solid var(--hair);flex:1 1 440px;min-width:270px;}
+@media (min-width:780px){.tiles{grid-template-columns:repeat(4,1fr);}}
+.tile{background:var(--surface);padding:10px 13px 11px;display:flex;flex-direction:column;gap:2px;}
+.tile .lab{font-size:11.5px;color:var(--muted);}
+.tile .val{font-size:19px;font-weight:600;line-height:1.2;letter-spacing:-.01em;}
+.tile .sub{font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--muted);letter-spacing:.03em;}
+
+.card{background:var(--surface);border:1px solid var(--hair);box-shadow:var(--shadow);}
+.cardhead{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;justify-content:space-between;padding:11px 16px;border-bottom:1px solid var(--hair);}
+.legend{display:flex;flex-wrap:wrap;gap:8px 17px;align-items:center;font-size:12.5px;color:var(--ink-2);}
+.key{display:inline-flex;align-items:center;gap:7px;white-space:nowrap;}
+.key .ln{width:16px;height:2px;border-radius:1px;}
+.key .cd{width:9px;height:13px;border:1.5px solid var(--ink-1);}
+.key .cd.fill{background:var(--ink-1);}
+.readout{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums;}
+.readout b{color:var(--ink-1);font-weight:600;}
+.plotwrap{position:relative;padding:6px 0 0;}
+.plotwrap:focus{outline:none;}
+svg{display:block;width:100%;touch-action:pan-y;}
+text{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;}
+.tk{font-size:10.5px;fill:var(--tick);}
+.gridline{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges;}
+.axisline{stroke:var(--axis);stroke-width:1;shape-rendering:crispEdges;}
+.wick{stroke:var(--ink-2);stroke-width:1;}
+.bodyU{fill:var(--surface);stroke:var(--ink-1);stroke-width:1;}
+.bodyD{fill:var(--ink-1);stroke:var(--ink-1);stroke-width:1;}
+.emaF{fill:none;stroke:var(--ema-f);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
+.emaS{fill:none;stroke:var(--ema-s);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
+.rsiline{fill:none;stroke:var(--brass);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
+.rsiband{fill:var(--brass-soft);}
+.znS{fill:var(--zn-sup);} .znD{fill:var(--zn-dem);} .znA{fill:var(--zn-act);}
+.znSe{stroke:var(--zn-sup-e);} .znDe{stroke:var(--zn-dem-e);} .znAe{stroke:var(--zn-act-e);}
+.znEdge{fill:none;stroke-width:1;shape-rendering:crispEdges;}
+.znLab{font-size:9.5px;fill:var(--ink-2);letter-spacing:.09em;}
+.cross{stroke:var(--ink-1);stroke-width:1;opacity:.55;shape-rendering:crispEdges;}
+.dot{fill:var(--brass);stroke:var(--surface);stroke-width:2;}
+.pxtag{fill:var(--ink-1);} .pxtagtx{fill:var(--surface);font-size:11px;font-weight:600;}
+.panelname{font-size:10.5px;fill:var(--tick);letter-spacing:.1em;}
+.tip{position:absolute;pointer-events:none;opacity:0;background:var(--surface);border:1px solid var(--hair-strong);
+  box-shadow:var(--shadow);padding:9px 11px;min-width:180px;z-index:5;transition:opacity .1s;}
+.tip.on{opacity:1;}
+.tip .td{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);letter-spacing:.04em;margin-bottom:6px;}
+.tip table{border-collapse:collapse;width:100%;}
+.tip td{padding:1.5px 0;font-size:12px;}
+.tip td.l{color:var(--ink-2);padding-right:14px;white-space:nowrap;}
+.tip td.v{text-align:right;font-family:"IBM Plex Mono",monospace;font-weight:600;color:var(--ink-1);font-variant-numeric:tabular-nums;}
+.tip .kln{display:inline-block;width:12px;height:2px;border-radius:1px;margin-right:6px;vertical-align:middle;}
+
+.grid2{display:grid;grid-template-columns:1.05fr .95fr;gap:22px;margin-top:22px;}
+@media (max-width:860px){.grid2{grid-template-columns:1fr;}}
+.panel{background:var(--surface);border:1px solid var(--hair);padding:18px 20px 20px;}
+.panel h2{font-size:17px;margin-bottom:3px;}
+.panel .psub{font-size:12.5px;color:var(--muted);margin-bottom:14px;}
+.reads{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:13px;}
+.reads li{display:grid;grid-template-columns:auto 1fr;gap:11px;align-items:start;font-size:14px;line-height:1.5;color:var(--ink-2);}
+.reads .mk{width:7px;height:7px;margin-top:7px;background:var(--brass);}
+.reads b{color:var(--ink-1);font-weight:600;}
+table.zt{width:100%;border-collapse:collapse;font-size:13px;}
+table.zt th{text-align:left;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);font-weight:400;padding:0 0 7px;border-bottom:1px solid var(--hair);}
+table.zt th.r,table.zt td.r{text-align:right;}
+table.zt td{padding:6px 0;border-bottom:1px solid var(--hair);color:var(--ink-2);}
+table.zt td.num{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;color:var(--ink-1);}
+table.zt tr.here td{background:var(--brass-soft);font-weight:600;color:var(--ink-1);}
+.ztag{display:inline-flex;align-items:center;gap:7px;}
+.ztag .sw{width:9px;height:9px;flex:none;}
+.zfresh{font-family:"IBM Plex Mono",monospace;font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--brass);}
+.far{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;color:var(--muted);}
+.gap{margin-top:14px;padding:10px 12px;background:var(--brass-soft);border-left:2px solid var(--brass);font-size:13px;color:var(--ink-2);line-height:1.5;}
+.gap b{color:var(--ink-1);}
+footer{margin-top:28px;padding-top:18px;border-top:1px solid var(--hair);font-size:12.5px;color:var(--ink-2);line-height:1.6;}
+footer p{margin:0 0 9px;} footer b{font-weight:600;color:var(--ink-1);}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;}}
+@media (max-width:560px){.qmain .big{font-size:40px;}.wrap{padding:18px 14px 44px;}.brand{font-size:23px;}}
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="brandrow">
+      <span class="brand">Hard Money Desk</span>
+      <span class="brandsub">Gold and Bitcoin, priced live</span>
+    </div>
+    <div style="text-align:right">
+      <div class="livedot"><i></i> Snapshot</div>
+      <div class="mono" style="font-size:12.5px;color:var(--ink-2)" id="asof"></div>
+    </div>
+  </header>
+
+  <div class="switch">
+    <div class="seg" role="group" aria-label="Instrument" id="symSeg"></div>
+    <div class="seg" role="group" aria-label="Timeframe" id="tfSeg"></div>
+    <label class="chk"><input type="checkbox" id="zoneToggle" checked> Show zones</label>
+    <span class="hint">Zones are built from the 4-hour structure and drawn on both timeframes.</span>
+  </div>
+
+  <section class="quote">
+    <div class="qmain">
+      <div class="eyebrow" id="qlabel">Last</div>
+      <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap">
+        <div class="big mono" id="qpx">—</div>
+        <div class="delta" id="qdelta"></div>
+      </div>
+    </div>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead">
+      <div class="legend">
+        <span class="key"><span class="cd"></span>Up</span>
+        <span class="key"><span class="cd fill"></span>Down</span>
+        <span class="key"><span class="ln" style="background:var(--ema-f)"></span>EMA 9</span>
+        <span class="key"><span class="ln" style="background:var(--ema-s)"></span>EMA 21</span>
+      </div>
+      <div class="readout" id="readout"></div>
+    </div>
+    <div class="plotwrap" id="plotwrap" tabindex="0" role="img" aria-label="Live candlestick chart with EMA 9 and EMA 21, supply and demand zones, and a relative strength index panel. All values are listed in the zone table below.">
+      <svg id="pxsvg" aria-hidden="true"></svg>
+      <svg id="rsisvg" aria-hidden="true"></svg>
+      <div class="tip" id="tip"></div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>What the tape says</h2>
+      <div class="psub" id="readsub"></div>
+      <ul class="reads" id="reads"></ul>
+    </div>
+    <div class="panel">
+      <h2>Live zones</h2>
+      <div class="psub">Supply and demand bands from 4-hour swing pivots.</div>
+      <table class="zt">
+        <thead><tr><th>Zone</th><th class="r">Range</th><th class="r">Tests</th><th class="r">Distance</th></tr></thead>
+        <tbody id="zoneTbl"></tbody>
+      </table>
+      <div class="gap" id="gapNote" hidden></div>
+    </div>
+  </div>
+
+  <footer>
+    <p><b>Data.</b> Crypto.com Exchange public feed. Gold is priced through <b>PAXG</b> (Pax Gold), a token redeemable
+    for one fine troy ounce of London Good Delivery bullion, so the quote is dollars per ounce and trades around the
+    clock. Cross-check at the time of capture: PAXG at 4,593.31 against GLD's 415.26 close implies 0.0904 oz of gold
+    per GLD share, which matches the fund's actual bullion backing — two independent feeds agreeing.</p>
+    <p><b>The window is short, and that is a hard limit.</b> The feed returns 50 candles per request, so the 15-minute
+    chart spans about 12 hours and the 4-hour chart about 8 days. Zones are drawn from that 8-day structure only —
+    older levels that still matter are simply not visible here. EMAs are 9 and 21 periods for the same reason: a
+    200-period average needs four times the history this feed will hand over in one call.</p>
+    <p><b>How the zones are drawn.</b> A swing pivot is a bar whose high or low exceeds every bar two periods either
+    side. Pivots within 0.6 ATR are clustered, and each cluster becomes a band 0.6 ATR wide around its mean, so no
+    zone can widen into a meaningless block. &ldquo;Tests&rdquo; counts later bars that traded into the band.</p>
+    <p><b>Not financial advice.</b> A snapshot, not a live-updating terminal: these prices are frozen at the capture
+    time above and will not refresh on their own.</p>
+  </footer>
+</div>
+
+<script>
+const LIVE = {"PAXG":{"name":"Pax Gold","sym":"PAXG_USD","quote":{"last":4593.31,"chg":0.0199,"high":4618.14,"low":4500.43,"bid":4593.32,"ask":4593.33,"vol":536.37,"volUsd":2447469.1},"px":4593.31,"tf":{"15m":[["2026-08-21T12:45",4562.34,4569.4,4562.34,4565.12,null,null,null],["2026-08-21T13:00",4565.56,4574.84,4563.22,4572.67,null,null,null],["2026-08-21T13:15",4574.72,4574.72,4574.72,4574.72,null,null,null],["2026-08-21T13:30",4575.21,4581.01,4566.19,4576.99,null,null,null],["2026-08-21T13:45",4575.04,4578,4570.39,4570.81,null,null,null],["2026-08-21T14:00",4568.98,4578.95,4568.98,4578.95,null,null,null],["2026-08-21T14:15",4577.47,4588.18,4574.71,4588.18,null,null,null],["2026-08-21T14:30",4590.76,4590.81,4572.23,4576.15,null,null,null],["2026-08-21T14:45",4573.8,4582.36,4573.8,4581.2,4576.09,null,null],["2026-08-21T15:00",4577.36,4584.63,4577.11,4581.55,4577.18,null,null],["2026-08-21T15:15",4582.47,4592.84,4582.47,4591.76,4580.1,null,null],["2026-08-21T15:30",4589.91,4596.83,4587.27,4596.5,4583.38,null,null],["2026-08-21T15:45",4596.72,4600.1,4594.62,4600.1,4586.72,null,null],["2026-08-21T16:00",4601.14,4605.54,4596.89,4604.8,4590.34,null,null],["2026-08-21T16:15",4602.45,4608.1,4600.37,4603.55,4592.98,null,74.8],["2026-08-21T16:30",4602.07,4609.38,4602.07,4609.23,4596.23,null,76.7],["2026-08-21T16:45",4609.6,4615,4609.58,4615,4599.98,null,78.4],["2026-08-21T17:00",4615,4618.14,4611.2,4613.53,4602.69,null,76.9],["2026-08-21T17:15",4609.85,4611.73,4605.4,4611.73,4604.5,null,74.9],["2026-08-21T17:30",4608.67,4613.01,4608.67,4609.17,4605.43,null,72.1],["2026-08-21T17:45",4608.77,4611.12,4605.92,4609.55,4606.26,4591.96,72.2],["2026-08-21T18:00",4611.86,4616.24,4610.21,4614.14,4607.83,4593.98,74.2],["2026-08-21T18:15",4614.25,4617.45,4614.25,4617.45,4609.76,4596.11,75.6],["2026-08-21T18:30",4613.55,4614.08,4608.79,4610.86,4609.98,4597.45,67.9],["2026-08-21T18:45",4611.36,4613.71,4611.36,4613.62,4610.71,4598.92,69.3],["2026-08-21T19:00",4612.53,4613.33,4606.17,4611.08,4610.78,4600.03,66.4],["2026-08-21T19:15",4609.38,4611.17,4607.16,4607.16,4610.06,4600.68,62],["2026-08-21T19:30",4607.24,4608.95,4605.57,4607.94,4609.63,4601.34,62.6],["2026-08-21T19:45",4607.75,4610.79,4606.87,4608.71,4609.45,4602.01,63.1],["2026-08-21T20:00",4606.23,4608.3,4604.48,4606.68,4608.89,4602.43,60.6],["2026-08-21T20:15",4604.29,4604.29,4601.22,4602.28,4607.57,4602.42,55.5],["2026-08-21T20:30",4601.82,4601.82,4598.93,4599.71,4606,4602.17,52.7],["2026-08-21T20:45",4594.93,4596.11,4593.61,4594.4,4603.68,4601.47,47.4],["2026-08-21T21:00",4595.71,4597.56,4595.19,4596.94,4602.33,4601.05,50],["2026-08-21T21:15",4595.33,4598.2,4592.44,4594.12,4600.69,4600.42,47.2],["2026-08-21T21:30",4593.29,4596.48,4592.5,4596.19,4599.79,4600.04,49.5],["2026-08-21T21:45",4593.31,4596.15,4590.86,4590.86,4598,4599.2,44.3],["2026-08-21T22:00",4590.87,4593.36,4589.56,4590.42,4596.49,4598.41,43.9],["2026-08-21T22:15",4592.77,4593.53,4589.3,4591.73,4595.54,4597.8,45.5],["2026-08-21T22:30",4595.3,4598.15,4592.31,4598.15,4596.06,4597.83,52.7],["2026-08-21T22:45",4594.55,4598.27,4594.17,4597.06,4596.26,4597.76,51.4],["2026-08-21T23:00",4596.85,4599.33,4595.86,4596.5,4596.31,4597.65,50.8],["2026-08-21T23:15",4596.51,4599.32,4596.51,4599.32,4596.91,4597.8,54],["2026-08-21T23:30",4596.73,4598.95,4596.3,4596.61,4596.85,4597.69,50.6],["2026-08-21T23:45",4597.2,4600.02,4597.2,4600.02,4597.48,4597.9,54.4],["2026-08-22T00:00",4599.33,4600.07,4596.68,4597.73,4597.53,4597.89,51.5],["2026-08-22T00:15",4596.43,4598.07,4594.37,4594.68,4596.96,4597.6,47.8],["2026-08-22T00:30",4594.68,4597.1,4594.34,4597.1,4596.99,4597.55,50.8],["2026-08-22T00:45",4593.64,4594.23,4592.38,4593.77,4596.35,4597.21,46.8],["2026-08-22T01:00",4593.19,4593.31,4592.38,4593.31,4595.74,4596.85,46.3]],"4h":[["2026-08-13T20:00",4344.44,4381.37,4343.17,4352.91,null,null,null],["2026-08-14T00:00",4353.24,4357.82,4313.36,4325.87,null,null,null],["2026-08-14T04:00",4324.64,4347.22,4314.05,4347.19,null,null,null],["2026-08-14T08:00",4347.5,4365.42,4344.31,4365.42,null,null,null],["2026-08-14T12:00",4365.42,4389.5,4364.73,4382.53,null,null,null],["2026-08-14T16:00",4384.8,4385.37,4364.9,4367.71,null,null,null],["2026-08-14T20:00",4366.71,4376.19,4364.9,4374.52,null,null,null],["2026-08-15T00:00",4376.86,4378.76,4369.82,4375,null,null,null],["2026-08-15T04:00",4375.48,4376.61,4371.17,4375.21,4362.93,null,null],["2026-08-15T08:00",4375.25,4376.47,4371.39,4374.34,4365.21,null,null],["2026-08-15T12:00",4372.01,4375.74,4371.53,4373.96,4366.96,null,null],["2026-08-15T16:00",4373.95,4374.65,4371.03,4374.2,4368.41,null,null],["2026-08-15T20:00",4374.52,4375.65,4372.32,4374.08,4369.54,null,null],["2026-08-16T00:00",4374.45,4376.34,4373.26,4374,4370.43,null,null],["2026-08-16T04:00",4374.19,4378.71,4373.17,4375,4371.35,null,60.2],["2026-08-16T08:00",4374.99,4376.75,4373.44,4374.3,4371.94,null,59.7],["2026-08-16T12:00",4373.04,4373.74,4370.17,4372.46,4372.04,null,58.6],["2026-08-16T16:00",4372.46,4376.84,4371.8,4373.73,4372.38,null,59.2],["2026-08-16T20:00",4372.67,4379.56,4364.89,4365.59,4371.02,null,54],["2026-08-17T00:00",4363.18,4408.23,4362.1,4389.84,4374.79,null,64.1],["2026-08-17T04:00",4392.48,4404.58,4382.11,4398.71,4379.57,4370.79,67],["2026-08-17T08:00",4396.87,4399.92,4385.55,4392.61,4382.18,4372.77,63.2],["2026-08-17T12:00",4392.47,4418.09,4374.38,4418.09,4389.36,4376.89,70.6],["2026-08-17T16:00",4418.09,4418.48,4393.09,4411.62,4393.81,4380.05,66.9],["2026-08-17T20:00",4413.12,4415.48,4403.61,4415.48,4398.15,4383.27,68],["2026-08-18T00:00",4416.69,4425.79,4385.71,4385.71,4395.66,4383.49,53.6],["2026-08-18T04:00",4384.92,4396.81,4382.27,4395.33,4395.59,4384.57,56.8],["2026-08-18T08:00",4388.97,4392.48,4381.68,4391.22,4394.72,4385.17,55.1],["2026-08-18T12:00",4390.7,4398.27,4351.33,4365.14,4388.8,4383.35,45.5],["2026-08-18T16:00",4367.55,4370.85,4339.46,4342.62,4379.57,4379.65,39.2],["2026-08-18T20:00",4343.55,4345.44,4328.4,4333.34,4370.32,4375.44,36.9],["2026-08-19T00:00",4333.33,4356.62,4325,4352.29,4366.71,4373.33,44.1],["2026-08-19T04:00",4350.83,4356.13,4333.51,4351.4,4363.65,4371.34,43.8],["2026-08-19T08:00",4350.28,4368.58,4347.48,4359.95,4362.91,4370.31,46.9],["2026-08-19T12:00",4359.08,4486.67,4357.11,4483.21,4386.97,4380.57,71.5],["2026-08-19T16:00",4483.39,4499.5,4461.15,4498.54,4409.28,4391.29,73.2],["2026-08-19T20:00",4498.14,4518.84,4494.05,4496.1,4426.65,4400.82,72.4],["2026-08-20T00:00",4495.26,4503.9,4469.48,4483.2,4437.96,4408.31,68.6],["2026-08-20T04:00",4480.91,4480.91,4463,4474.01,4445.17,4414.28,65.9],["2026-08-20T08:00",4476.29,4482.95,4452.9,4453.57,4446.85,4417.85,60.2],["2026-08-20T12:00",4452.58,4526.67,4439.5,4508.81,4459.24,4426.12,68.2],["2026-08-20T16:00",4510.12,4519.63,4492.4,4517.06,4470.8,4434.39,69.2],["2026-08-20T20:00",4517.34,4517.87,4504.39,4513.13,4479.27,4441.55,68.1],["2026-08-21T00:00",4513.41,4529.4,4497.34,4521.42,4487.7,4448.81,69.2],["2026-08-21T04:00",4522.38,4556.24,4517.03,4553,4500.76,4458.28,73],["2026-08-21T08:00",4552.26,4594.23,4548.82,4587.16,4518.04,4470,76.4],["2026-08-21T12:00",4586,4600.1,4555.86,4600.1,4534.45,4481.83,77.6],["2026-08-21T16:00",4601.14,4618.14,4596.89,4608.71,4549.3,4493.36,78.3],["2026-08-21T20:00",4606.23,4608.3,4589.3,4600.02,4559.45,4503.06,75.6],["2026-08-22T00:00",4599.33,4600.07,4592.38,4593.32,4566.22,4511.26,73.4]]},"atr4h":30.3,"zones":[{"type":"supply","lo":4609.05,"hi":4627.23,"pivots":1,"touches":0,"fresh":true,"distPct":0.54},{"type":"demand","lo":4513.66,"hi":4531.85,"pivots":2,"touches":5,"fresh":false,"distPct":-1.54},{"type":"demand","lo":4407.92,"hi":4426.1,"pivots":2,"touches":5,"fresh":false,"distPct":-3.84},{"type":"demand","lo":4379.74,"hi":4397.92,"pivots":3,"touches":11,"fresh":false,"distPct":-4.45},{"type":"demand","lo":4360.08,"hi":4378.26,"pivots":3,"touches":13,"fresh":false,"distPct":-4.88}],"chg4h":-0.13,"winHigh":4618.14,"winLow":4313.36},"BTC":{"name":"Bitcoin","sym":"BTC_USD","quote":{"last":78091.89,"chg":0.056,"high":79518.33,"low":73890.48,"bid":78094.34,"ask":78094.35,"vol":9893.8991,"volUsd":760966680.09},"px":78111.98,"tf":{"15m":[["2026-08-21T12:45",77406.79,77476.28,77084.62,77198.71,null,null,null],["2026-08-21T13:00",77198.71,77365.49,77001.86,77171.76,null,null,null],["2026-08-21T13:15",77171.76,77190.55,76815.45,77070.22,null,null,null],["2026-08-21T13:30",77070.22,77307.89,76187.46,77294.09,null,null,null],["2026-08-21T13:45",77294.09,77692.49,77084.72,77237.56,null,null,null],["2026-08-21T14:00",77237.57,77247.7,76680.48,76758.99,null,null,null],["2026-08-21T14:15",76751.05,77193.14,76528.93,77044.87,null,null,null],["2026-08-21T14:30",77043.34,77222.57,76831.75,77121.55,null,null,null],["2026-08-21T14:45",77123.09,77424.42,77091.28,77358.3,77139.56,null,null],["2026-08-21T15:00",77358.29,77793.95,77288.55,77683.17,77248.28,null,null],["2026-08-21T15:15",77692.25,77873.04,77492.6,77595.23,77317.67,null,null],["2026-08-21T15:30",77595.23,77733.95,77448.06,77482.71,77350.68,null,null],["2026-08-21T15:45",77479.08,77525.14,77125.67,77187.51,77318.05,null,null],["2026-08-21T16:00",77191.13,77280.36,76813.78,76830.91,77220.62,null,null],["2026-08-21T16:15",76826.78,77356,76721.89,77355.99,77247.69,null,52.5],["2026-08-21T16:30",77355.98,77372.5,77196.74,77332.48,77264.65,null,52.1],["2026-08-21T16:45",77332.49,77545.53,77282.51,77459.48,77303.62,null,54.2],["2026-08-21T17:00",77451.74,77697.49,77430.09,77535.3,77349.95,null,55.4],["2026-08-21T17:15",77535.29,77535.98,77160.62,77531.78,77386.32,null,55.3],["2026-08-21T17:30",77539.33,77636.92,77313.9,77348.91,77378.84,null,51.4],["2026-08-21T17:45",77363.44,77493.99,77290.89,77377.39,77378.55,77284.61,52],["2026-08-21T18:00",77377.39,77525.5,77255.06,77307.49,77364.34,77286.69,50.4],["2026-08-21T18:15",77302.57,77472.28,77228.91,77358.13,77363.09,77293.19,51.5],["2026-08-21T18:30",77358.9,77426.82,76827.98,76900.86,77270.65,77257.52,42.1],["2026-08-21T18:45",76902.88,77114.98,76577.39,77111.51,77238.82,77244.25,46.9],["2026-08-21T19:00",77111.51,77159.99,76825.27,77110.62,77213.18,77232.1,46.9],["2026-08-21T19:15",77110.61,77309.66,76932.64,77289.48,77228.44,77237.32,50.9],["2026-08-21T19:30",77294.11,77328.89,77060.94,77155.54,77213.86,77229.88,48],["2026-08-21T19:45",77155.54,77230.27,76985.7,77007.91,77172.67,77209.7,44.9],["2026-08-21T20:00",77007.91,77288.38,76807.49,77250.15,77188.17,77213.38,50.5],["2026-08-21T20:15",77257.17,77524.43,77257.17,77476.01,77245.73,77237.26,55.1],["2026-08-21T20:30",77476.01,77518.4,77328.62,77455.82,77287.75,77257.13,54.6],["2026-08-21T20:45",77460.46,77524.53,77295.53,77504.01,77331,77279.57,55.6],["2026-08-21T21:00",77504.01,77809.99,77360.01,77669.73,77398.75,77315.04,59],["2026-08-21T21:15",77669.72,78199.81,77563.95,78087.93,77536.59,77385.3,66],["2026-08-21T21:30",78087.94,78499.99,77968.39,78228.29,77674.93,77461.94,68],["2026-08-21T21:45",78229.77,78686.97,78211,78503.34,77840.61,77556.61,71.5],["2026-08-21T22:00",78503.34,78754.87,78163.58,78726,78017.69,77662.92,74],["2026-08-21T22:15",78749.84,78749.84,78325.11,78494.12,78112.97,77738.48,67.4],["2026-08-21T22:30",78493.64,78583.04,78065.72,78507.02,78191.78,77808.35,67.6],["2026-08-21T22:45",78503.39,78616.97,78218.4,78450,78243.43,77866.68,65.9],["2026-08-21T23:00",78458.17,78605.24,78321.35,78534.98,78301.74,77927.44,67.2],["2026-08-21T23:15",78534.67,78726.21,78339.07,78393.33,78320.06,77969.79,62.9],["2026-08-21T23:30",78393.33,78502.21,78110.47,78380.55,78332.15,78007.13,62.5],["2026-08-21T23:45",78374.07,78405.04,78113.48,78334.89,78332.7,78036.93,61.1],["2026-08-22T00:00",78334.9,78498.57,77711.44,77895.44,78245.25,78024.06,49.2],["2026-08-22T00:15",77903.61,78094.64,77843.13,77907.91,78177.78,78013.51,49.5],["2026-08-22T00:30",77907.91,78051.82,77739.11,77821.59,78106.54,77996.06,47.5],["2026-08-22T00:45",77826.21,77987.93,77667.11,77939.22,78073.08,77990.89,50.5],["2026-08-22T01:00",77939.22,78191.06,77888.43,78111.98,78080.86,78001.9,54.7]],"4h":[["2026-08-13T20:00",63360.38,63592.58,63301.79,63434.44,null,null,null],["2026-08-14T00:00",63435.08,63567.14,63246,63258.29,null,null,null],["2026-08-14T04:00",63259.9,63419.37,62854.71,62856.57,null,null,null],["2026-08-14T08:00",62850.98,62941.57,62631.64,62812.19,null,null,null],["2026-08-14T12:00",62812.19,63025.29,62475.82,62923.57,null,null,null],["2026-08-14T16:00",62923.58,63195.41,62761.46,62904.2,null,null,null],["2026-08-14T20:00",62899.94,63016.77,62740.01,62992.73,null,null,null],["2026-08-15T00:00",62992.73,63138.46,62929.02,62996.62,null,null,null],["2026-08-15T04:00",62998.62,63099.23,62972.39,63016.38,63021.67,null,null],["2026-08-15T08:00",63017.03,63024.95,62849.08,62956.35,63008.6,null,null],["2026-08-15T12:00",62956.35,63061.18,62885.16,63030.29,63012.94,null,null],["2026-08-15T16:00",63030.29,63070.53,62973.76,63064.22,63023.2,null,null],["2026-08-15T20:00",63064.21,63121.81,63002.48,63028.36,63024.23,null,null],["2026-08-16T00:00",63028.37,63096.53,62945.19,63069.49,63033.28,null,null],["2026-08-16T04:00",63067.99,63093.89,62967.98,63004.17,63027.46,null,31.7],["2026-08-16T08:00",63004.18,63019.1,62892.14,62945.27,63011.02,null,30.1],["2026-08-16T12:00",62947.61,63084.6,62924.38,63081.18,63025.05,null,38],["2026-08-16T16:00",63081.19,63332.4,63032.94,63048.72,63029.79,null,36.9],["2026-08-16T20:00",63048.73,63087.63,62653.16,62842.42,62992.31,null,30.9],["2026-08-17T00:00",62842.43,63469.01,62682.42,63377.91,63069.43,null,52.4],["2026-08-17T04:00",63377.91,63662.95,63377.91,63469.82,63149.51,63053.01,55],["2026-08-17T08:00",63466.62,63721.72,63221.86,63569.42,63233.49,63099.96,57.7],["2026-08-17T12:00",63565.81,64185.98,63369.86,64150.55,63416.9,63195.46,69.3],["2026-08-17T16:00",64152.2,64584.05,63931.03,64269.24,63587.37,63293.08,71],["2026-08-17T20:00",64269.24,64530.64,64201.27,64484.23,63766.74,63401.37,73.9],["2026-08-18T00:00",64484.24,64515.48,63982.32,64131.91,63839.78,63467.78,62.8],["2026-08-18T04:00",64123.14,64406.55,64031.07,64142.45,63900.31,63529.11,63],["2026-08-18T08:00",64143.68,64350.1,64025.49,64295.96,63979.44,63598.83,65.6],["2026-08-18T12:00",64295.97,65027.77,63981.92,64819.72,64147.5,63709.82,72.6],["2026-08-18T16:00",64818.82,64860.22,64609.37,64614.44,64240.89,63792.06,66.9],["2026-08-18T20:00",64618.21,64760.43,64516.23,64688.4,64330.39,63873.54,67.9],["2026-08-19T00:00",64688.41,64704.81,64235.92,64279.44,64320.2,63910.44,57.6],["2026-08-19T04:00",64279.44,64368.73,64117.26,64254.3,64307.02,63941.7,57],["2026-08-19T08:00",64251.48,64496.8,64199.4,64464.4,64338.5,63989.22,60.6],["2026-08-19T12:00",64464.4,69895.33,64422.28,68518.08,65174.41,64400.93,85.4],["2026-08-19T16:00",68518.07,68976.61,67799.33,68425.43,65824.62,64766.8,84.1],["2026-08-19T20:00",68425.44,70050.01,68366.22,69307.78,66521.25,65179.61,86.2],["2026-08-20T00:00",69301.17,69859.29,68847.84,69140.52,67045.1,65539.7,83.9],["2026-08-20T04:00",69140.52,69977.48,69107.51,69781.27,67592.34,65925.29,85.5],["2026-08-20T08:00",69781.98,72436.5,69741.93,71873.92,68448.65,66466.08,89.3],["2026-08-20T12:00",71873.93,72806.81,71061.17,72434.81,69245.88,67008.69,90],["2026-08-20T16:00",72429.3,72949.43,72176.1,72660,69928.71,67522.45,90.3],["2026-08-20T20:00",72670.99,73394.28,72462.41,73011.71,70545.31,68021.47,90.8],["2026-08-21T00:00",73011.71,75773.5,73002.39,74485.66,71333.38,68609.12,92.4],["2026-08-21T04:00",74485.66,76881.87,74485.66,76291.35,72324.97,69307.51,93.8],["2026-08-21T08:00",76293.5,79518.33,76236.62,76708.45,73201.67,69980.32,94.1],["2026-08-21T12:00",76715.51,77873.04,76187.46,77198.84,74001.1,70636.55,94.4],["2026-08-21T16:00",77191.13,77697.49,76577.39,77007.91,74602.46,71215.76,92.3],["2026-08-21T20:00",77007.91,78754.87,76807.49,78334.89,75348.95,71862.96,93.4],["2026-08-22T00:00",78334.9,78498.57,77667.11,78111.98,75901.56,72431.05,91.1]]},"atr4h":1378.56,"zones":[{"type":"supply","lo":79104.76,"hi":79931.9,"pivots":1,"touches":0,"fresh":true,"distPct":1.8},{"type":"demand","lo":69636.44,"hi":70463.58,"pivots":1,"touches":3,"fresh":false,"distPct":-10.32}],"chg4h":-0.28,"winHigh":79518.33,"winLow":62475.82}};
+const CAPTURED = "2026-08-22T01:12Z";
+const SVGNS="http://www.w3.org/2000/svg";
+let state={sym:"PAXG",tf:"15m",zones:true,idx:null};
+
+const el=(t,a={})=>{const n=document.createElementNS(SVGNS,t);for(const k in a)n.setAttribute(k,a[k]);return n;};
+const N=(v,d=2)=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const N0=v=>v==null?"—":v.toLocaleString("en-US",{maximumFractionDigits:0});
+const PCT=v=>(v>=0?"+":"")+v.toFixed(2)+"%";
+const compact=v=>v>=1e9?(v/1e9).toFixed(2)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":v>=10000?(v/1000).toFixed(1)+"k":N0(v);
+const fmtT=(s,tf)=>{const d=new Date(s+"Z");
+  const hh=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0");
+  const dm=d.getUTCDate()+" "+["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+  return tf==="15m" ? dm+" "+hh : dm+" "+hh;};
+function niceTicks(lo,hi,count){const span=hi-lo;if(span<=0)return[lo];
+  const raw=span/count,mag=Math.pow(10,Math.floor(Math.log10(raw))),nn=raw/mag;
+  const step=(nn<=1?1:nn<=2?2:nn<=2.5?2.5:nn<=5?5:10)*mag;const out=[];
+  for(let t=Math.ceil(lo/step)*step;t<=hi+1e-9;t+=step)out.push(+t.toFixed(6));return out;}
+
+document.getElementById("asof").textContent="Captured "+CAPTURED.replace("T"," ").replace("Z"," UTC");
+
+/* ---- controls ---- */
+const symSeg=document.getElementById("symSeg"), tfSeg=document.getElementById("tfSeg");
+[["PAXG","Gold"],["BTC","Bitcoin"]].forEach(([k,lab])=>{
+  const b=document.createElement("button");b.type="button";b.textContent=lab;
+  b.setAttribute("aria-pressed",k===state.sym);
+  b.addEventListener("click",()=>{state.sym=k;state.idx=null;
+    [...symSeg.children].forEach(x=>x.setAttribute("aria-pressed",x===b));renderAll();});
+  symSeg.appendChild(b);});
+["15m","4h"].forEach(tf=>{
+  const b=document.createElement("button");b.type="button";b.textContent=tf;
+  b.setAttribute("aria-pressed",tf===state.tf);
+  b.addEventListener("click",()=>{state.tf=tf;state.idx=null;
+    [...tfSeg.children].forEach(x=>x.setAttribute("aria-pressed",x===b));renderAll();});
+  tfSeg.appendChild(b);});
+document.getElementById("zoneToggle").addEventListener("change",e=>{state.zones=e.target.checked;draw();hideTip();});
+
+/* ---- chart ---- */
+const pxsvg=document.getElementById("pxsvg"),rsisvg=document.getElementById("rsisvg");
+const wrap=document.getElementById("plotwrap"),tip=document.getElementById("tip");
+let geo=null;
+const D={t:0,o:1,h:2,l:3,c:4,e9:5,e21:6,r:7};
+const cur=()=>LIVE[state.sym];
+const rows=()=>cur().tf[state.tf];
+
+function draw(){
+  const W=wrap.clientWidth||900, narrow=W<560;
+  const PH=narrow?300:400, RH=narrow?90:104;
+  const PAD={l:10,r:narrow?62:76,t:12,b:20};
+  const rs=rows(), n=rs.length, plotW=W-PAD.l-PAD.r, plotH=PH-PAD.t-PAD.b;
+  const Z=state.zones?cur().zones:[];
+  let lo=Infinity,hi=-Infinity;
+  rs.forEach(r=>{lo=Math.min(lo,r[D.l]);hi=Math.max(hi,r[D.h]);
+    [r[D.e9],r[D.e21]].forEach(v=>{if(v!=null){lo=Math.min(lo,v);hi=Math.max(hi,v);}});});
+  const padY=(hi-lo)*0.06; lo-=padY; hi+=padY;
+  const band=plotW/n, X=i=>PAD.l+band*(i+0.5), Y=v=>PAD.t+plotH-((v-lo)/(hi-lo))*plotH;
+  geo={rs,n,X,Y,PAD,plotW,plotH,PH,RH,band,W};
+
+  pxsvg.setAttribute("viewBox","0 0 "+W+" "+PH);pxsvg.setAttribute("height",PH);pxsvg.textContent="";
+  const g=el("g");pxsvg.appendChild(g);
+  niceTicks(lo,hi,narrow?4:6).forEach(t=>{const y=Y(t);
+    g.appendChild(el("line",{class:"gridline",x1:PAD.l,x2:PAD.l+plotW,y1:y,y2:y}));
+    const tx=el("text",{class:"tk",x:PAD.l+plotW+7,y:y+3.5});tx.textContent=N0(t);g.appendChild(tx);});
+
+  Z.forEach(z=>{
+    const yHi=Y(z.hi),yLo=Y(z.lo);
+    if(yLo<PAD.t||yHi>PAD.t+plotH) return;
+    const top=Math.max(PAD.t,yHi),bot=Math.min(PAD.t+plotH,yLo);
+    if(bot-top<0.5) return;
+    const k=z.type==="supply"?"S":z.type==="demand"?"D":"A";
+    g.appendChild(el("rect",{class:"zn"+k,x:PAD.l,y:top,width:plotW,height:bot-top}));
+    g.appendChild(el("path",{class:"znEdge zn"+k+"e",
+      d:"M"+PAD.l+" "+top.toFixed(1)+"H"+(PAD.l+plotW)+"M"+PAD.l+" "+bot.toFixed(1)+"H"+(PAD.l+plotW)}));
+    const hgt=bot-top;
+    if(hgt>=6&&!narrow){const full=hgt>=13;
+      const t=el("text",{class:"znLab",x:PAD.l+6,y:(top+bot)/2+(full?3.3:2.9)});
+      if(!full)t.setAttribute("style","font-size:8.5px");
+      const nm=z.type==="active"?"IN ZONE":z.type.toUpperCase();
+      t.textContent=full?nm+"  "+N0(z.lo)+"–"+N0(z.hi):nm;
+      g.appendChild(t);}
+  });
+
+  const cw=Math.max(1,Math.min(11,band*0.66));
+  rs.forEach((r,i)=>{const x=X(i),up=r[D.c]>=r[D.o];
+    g.appendChild(el("line",{class:"wick",x1:x,x2:x,y1:Y(r[D.h]),y2:Y(r[D.l])}));
+    const y1=Y(Math.max(r[D.o],r[D.c])),y2=Y(Math.min(r[D.o],r[D.c]));
+    g.appendChild(el("rect",{class:up?"bodyU":"bodyD",x:x-cw/2,y:y1,width:cw,height:Math.max(1,y2-y1)}));});
+
+  const line=(key,cls)=>{let d="",open=false;
+    rs.forEach((r,i)=>{const v=r[key];if(v==null){open=false;return;}
+      d+=(open?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1);open=true;});
+    if(d)g.appendChild(el("path",{class:cls,d}));};
+  line(D.e9,"emaF");line(D.e21,"emaS");
+
+  const ly=Y(rs[n-1][D.c]),tagW=narrow?58:70;
+  g.appendChild(el("rect",{class:"pxtag",x:PAD.l+plotW+3,y:ly-8,width:tagW,height:16}));
+  const tt=el("text",{class:"pxtagtx",x:PAD.l+plotW+3+tagW/2,y:ly+4,"text-anchor":"middle"});
+  tt.textContent=N0(rs[n-1][D.c]);g.appendChild(tt);
+
+  const every=narrow?Math.ceil(n/4):Math.ceil(n/8);
+  rs.forEach((r,i)=>{ if(i%every!==0||i>n-2) return;
+    const x=X(i);
+    g.appendChild(el("line",{class:"gridline",x1:x,x2:x,y1:PAD.t,y2:PAD.t+plotH}));
+    const tx=el("text",{class:"tk",x:x,y:PH-6,"text-anchor":"middle"});
+    tx.textContent=fmtT(r[D.t],state.tf);g.appendChild(tx);});
+  g.appendChild(el("line",{class:"axisline",x1:PAD.l,x2:PAD.l+plotW,y1:PAD.t+plotH,y2:PAD.t+plotH}));
+
+  rsisvg.setAttribute("viewBox","0 0 "+W+" "+RH);rsisvg.setAttribute("height",RH);rsisvg.textContent="";
+  const rg=el("g");rsisvg.appendChild(rg);
+  const rTop=14,rH=RH-rTop-16,RY=v=>rTop+rH-(v/100)*rH;
+  rg.appendChild(el("rect",{class:"rsiband",x:PAD.l,y:RY(70),width:plotW,height:RY(30)-RY(70)}));
+  [30,50,70].forEach(v=>{rg.appendChild(el("line",{class:"gridline",x1:PAD.l,x2:PAD.l+plotW,y1:RY(v),y2:RY(v)}));
+    const t=el("text",{class:"tk",x:PAD.l+plotW+7,y:RY(v)+3.5});t.textContent=v;rg.appendChild(t);});
+  const pn=el("text",{class:"panelname",x:PAD.l+2,y:10});pn.textContent="RSI 14";rg.appendChild(pn);
+  let rd="",ro=false;
+  rs.forEach((r,i)=>{const v=r[D.r];if(v==null){ro=false;return;}
+    rd+=(ro?"L":"M")+X(i).toFixed(1)+" "+RY(v).toFixed(1);ro=true;});
+  if(rd)rg.appendChild(el("path",{class:"rsiline",d:rd}));
+  rg.appendChild(el("line",{class:"axisline",x1:PAD.l,x2:PAD.l+plotW,y1:rTop+rH,y2:rTop+rH}));
+  geo.RY=RY;
+  geo.cross=el("g");pxsvg.appendChild(geo.cross);
+  geo.crossR=el("g");rsisvg.appendChild(geo.crossR);
+  if(state.idx!=null)paintCross();
+  updateReadout(state.idx);
+}
+function paintCross(){
+  const {rs,X,Y,PAD,plotH,RY}=geo;
+  geo.cross.textContent="";geo.crossR.textContent="";
+  const i=Math.max(0,Math.min(rs.length-1,state.idx)),r=rs[i],x=X(i);
+  geo.cross.appendChild(el("line",{class:"cross",x1:x,x2:x,y1:PAD.t,y2:PAD.t+plotH}));
+  geo.cross.appendChild(el("circle",{class:"dot",cx:x,cy:Y(r[D.c]),r:4}));
+  geo.crossR.appendChild(el("line",{class:"cross",x1:x,x2:x,y1:14,y2:geo.RH-16}));
+  if(r[D.r]!=null)geo.crossR.appendChild(el("circle",{class:"dot",cx:x,cy:RY(r[D.r]),r:3.5}));
+}
+function updateReadout(i){
+  const rs=geo.rs,r=rs[i==null?rs.length-1:Math.max(0,Math.min(rs.length-1,i))];
+  const ro=document.getElementById("readout");ro.textContent="";
+  const mk=(l,v)=>{const s=document.createElement("span");s.textContent=" "+l+" ";
+    const b=document.createElement("b");b.textContent=v;s.appendChild(b);return s;};
+  ro.append(document.createTextNode(fmtT(r[D.t],state.tf)+" UTC  ·"),
+    mk("O",N(r[D.o])),mk("H",N(r[D.h])),mk("L",N(r[D.l])),mk("C",N(r[D.c])));
+}
+function showTip(i){
+  const {rs,X,Y}=geo,r=rs[i],pr=i>0?rs[i-1]:null,dc=pr?r[D.c]-pr[D.c]:null;
+  tip.textContent="";
+  const dd=document.createElement("div");dd.className="td";dd.textContent=fmtT(r[D.t],state.tf)+" UTC";
+  const tb=document.createElement("table");
+  const row=(l,v,col)=>{const tr=document.createElement("tr"),a=document.createElement("td"),b=document.createElement("td");
+    a.className="l";b.className="v";
+    if(col){const k=document.createElement("span");k.className="kln";k.style.background=col;a.appendChild(k);}
+    a.appendChild(document.createTextNode(l));b.textContent=v;tr.append(a,b);tb.appendChild(tr);};
+  row("Open",N(r[D.o]));row("High",N(r[D.h]));row("Low",N(r[D.l]));row("Close",N(r[D.c]));
+  if(dc!=null)row("Change",(dc>=0?"+":"")+N(dc)+" ("+PCT(dc/pr[D.c]*100)+")");
+  if(r[D.e9]!=null)row("EMA 9",N(r[D.e9]),"var(--ema-f)");
+  if(r[D.e21]!=null)row("EMA 21",N(r[D.e21]),"var(--ema-s)");
+  if(r[D.r]!=null)row("RSI 14",r[D.r].toFixed(1),"var(--brass)");
+  tip.append(dd,tb);tip.classList.add("on");
+  const x=X(i),tw=tip.offsetWidth;
+  let left=x+14;if(left+tw>geo.W-6)left=x-tw-14;if(left<4)left=4;
+  tip.style.left=left+"px";
+  tip.style.top=Math.max(6,Math.min(Y(r[D.c])-30,geo.PH-tip.offsetHeight-10))+"px";
+}
+function hideTip(){tip.classList.remove("on");state.idx=null;
+  if(geo&&geo.cross){geo.cross.textContent="";geo.crossR.textContent="";}updateReadout(null);}
+function idxFromX(cx){const rect=wrap.getBoundingClientRect();
+  return Math.max(0,Math.min(geo.rs.length-1,Math.round((cx-rect.left-geo.PAD.l)/geo.band-0.5)));}
+function onMove(e){if(!geo)return;state.idx=idxFromX(e.clientX);paintCross();showTip(state.idx);updateReadout(state.idx);}
+wrap.addEventListener("pointermove",onMove);
+wrap.addEventListener("pointerdown",onMove);
+wrap.addEventListener("pointerleave",hideTip);
+wrap.addEventListener("blur",hideTip);
+wrap.addEventListener("keydown",e=>{if(!geo)return;const n=geo.rs.length;
+  let i=state.idx==null?n-1:state.idx;
+  if(e.key==="ArrowRight")i=Math.min(n-1,i+1);else if(e.key==="ArrowLeft")i=Math.max(0,i-1);
+  else if(e.key==="Home")i=0;else if(e.key==="End")i=n-1;
+  else if(e.key==="Escape"){hideTip();return;}else return;
+  e.preventDefault();state.idx=i;paintCross();showTip(i);updateReadout(i);});
+
+/* ---- header, tiles, reads, zone table ---- */
+function renderAll(){
+  const c=cur(),q=c.quote,rs=c.tf[state.tf],last=rs[rs.length-1];
+  document.getElementById("qlabel").textContent=c.name+" · "+c.sym.replace("_","/")+" · last";
+  document.getElementById("qpx").textContent=N(q.last);
+  const d=document.getElementById("qdelta");
+  d.className="delta "+(q.chg>=0?"up":"dn");d.textContent="";
+  const ar=document.createElement("span");ar.textContent=q.chg>=0?"▲":"▼";
+  const tx=document.createElement("span");tx.textContent=PCT(q.chg*100)+" over 24h";
+  d.append(ar,tx);
+
+  
+  const rsiNow=[...rs].reverse().find(r=>r[D.r]!=null);
+  const tiles=[
+    {lab:"RSI (14) on "+state.tf,val:rsiNow?rsiNow[D.r].toFixed(1):"—",
+     sub:rsiNow?(rsiNow[D.r]>=70?"Overbought":rsiNow[D.r]>=60?"Strong":rsiNow[D.r]<=30?"Oversold":"Neutral"):""},
+    {lab:"24-hour range",val:compact(q.low)+"–"+compact(q.high),sub:PCT((q.high/q.low-1)*100)+" wide"},
+    {lab:"4-hour ATR",val:N(c.atr4h),sub:(c.atr4h/q.last*100).toFixed(2)+"% of price"},
+    {lab:"24-hour volume",val:"$"+compact(q.volUsd),sub:N0(q.vol)+" "+(state.sym==="PAXG"?"oz":"BTC")}
+  ];
+  const tw=document.getElementById("tiles");tw.textContent="";
+  tiles.forEach(t=>{const el2=document.createElement("div");el2.className="tile";
+    const a=document.createElement("div");a.className="lab";a.textContent=t.lab;
+    const b=document.createElement("div");b.className="val mono";b.textContent=t.val;
+    const s=document.createElement("div");s.className="sub";s.textContent=t.sub;
+    el2.append(a,b,s);tw.appendChild(el2);});
+
+  const zt=document.getElementById("zoneTbl");zt.textContent="";
+  c.zones.forEach(z=>{
+    const tr=document.createElement("tr");if(z.type==="active")tr.className="here";
+    const a=document.createElement("td");
+    const tag=document.createElement("span");tag.className="ztag";
+    const sw=document.createElement("span");sw.className="sw";
+    sw.style.background=z.type==="supply"?"var(--zn-sup-e)":z.type==="demand"?"var(--zn-dem-e)":"var(--zn-act-e)";
+    tag.append(sw,document.createTextNode(z.type==="active"?"Price inside":z.type==="supply"?"Supply":"Demand"));
+    a.appendChild(tag);
+    if(z.fresh){const f=document.createElement("div");f.className="zfresh";f.textContent="untested";a.appendChild(f);}
+    const b=document.createElement("td");b.className="num r";b.textContent=N0(z.lo)+"–"+N0(z.hi);
+    const cc=document.createElement("td");cc.className="far r";cc.textContent=z.touches;
+    const dd=document.createElement("td");dd.className="far r";
+    dd.textContent=z.type==="active"?"here":PCT(z.distPct);
+    tr.append(a,b,cc,dd);zt.appendChild(tr);});
+
+  // air-pocket note: the widest unsupported drop below price
+  const below=c.zones.filter(z=>z.hi<q.last).sort((a,b)=>b.hi-a.hi)[0];
+  const gapEl=document.getElementById("gapNote");
+  if(below && Math.abs(below.distPct)>6){
+    gapEl.hidden=false;gapEl.textContent="";
+    const st=document.createElement("b");st.textContent="Air pocket. ";
+    gapEl.append(st,document.createTextNode("The nearest support is "+N0(below.hi)+", "+
+      Math.abs(below.distPct).toFixed(1)+"% below the last price. Nothing in this 8-day window sits between — a move that "+
+      "goes vertical leaves no structure under it, so a pullback has little to catch on until there."));
+  } else gapEl.hidden=true;
+
+  document.getElementById("readsub").textContent=
+    (state.tf==="4h" ? "Computed from the 4-hour series above — not a recommendation."
+                     : "Computed from the 15-minute and 4-hour series above — not a recommendation.");
+  const rl=document.getElementById("reads");rl.textContent="";
+  buildReads(c,q,rs,rsiNow).forEach(([hd,bd])=>{
+    const li=document.createElement("li");
+    const m=document.createElement("span");m.className="mk";
+    const t=document.createElement("span");
+    const b=document.createElement("b");b.textContent=hd+" ";
+    t.append(b,document.createTextNode(bd));li.append(m,t);rl.appendChild(li);});
+
+  draw();hideTip();
+}
+function buildReads(c,q,rs,rsiNow){
+  const last=rs[rs.length-1], e9=last[D.e9], e21=last[D.e21];
+  const out=[];
+  const trend = e9!=null&&e21!=null ? (e9>e21?"up":"down") : null;
+  if(trend) out.push([
+    "Short-term trend is "+trend+" on the "+state.tf+".",
+    "EMA 9 at "+N(e9)+" is "+(trend==="up"?"above":"below")+" EMA 21 at "+N(e21)+
+    ", a gap of "+N(Math.abs(e9-e21))+". Price closed the last bar at "+N(last[D.c])+"."]);
+  const sup=c.zones.filter(z=>z.type==="supply").sort((a,b)=>a.lo-b.lo)[0];
+  const dem=c.zones.filter(z=>z.type==="demand").sort((a,b)=>b.hi-a.hi)[0];
+  if(sup) out.push(["Overhead is "+(sup.fresh?"untested.":"defended."),
+    "The first supply band is "+N0(sup.lo)+"–"+N0(sup.hi)+", "+PCT(sup.distPct)+" away"+
+    (sup.fresh?". Nothing has traded back into it since it formed, so it has not proved itself yet — fresh bands break more often than they hold."
+              :", tested "+sup.touches+" times. Repeatedly defended levels are the ones that matter.")]);
+  else out.push(["Nothing overhead in this window.",
+    "No supply band sits above the last price within the 8 days of 4-hour structure the feed returns. Price is at the top of its own range, which means the next resistance is outside what this chart can see."]);
+  if(dem) out.push(["First support back is "+N0(dem.lo)+"–"+N0(dem.hi)+".",
+    "That band is "+PCT(dem.distPct)+" away and has been tested "+dem.touches+" times."]);
+  if(rsiNow) out.push(["RSI is "+rsiNow[D.r].toFixed(1)+" on the "+state.tf+".",
+    rsiNow[D.r]>=70?"Above 70 — stretched. Momentum this hot usually needs a pause, though in a strong trend overbought can stay overbought."
+    :rsiNow[D.r]<=30?"Below 30 — washed out. Oversold in a downtrend is not a buy signal on its own."
+    :"Between 30 and 70, so momentum is not at an extreme in either direction."]);
+  out.push(["Volatility to size against.",
+    "The 4-hour ATR is "+N(c.atr4h)+", or "+(c.atr4h/q.last*100).toFixed(2)+"% of price. Stops inside that width will be hit by ordinary noise."]);
+  return out;
+}
+
+renderAll();
+let rt;new ResizeObserver(()=>{clearTimeout(rt);rt=setTimeout(()=>{draw();hideTip();},80);}).observe(wrap);
+</script>
