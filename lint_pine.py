@@ -32,8 +32,62 @@ def strip_strings(s):
         i += 1
     return "".join(out), q
 
+# A wrapped line does not have to be inside an open bracket. Pine also
+# continues a statement when the next line begins with an operator, which is how
+# a multi-line ternary is written:
+#     float x = cond
+#          ? a
+#          : b
+# Treating those as fresh statements made the indent rule fire on legal code,
+# and a linter that cries wolf is one you stop reading — which is how v5.0
+# shipped with an undeclared identifier in it.
+# Matched against the RAW line, never the string-stripped one: blanking a
+# literal turns `'{' + rest` into `    + rest`, which then looks like a line
+# that opens with an operator when it is an ordinary statement.
+CONT_START = re.compile(r"^[ \t]*(\?|:|\+|\*|/|=>|,|\)|\]|and\b|or\b)")
+# The other half of the same rule — the break can sit at the end of the line
+# instead of the start of the next one.
+# Deliberately NARROW. A first attempt matched any trailing operator and
+# swallowed whole files into one logical line, turning 1 finding into 130.
+# Only the ternary split is handled here; every other wrap in this codebase
+# either sits inside brackets or opens the next line with an operator.
+CONT_END = re.compile(r"[?:][ \t]*$")
+
+
+def code_only(s):
+    """The raw line with any trailing comment removed and STRING LITERALS LEFT
+    INTACT. The continuation tests must run on this, not on the blanked form:
+    `x = cond ? "BULL" : "BEAR"` blanks to something ending in `:`, which reads
+    as a ternary split across lines and swallows the rest of the file."""
+    i, q = 0, None
+    while i < len(s):
+        c = s[i]
+        if q:
+            if c == "\\":
+                i += 2
+                continue
+            if c == q:
+                q = None
+        elif c in "'\"":
+            q = c
+        elif c == "/" and i + 1 < len(s) and s[i+1] == "/":
+            return s[:i]
+        i += 1
+    return s
+
+
 def logical_lines(lines):
     """Yield (start_lineno, [physical line numbers], joined_code)."""
+    def next_is_cont(i, raw):
+        if CONT_END.search(code_only(raw).rstrip()):
+            return True
+        for j in range(i + 1, len(lines)):
+            s = lines[j]
+            if not s.strip() or s.lstrip().startswith("//"):
+                continue
+            return bool(CONT_START.match(s))
+        return False
+
     buf, start, depth, nums = "", None, 0, []
     for n, l in enumerate(lines, 1):
         code, unterm = strip_strings(l)
@@ -42,56 +96,102 @@ def logical_lines(lines):
                 continue
         if start is None:
             start, buf, nums = n, "", []
-        nums.append(n); buf += (" " + code) if depth else code
+        nums.append(n); buf += (" " + code) if len(nums) > 1 else code
         depth += code.count("(") - code.count(")") + code.count("[") - code.count("]")
+        if depth <= 0 and next_is_cont(n - 1, l):
+            depth = 0
+            continue
         if depth <= 0:
             yield start, nums, buf
             start, buf, depth, nums = None, "", 0, []
     if start is not None:
         yield start, nums, buf
 
+TYPEWORDS = r"(?:int|float|bool|string|color|line|linefill|label|box|table|polyline|chart\.point|array|matrix|map)"
+
+
 def undefined_names(lines):
     """Identifiers referenced but never assigned anywhere in the file.
 
     Added after a clean lint on a file referencing an undefined group constant
-    (G_FILTERS), which is a hard compile error on TradingView. Scoped to the
-    prefixes this project uses for module-level constants so it stays quiet on
-    builtins and locals.
-    """
-    src = "\n".join(lines)
-    clean, i, n, in_s = [], 0, len(src), None
-    while i < n:
-        c = src[i]
-        if in_s:
-            if c == in_s: in_s = None
-            clean.append(" ")
-        elif c in "\"'":
-            in_s = c; clean.append(" ")
-        elif c == "/" and i + 1 < n and src[i+1] == "/":
-            while i < n and src[i] != "\n": i += 1
-            clean.append("\n"); continue
-        else:
-            clean.append(c)
-        i += 1
-    clean = "".join(clean)
+    (G_FILTERS), which is a hard compile error on TradingView.
 
-    assigned = set(re.findall(r"^\s*([A-Za-z_]\w*)\s*(?::=|=)", clean, re.M))
-    assigned |= set(re.findall(r"^\s*(?:var\s+)?(?:int|float|bool|string|color|line|label|box|table)\s+([A-Za-z_]\w*)", clean, re.M))
-    for grp in re.findall(r"\[([^\]]+)\]\s*=", clean):
+    WIDENED after v5.0 shipped with `tfWarn` referenced and never declared —
+    the previous version only inspected names prefixed G_ / i_ / eff, so an
+    ordinary local that a patch deleted out from under its use sailed through a
+    clean lint and failed to compile on TradingView. It now checks EVERY bare
+    identifier, which requires getting three things right or it drowns in false
+    positives:
+
+      qualified names   `size.small` is one token, not a reference to `small`.
+                        The whole dotted expression is removed, not just its
+                        prefix.
+      named arguments   `tooltip=` inside a call looks exactly like a use. Any
+                        identifier followed by a single `=` is skipped.
+      declarations      Pine spells these six ways — plain, `var`/`varip`,
+                        typed (`float x =`), bracket-array (`box[] xs =`),
+                        generic (`array<float> xs =`), tuple (`[a, b] =`),
+                        function parameters, `for` and `for...in` loop vars,
+                        and the field names inside a `type` block.
+
+    Verified against every .pine in this repo that TradingView has compiled:
+    zero findings on all of them.
+    """
+    clean = "\n".join(strip_strings(l)[0] for l in lines)
+    clean = re.sub(r"#[0-9A-Fa-f]{6,8}\b", " ", clean)          # color literals
+
+    assigned = set()
+    # plain / var / varip / typed / bracket-array / generic declarations
+    decl = (r"^[ \t]*(?:var(?:ip)?[ \t]+)?"
+            r"(?:" + TYPEWORDS + r"(?:[ \t]*<[^>\n]*>|[ \t]*\[[ \t]*\])?[ \t]+)?"
+            r"([A-Za-z_]\w*)[ \t]*(?::=|=)(?!=)")
+    assigned |= set(re.findall(decl, clean, re.M))
+    # a user type used as the declared type: `SessionDrawings d = ...`
+    assigned |= set(re.findall(r"^[ \t]*(?:var(?:ip)?[ \t]+)?[A-Za-z_]\w*(?:[ \t]*<[^>\n]*>|[ \t]*\[[ \t]*\])?[ \t]+([A-Za-z_]\w*)[ \t]*=(?!=)", clean, re.M))
+    # tuple destructuring, including request.security's [a, b] = form
+    for grp in re.findall(r"\[([^\]\n]+)\][ \t]*=(?!=)", clean):
         for nm in grp.split(","):
-            assigned.add(nm.strip().split()[-1] if nm.strip() else "")
-    for params in re.findall(r"^\s*[A-Za-z_]\w*\(([^)]*)\)\s*=>", clean, re.M):
+            nm = nm.strip()
+            if nm:
+                assigned.add(nm.split()[-1])
+    # function parameters
+    for params in re.findall(r"^[ \t]*[A-Za-z_]\w*\(([^)\n]*)\)[ \t]*=>", clean, re.M):
         for prm in params.split(","):
-            prm = prm.strip()
-            if prm: assigned.add(prm.split()[-1])
-    assigned |= set(re.findall(r"^\s*for\s+([A-Za-z_]\w*)\s*=", clean, re.M))
+            prm = prm.strip().split("=")[0].strip()
+            if prm:
+                assigned.add(prm.split()[-1])
+    # for i = 0 to n   /   for [i, x] in arr   /   for x in arr
+    assigned |= set(re.findall(r"^[ \t]*for[ \t]+([A-Za-z_]\w*)", clean, re.M))
+    for grp in re.findall(r"^[ \t]*for[ \t]+\[([^\]\n]+)\][ \t]+in\b", clean, re.M):
+        for nm in grp.split(","):
+            if nm.strip():
+                assigned.add(nm.strip())
+    # type blocks: the type name and every field declared inside it
+    for m in re.finditer(r"^type[ \t]+([A-Za-z_]\w*)[ \t]*$", clean, re.M):
+        assigned.add(m.group(1))
+        tail = clean[m.end():]
+        for fl in tail.split("\n")[1:]:
+            if not fl.startswith((" ", "\t")) or not fl.strip():
+                break
+            f = re.match(r"[ \t]+\S+(?:[ \t]*<[^>]*>|[ \t]*\[[ \t]*\])?[ \t]+([A-Za-z_]\w*)", fl)
+            if f:
+                assigned.add(f.group(1))
+
+    # drop dotted expressions whole, then collect bare identifiers that are
+    # neither call heads nor named arguments
+    bare = re.sub(r"\b[A-Za-z_]\w*(?:[ \t]*\.[ \t]*[A-Za-z_]\w*)+", " ", clean)
+    used = set()
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\b[ \t]*(\(|=(?!=))?", bare):
+        if m.group(2):
+            continue
+        used.add(m.group(1))
 
     out = []
-    for name in sorted(set(re.findall(r"\b((?:G_|i_|eff)\w*)", clean))):
-        if name in assigned: continue
+    for name in sorted(used - assigned - KEYWORDS - BARE):
         for ln, text in enumerate(lines, 1):
-            if text.lstrip().startswith("//"): continue
-            if re.search(r"\b" + re.escape(name) + r"\b", text):
+            if text.lstrip().startswith("//"):
+                continue
+            if re.search(r"\b" + re.escape(name) + r"\b", strip_strings(text)[0]):
                 out.append((ln, "'%s' referenced but never assigned" % name))
                 break
     return out
@@ -152,7 +252,12 @@ def check(path):
 
     # use before definition
     defined, first_use = {}, {}
-    DEF = re.compile(r"^\s*(?:var(?:ip)?\s+)?(?:(?:int|float|bool|string|color|line|label|box|table)(?:\[\])?\s+)?([A-Za-z_]\w*)\s*(?::=|=(?!=))")
+    # Every declaration form Pine accepts. Missing `var polyline x = na` here
+    # made the checker report a variable as "used before defined" at the exact
+    # line that defines it.
+    DEF = re.compile(r"^\s*(?:var(?:ip)?\s+)?"
+                     r"(?:[A-Za-z_]\w*(?:\s*<[^>\n]*>|\s*\[\s*\])?\s+)?"
+                     r"([A-Za-z_]\w*)\s*(?::=|=(?!=))")
     for start, nums, code in logical_lines(lines):
         c, _ = strip_strings(code)
         m = DEF.match(code)
@@ -176,11 +281,20 @@ def check(path):
 
     return sorted(set(errs))
 
-bad = 0
-for path in sys.argv[1:]:
-    e = check(path)
-    print("=== %s ===" % path)
-    for n, m in e[:30]: print("  line %-5d %s" % (n, m))
-    print("  %d issue(s)" % len(e))
-    bad += len(e)
-sys.exit(1 if bad else 0)
+def main(argv):
+    bad = 0
+    for path in argv:
+        e = check(path)
+        print("=== %s ===" % path)
+        for n, m in e[:30]:
+            print("  line %-5d %s" % (n, m))
+        print("  %d issue(s)" % len(e))
+        bad += len(e)
+    return 1 if bad else 0
+
+
+# Guarded so the module can be imported and its helpers reused — without this
+# an `import lint_pine` ran the driver and called sys.exit() on the spot, which
+# silently killed anything trying to test the checker.
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

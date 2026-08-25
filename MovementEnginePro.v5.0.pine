@@ -5219,7 +5219,7 @@ if i_dashboard and barstate.islast
     red2 = color.new(#FF3366, 50)
 
     modeCap = (i_mode == "Balanced" or i_mode == "Strict") and not presetOff ? "  ⚠ mode caps ~2/day" : ""
-    table.cell(dash, 0, 0, (isHeikin ? "⛔ HEIKIN ASHI — LEVELS INVALID" : "ME PRO v5.0") + " — " + str.upper(i_mode) + (presetOff ? "" : " · " + str.upper(i_rateTarget) + " · DIR " + str.tostring(dirStack) + "/3") + modeCap + tfWarn + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 0, (isHeikin ? "⛔ HEIKIN ASHI — LEVELS INVALID" : "ME PRO v5.0") + " — " + str.upper(i_mode) + (presetOff ? "" : " · " + str.upper(i_rateTarget) + " · DIR " + str.tostring(dirStack) + "/3") + modeCap + (inNewsWindow ? " ⛔NEWS" : "") + (breakerOk ? "" : " ⛔LOSSES"), text_color=color.white, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
     // v4.7: these headings govern SPLIT rows only. A row that spans the full
     // width has no side — it is one global reading.
     table.cell(dash, 1, 0, "BUY",  text_color=color.new(#00E5FF, 20), bgcolor=color.rgb(15, 15, 20), text_size=size.small)
