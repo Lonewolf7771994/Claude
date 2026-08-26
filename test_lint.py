@@ -38,6 +38,8 @@ CASES = [
      BASE.replace('i_x = input.float(1.0, "x")',
                   'early = later + 1\nlater = 2\ni_x = input.float(1.0, "x")'), 1),
     ("ternary split across lines is NOT an error", BASE, 0),
+    ("function declared inside a block",
+     BASE.replace('z = f(1, 2)', 'if val\n    g(a) =>\n        a * 2\n    z2 = g(3)\nz = f(1, 2)'), 1),
 ]
 
 fails = 0

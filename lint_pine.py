@@ -227,6 +227,14 @@ def check(path):
         m = ST.search(c[c.index("?"):])
         if m: errs.append((start, "stateful builtin %s() inside ternary branch" % m.group(1)))
 
+    # function declared inside a block. Pine only allows `f(x) =>` at column 0;
+    # a declaration indented inside an `if` is a hard compile error and has now
+    # cost two releases (v4.7's f_meter, v5.2's f_mixPct).
+    for start, nums, code in logical_lines(lines):
+        head = lines[start-1]
+        if re.match(r"^[ \t]+[A-Za-z_]\w*\s*\([^)\n]*\)\s*=>", head):
+            errs.append((start, "function declared inside a block (Pine requires column 0)"))
+
     # user function arity
     funcs = {}
     for start, nums, code in logical_lines(lines):
