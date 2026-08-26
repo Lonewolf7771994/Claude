@@ -1,100 +1,96 @@
-// This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
+// This Pine Script is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
-// © XAUUSD Order Block + Order Flow + FRVP Entry System
-// Designed for OANDA:XAUUSD — All Timeframes
+// XAUUSD Order Block + Order Flow + FRVP Entry System
+// Designed for OANDA:XAUUSD - All Timeframes
 // Modes: Swing | Scalp | Intraday | Sniper
 
 //@version=6
-indicator("XAUUSD OB + Order Flow + FRVP Entries", shorttitle="OB-OF-FRVP", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("XAUUSD OB + OrderFlow + FRVP", shorttitle="OB-OF-FRVP", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
-// ─────────────────────────────────────────────
-// ██  INPUTS
-// ─────────────────────────────────────────────
+// =============================================
+// INPUTS
+// =============================================
 
-modeGroup    = "═══ Trading Mode ═══"
-tradeMode    = input.string("Swing", "Trading Mode", options=["Swing", "Scalp", "Intraday", "Sniper"], group=modeGroup, tooltip="Swing: HTF confluence, wider stops\nScalp: Fast entries, tight stops\nIntraday: Session-based, moderate\nSniper: Precision entries only at triple confluence")
+// --- Mode ---
+tradeMode    = input.string("Swing", "Trading Mode", options=["Swing", "Scalp", "Intraday", "Sniper"], group="Mode", tooltip="Swing: HTF confluence, wider stops. Scalp: Fast entries, tight stops. Intraday: Session-based. Sniper: Triple confluence only.")
 
-obGroup      = "═══ Order Blocks ═══"
-obLength     = input.int(5, "OB Detection Lookback", minval=2, maxval=50, group=obGroup)
-obMitigate   = input.bool(true, "Show Only Unmitigated OBs", group=obGroup)
-obMaxAge     = input.int(100, "Max OB Age (bars)", minval=10, maxval=500, group=obGroup)
-obShowBull   = input.bool(true, "Show Bullish OBs", group=obGroup)
-obShowBear   = input.bool(true, "Show Bearish OBs", group=obGroup)
-obRefine     = input.bool(true, "Refine OB to Wick (Sniper)", group=obGroup, tooltip="Narrows OB zone to the wick for precision entries")
+// --- Order Blocks ---
+obLength     = input.int(5, "OB Detection Lookback", minval=2, maxval=50, group="Order Blocks")
+obMitigate   = input.bool(true, "Show Only Unmitigated OBs", group="Order Blocks")
+obMaxAge     = input.int(100, "Max OB Age (bars)", minval=10, maxval=500, group="Order Blocks")
+obShowBull   = input.bool(true, "Show Bullish OBs", group="Order Blocks")
+obShowBear   = input.bool(true, "Show Bearish OBs", group="Order Blocks")
+obRefine     = input.bool(true, "Refine OB to Wick (Sniper)", group="Order Blocks")
 
-ofGroup      = "═══ Order Flow ═══"
-ofEnabled    = input.bool(true, "Enable Order Flow Analysis", group=ofGroup)
-ofDelta      = input.int(14, "Delta Divergence Period", minval=5, maxval=50, group=ofGroup)
-ofAbsorb     = input.float(2.0, "Absorption Threshold (x avg)", minval=1.0, maxval=5.0, step=0.1, group=ofGroup)
-ofImbalance  = input.float(3.0, "Stacked Imbalance Ratio", minval=1.5, maxval=10.0, step=0.5, group=ofGroup)
+// --- Order Flow ---
+ofEnabled    = input.bool(true, "Enable Order Flow", group="Order Flow")
+ofDelta      = input.int(14, "Delta Period", minval=5, maxval=50, group="Order Flow")
+ofAbsorb     = input.float(2.0, "Absorption Threshold", minval=1.0, maxval=5.0, step=0.1, group="Order Flow")
+ofImbalance  = input.float(3.0, "Imbalance Ratio", minval=1.5, maxval=10.0, step=0.5, group="Order Flow")
 
-frvpGroup    = "═══ Fixed Range Volume Profile ═══"
-frvpEnabled  = input.bool(true, "Enable FRVP", group=frvpGroup)
-frvpLen      = input.int(50, "FRVP Lookback Bars", minval=10, maxval=500, group=frvpGroup)
-frvpRows     = input.int(50, "FRVP Row Count", minval=10, maxval=200, group=frvpGroup)
-frvpPocWidth = input.int(3, "POC Line Width", minval=1, maxval=5, group=frvpGroup)
-frvpShowVA   = input.bool(true, "Show Value Area", group=frvpGroup)
-frvpVAPct    = input.float(70.0, "Value Area %", minval=50.0, maxval=90.0, step=5.0, group=frvpGroup)
+// --- FRVP ---
+frvpEnabled  = input.bool(true, "Enable FRVP", group="FRVP")
+frvpLen      = input.int(50, "FRVP Lookback Bars", minval=10, maxval=300, group="FRVP")
+frvpRows     = input.int(40, "FRVP Row Count", minval=10, maxval=100, group="FRVP")
+frvpPocWidth = input.int(3, "POC Line Width", minval=1, maxval=5, group="FRVP")
+frvpShowVA   = input.bool(true, "Show Value Area", group="FRVP")
+frvpVAPct    = input.float(70.0, "Value Area %", minval=50.0, maxval=90.0, step=5.0, group="FRVP")
 
-structGroup  = "═══ Market Structure ═══"
-structLen    = input.int(5, "Structure Pivot Length", minval=2, maxval=20, group=structGroup)
-showBOS      = input.bool(true, "Show BOS (Break of Structure)", group=structGroup)
-showCHoCH    = input.bool(true, "Show CHoCH (Change of Character)", group=structGroup)
+// --- Structure ---
+structLen    = input.int(5, "Structure Pivot Length", minval=2, maxval=20, group="Structure")
+showBOS      = input.bool(true, "Show BOS", group="Structure")
+showCHoCH    = input.bool(true, "Show CHoCH", group="Structure")
 
-sigGroup     = "═══ Entry Signals ═══"
-showEntries  = input.bool(true, "Show Entry Signals", group=sigGroup)
-showTP       = input.bool(true, "Show TP Levels", group=sigGroup)
-showSL       = input.bool(true, "Show SL Levels", group=sigGroup)
-riskReward   = input.float(3.0, "Risk:Reward Ratio", minval=1.0, maxval=10.0, step=0.5, group=sigGroup)
-atrMult      = input.float(1.5, "ATR Multiplier for SL", minval=0.5, maxval=5.0, step=0.1, group=sigGroup)
+// --- Entry Signals ---
+showEntries  = input.bool(true, "Show Entry Signals", group="Entries")
+showTP       = input.bool(true, "Show TP Levels", group="Entries")
+showSL       = input.bool(true, "Show SL Levels", group="Entries")
+riskReward   = input.float(3.0, "Risk:Reward Ratio", minval=1.0, maxval=10.0, step=0.5, group="Entries")
+atrMult      = input.float(1.5, "ATR Multiplier for SL", minval=0.5, maxval=5.0, step=0.1, group="Entries")
 
-sessGroup    = "═══ Session Filter ═══"
-sessFilter   = input.bool(false, "Enable Session Filter", group=sessGroup)
-sessLondon   = input.bool(true, "London (03:00-12:00 ET)", group=sessGroup)
-sessNY       = input.bool(true, "New York (08:00-17:00 ET)", group=sessGroup)
-sessAsia     = input.bool(false, "Asia (19:00-04:00 ET)", group=sessGroup)
+// --- Sessions ---
+sessFilter   = input.bool(false, "Enable Session Filter", group="Sessions")
+sessLondon   = input.bool(true, "London (03:00-12:00 ET)", group="Sessions")
+sessNY       = input.bool(true, "New York (08:00-17:00 ET)", group="Sessions")
+sessAsia     = input.bool(false, "Asia (19:00-04:00 ET)", group="Sessions")
 
-vizGroup     = "═══ Visuals ═══"
-bullOBColor  = input.color(color.new(#00E676, 75), "Bullish OB Color", group=vizGroup)
-bearOBColor  = input.color(color.new(#FF1744, 75), "Bearish OB Color", group=vizGroup)
-pocColor     = input.color(color.new(#FFD600, 0), "POC Color", group=vizGroup)
-vaColor      = input.color(color.new(#2196F3, 85), "Value Area Color", group=vizGroup)
-entryBullCol = input.color(color.new(#00E676, 0), "Bull Entry Color", group=vizGroup)
-entryBearCol = input.color(color.new(#FF1744, 0), "Bear Entry Color", group=vizGroup)
+// --- Colors ---
+bullOBColor  = input.color(color.new(color.green, 75), "Bullish OB", group="Colors")
+bearOBColor  = input.color(color.new(color.red, 75), "Bearish OB", group="Colors")
+pocColor     = input.color(color.yellow, "POC", group="Colors")
+vaColor      = input.color(color.new(color.blue, 85), "Value Area", group="Colors")
+entryBullCol = input.color(color.green, "Bull Entry", group="Colors")
+entryBearCol = input.color(color.red, "Bear Entry", group="Colors")
 
-// ─────────────────────────────────────────────
-// ██  MODE-ADAPTIVE PARAMETERS
-// ─────────────────────────────────────────────
+// =============================================
+// MODE-ADAPTIVE PARAMETERS
+// =============================================
 
-modeATRLen = tradeMode == "Swing" ? 20 : tradeMode == "Scalp" ? 7 : tradeMode == "Intraday" ? 14 : 10
+modeATRLen  = tradeMode == "Swing" ? 20 : tradeMode == "Scalp" ? 7 : tradeMode == "Intraday" ? 14 : 10
+modeSLMult  = tradeMode == "Swing" ? atrMult * 1.5 : tradeMode == "Scalp" ? atrMult * 0.6 : tradeMode == "Intraday" ? atrMult : atrMult * 0.4
+modeRR      = tradeMode == "Swing" ? riskReward : tradeMode == "Scalp" ? math.max(riskReward * 0.5, 1.5) : tradeMode == "Intraday" ? riskReward * 0.75 : riskReward * 1.5
+modeOBLen   = tradeMode == "Swing" ? obLength * 2 : tradeMode == "Intraday" ? int(math.round(obLength * 1.5)) : obLength
+modeConfReq = tradeMode == "Sniper" ? 3 : tradeMode == "Scalp" ? 1 : 2
 
-modeSLMult = tradeMode == "Swing" ? atrMult * 1.5 : tradeMode == "Scalp" ? atrMult * 0.6 : tradeMode == "Intraday" ? atrMult * 1.0 : atrMult * 0.4
-
-modeRR = tradeMode == "Swing" ? riskReward : tradeMode == "Scalp" ? math.max(riskReward * 0.5, 1.5) : tradeMode == "Intraday" ? riskReward * 0.75 : riskReward * 1.5
-
-modeOBLen = tradeMode == "Swing" ? obLength * 2 : tradeMode == "Scalp" ? obLength : tradeMode == "Intraday" ? int(math.round(obLength * 1.5)) : obLength
-
-modeConfReq = tradeMode == "Swing" ? 2 : tradeMode == "Scalp" ? 1 : tradeMode == "Intraday" ? 2 : 3
-
-// ─────────────────────────────────────────────
-// ██  SESSION FILTER
-// ─────────────────────────────────────────────
+// =============================================
+// SESSION FILTER
+// =============================================
 
 hourET    = hour + minute / 60.0
-inLondon  = hourET >= 3 and hourET < 12
-inNY      = hourET >= 8 and hourET < 17
-inAsia    = hourET >= 19 or hourET < 4
+inLondon  = hourET >= 3.0 and hourET < 12.0
+inNY      = hourET >= 8.0 and hourET < 17.0
+inAsia    = hourET >= 19.0 or hourET < 4.0
 sessionOK = not sessFilter or (sessLondon and inLondon) or (sessNY and inNY) or (sessAsia and inAsia)
 
-// ─────────────────────────────────────────────
-// ██  ATR
-// ─────────────────────────────────────────────
+// =============================================
+// ATR
+// =============================================
 
 atrVal = ta.atr(modeATRLen)
 
-// ─────────────────────────────────────────────
-// ██  MARKET STRUCTURE — BOS & CHoCH
-// ─────────────────────────────────────────────
+// =============================================
+// MARKET STRUCTURE - BOS & CHoCH
+// =============================================
 
 pivHi = ta.pivothigh(high, structLen, structLen)
 pivLo = ta.pivotlow(low, structLen, structLen)
@@ -103,168 +99,175 @@ var float lastHH = na
 var float lastLL = na
 var float lastLH = na
 var float lastHL = na
-var int   trend  = 0
+var int   msTrend = 0
 
 if not na(pivHi)
-    if pivHi > nz(lastHH)
-        if trend == -1 and showCHoCH
+    if pivHi > nz(lastHH, pivHi)
+        if msTrend == -1 and showCHoCH
             label.new(bar_index - structLen, pivHi, "CHoCH", style=label.style_label_down, color=entryBullCol, textcolor=color.white, size=size.tiny)
-        lastHH := pivHi
-        trend  := 1
+        lastHH  := pivHi
+        msTrend := 1
     else
         lastLH := pivHi
 
 if not na(pivLo)
-    if pivLo < nz(lastLL)
-        if trend == 1 and showCHoCH
+    if pivLo < nz(lastLL, pivLo)
+        if msTrend == 1 and showCHoCH
             label.new(bar_index - structLen, pivLo, "CHoCH", style=label.style_label_up, color=entryBearCol, textcolor=color.white, size=size.tiny)
-        lastLL := pivLo
-        trend  := -1
+        lastLL  := pivLo
+        msTrend := -1
     else
         lastHL := pivLo
 
-bosUp = not na(pivHi) and pivHi > nz(lastHH) and trend == 1
-bosDn = not na(pivLo) and pivLo < nz(lastLL) and trend == -1
-
-if bosUp and showBOS
-    line.new(bar_index - structLen * 2, nz(lastHH), bar_index - structLen, pivHi, color=entryBullCol, style=line.style_dashed, width=1)
+if not na(pivHi) and pivHi > nz(lastHH, pivHi) and msTrend == 1 and showBOS
     label.new(bar_index - structLen, pivHi, "BOS", style=label.style_label_down, color=color.new(entryBullCol, 50), textcolor=color.white, size=size.tiny)
 
-if bosDn and showBOS
-    line.new(bar_index - structLen * 2, nz(lastLL), bar_index - structLen, pivLo, color=entryBearCol, style=line.style_dashed, width=1)
+if not na(pivLo) and pivLo < nz(lastLL, pivLo) and msTrend == -1 and showBOS
     label.new(bar_index - structLen, pivLo, "BOS", style=label.style_label_up, color=color.new(entryBearCol, 50), textcolor=color.white, size=size.tiny)
 
-// ─────────────────────────────────────────────
-// ██  ORDER BLOCKS DETECTION
-// ─────────────────────────────────────────────
+// =============================================
+// ORDER BLOCKS - using parallel arrays
+// =============================================
 
-type OrderBlock
-    float top
-    float bottom
-    int   startBar
-    bool  isBull
-    bool  mitigated
-    box   bx
-
-var array<OrderBlock> activeOBs = array.new<OrderBlock>()
+var array<float> obTops      = array.new_float(0)
+var array<float> obBottoms   = array.new_float(0)
+var array<int>   obBars      = array.new_int(0)
+var array<bool>  obIsBull    = array.new_bool(0)
+var array<box>   obBoxes     = array.new_box(0)
 
 avgBody = ta.sma(math.abs(close - open), 20)
 
-bullOBDetected = false
-bearOBDetected = false
-var float bullOBTop = na
-var float bullOBBot = na
-var float bearOBTop = na
-var float bearOBBot = na
+bullOBFound = false
+bearOBFound = false
+bullTop = 0.0
+bullBot = 0.0
+bearTop = 0.0
+bearBot = 0.0
 
 for i = 1 to modeOBLen
-    bullCandle   = close[i] > open[i]
-    bearPrev     = close[i + 1] < open[i + 1]
-    engulfUp     = bullCandle and bearPrev and close[i] > high[i + 1]
-    bodySize     = math.abs(close[i] - open[i])
-    strongMove   = bodySize > avgBody * 1.5
-    if engulfUp and strongMove
-        bullOBDetected := true
-        if obRefine and tradeMode == "Sniper"
-            bullOBBot := low[i + 1]
-            bullOBTop := math.min(open[i + 1], close[i + 1])
-        else
-            bullOBBot := low[i + 1]
-            bullOBTop := high[i + 1]
-        break
+    if not bullOBFound
+        isBullCandle = close[i] > open[i]
+        isBearPrev   = close[i + 1] < open[i + 1]
+        engulfs      = close[i] > high[i + 1]
+        bodySize     = math.abs(close[i] - open[i])
+        isStrong     = bodySize > avgBody * 1.5
+        if isBullCandle and isBearPrev and engulfs and isStrong
+            bullOBFound := true
+            if obRefine and tradeMode == "Sniper"
+                bullBot := low[i + 1]
+                bullTop := math.min(open[i + 1], close[i + 1])
+            else
+                bullBot := low[i + 1]
+                bullTop := high[i + 1]
 
 for i = 1 to modeOBLen
-    bearCandle   = close[i] < open[i]
-    bullPrev     = close[i + 1] > open[i + 1]
-    engulfDn     = bearCandle and bullPrev and close[i] < low[i + 1]
-    bodySize     = math.abs(close[i] - open[i])
-    strongMove   = bodySize > avgBody * 1.5
-    if engulfDn and strongMove
-        bearOBDetected := true
-        if obRefine and tradeMode == "Sniper"
-            bearOBTop := high[i + 1]
-            bearOBBot := math.max(open[i + 1], close[i + 1])
-        else
-            bearOBTop := high[i + 1]
-            bearOBBot := low[i + 1]
-        break
+    if not bearOBFound
+        isBearCandle = close[i] < open[i]
+        isBullPrev   = close[i + 1] > open[i + 1]
+        engulfs      = close[i] < low[i + 1]
+        bodySize     = math.abs(close[i] - open[i])
+        isStrong     = bodySize > avgBody * 1.5
+        if isBearCandle and isBullPrev and engulfs and isStrong
+            bearOBFound := true
+            if obRefine and tradeMode == "Sniper"
+                bearTop := high[i + 1]
+                bearBot := math.max(open[i + 1], close[i + 1])
+            else
+                bearTop := high[i + 1]
+                bearBot := low[i + 1]
 
-if bullOBDetected and obShowBull
-    ob = OrderBlock.new(bullOBTop, bullOBBot, bar_index, true, false, na)
-    ob.bx := box.new(bar_index - modeOBLen, ob.top, bar_index + 20, ob.bottom, border_color=color.new(entryBullCol, 60), bgcolor=bullOBColor, border_width=1)
-    array.push(activeOBs, ob)
+if bullOBFound and obShowBull
+    newBox = box.new(bar_index - modeOBLen, bullTop, bar_index + 20, bullBot, border_color=color.new(entryBullCol, 60), bgcolor=bullOBColor, border_width=1)
+    array.push(obTops, bullTop)
+    array.push(obBottoms, bullBot)
+    array.push(obBars, bar_index)
+    array.push(obIsBull, true)
+    array.push(obBoxes, newBox)
 
-if bearOBDetected and obShowBear
-    ob = OrderBlock.new(bearOBTop, bearOBBot, bar_index, false, false, na)
-    ob.bx := box.new(bar_index - modeOBLen, ob.top, bar_index + 20, ob.bottom, border_color=color.new(entryBearCol, 60), bgcolor=bearOBColor, border_width=1)
-    array.push(activeOBs, ob)
+if bearOBFound and obShowBear
+    newBox = box.new(bar_index - modeOBLen, bearTop, bar_index + 20, bearBot, border_color=color.new(entryBearCol, 60), bgcolor=bearOBColor, border_width=1)
+    array.push(obTops, bearTop)
+    array.push(obBottoms, bearBot)
+    array.push(obBars, bar_index)
+    array.push(obIsBull, false)
+    array.push(obBoxes, newBox)
 
-if array.size(activeOBs) > 0
-    for i = array.size(activeOBs) - 1 to 0
-        ob  = array.get(activeOBs, i)
-        age = bar_index - ob.startBar
+// --- Mitigate & extend OBs ---
+if array.size(obTops) > 0
+    for i = array.size(obTops) - 1 to 0
+        obTopVal  = array.get(obTops, i)
+        obBotVal  = array.get(obBottoms, i)
+        obBarVal  = array.get(obBars, i)
+        obBullVal = array.get(obIsBull, i)
+        age       = bar_index - obBarVal
+        mitigated = false
         if age > obMaxAge
-            ob.mitigated := true
-        if ob.isBull and close < ob.bottom
-            ob.mitigated := true
-        if not ob.isBull and close > ob.top
-            ob.mitigated := true
-        if ob.mitigated and obMitigate
-            box.delete(ob.bx)
-            array.remove(activeOBs, i)
-        else if not ob.mitigated
-            box.set_right(ob.bx, bar_index + 5)
+            mitigated := true
+        if obBullVal and close < obBotVal
+            mitigated := true
+        if not obBullVal and close > obTopVal
+            mitigated := true
+        if mitigated and obMitigate
+            box.delete(array.get(obBoxes, i))
+            array.remove(obTops, i)
+            array.remove(obBottoms, i)
+            array.remove(obBars, i)
+            array.remove(obIsBull, i)
+            array.remove(obBoxes, i)
+        else if not mitigated
+            box.set_right(array.get(obBoxes, i), bar_index + 5)
 
-// ─────────────────────────────────────────────
-// ██  ORDER FLOW ANALYSIS
-// ─────────────────────────────────────────────
+// =============================================
+// ORDER FLOW ANALYSIS
+// =============================================
 
 spread   = high - low
-safeDiv  = spread > 0 ? spread : syminfo.mintick
-bullVol  = close >= open ? volume : volume * (close - low) / safeDiv
-bearVol  = close <= open ? volume : volume * (high - close) / safeDiv
+safeDiv  = math.max(spread, syminfo.mintick)
+bullVol  = close >= open ? volume : volume * math.max(close - low, 0.0) / safeDiv
+bearVol  = close <= open ? volume : volume * math.max(high - close, 0.0) / safeDiv
 delta    = bullVol - bearVol
 deltaMA  = ta.sma(delta, ofDelta)
 avgVol   = ta.sma(volume, ofDelta)
 
 deltaDivBull = close < close[1] and delta > deltaMA and delta > 0
 deltaDivBear = close > close[1] and delta < -deltaMA and delta < 0
-absorption   = volume > avgVol * ofAbsorb and math.abs(close - open) < atrVal * 0.3
+absorption   = not na(atrVal) and volume > avgVol * ofAbsorb and math.abs(close - open) < atrVal * 0.3
 stackedBull  = bullVol > bearVol * ofImbalance and bullVol[1] > bearVol[1] * ofImbalance
 stackedBear  = bearVol > bullVol * ofImbalance and bearVol[1] > bullVol[1] * ofImbalance
 
 ofBullish = ofEnabled and (deltaDivBull or (absorption and close > open) or stackedBull)
 ofBearish = ofEnabled and (deltaDivBear or (absorption and close < open) or stackedBear)
 
-// ─────────────────────────────────────────────
-// ██  FIXED RANGE VOLUME PROFILE (FRVP)
-// ─────────────────────────────────────────────
+// =============================================
+// FRVP (Fixed Range Volume Profile)
+// =============================================
 
 var float pocLevel = na
 var float vaHigh   = na
 var float vaLow    = na
+var array<float> volProfile = array.new_float(0)
 
 if frvpEnabled and bar_index > frvpLen
     rangeHi   = ta.highest(high, frvpLen)
     rangeLo   = ta.lowest(low, frvpLen)
     rangeSize = rangeHi - rangeLo
 
-    if rangeSize > 0
+    if rangeSize > syminfo.mintick
         rowHeight = rangeSize / frvpRows
 
-        var array<float> volProfile = array.new_float(frvpRows, 0.0)
         array.clear(volProfile)
         for r = 0 to frvpRows - 1
             array.push(volProfile, 0.0)
 
         for j = 0 to frvpLen - 1
-            barSpread = high[j] - low[j]
-            rowsHit   = barSpread > 0 ? math.max(1, int(math.round(barSpread / rowHeight))) : 1
-            barVol    = volume[j] / rowsHit
-            startRow  = int(math.max(0, math.floor((low[j] - rangeLo) / rowHeight)))
-            endRow    = int(math.min(frvpRows - 1, math.floor((high[j] - rangeLo) / rowHeight)))
-            for r = startRow to endRow
-                array.set(volProfile, r, array.get(volProfile, r) + barVol)
+            bSpread  = math.max(high[j] - low[j], syminfo.mintick)
+            rowsHit  = math.max(1, int(math.round(bSpread / rowHeight)))
+            bVol     = volume[j] / rowsHit
+            sRow     = int(math.max(0.0, math.floor((low[j] - rangeLo) / rowHeight)))
+            eRow     = int(math.min(frvpRows - 1.0, math.floor((high[j] - rangeLo) / rowHeight)))
+            if sRow <= eRow and sRow >= 0 and eRow < frvpRows
+                for r = sRow to eRow
+                    array.set(volProfile, r, array.get(volProfile, r) + bVol)
 
         maxVol = 0.0
         pocIdx = 0
@@ -285,148 +288,151 @@ if frvpEnabled and bar_index > frvpLen
         vaLIdx   = pocIdx
         vaHIdx   = pocIdx
 
-        loopSafe = 0
-        while vaVol < vaTarget and (vaLIdx > 0 or vaHIdx < frvpRows - 1) and loopSafe < frvpRows
-            loopSafe += 1
-            addLow  = vaLIdx > 0 ? array.get(volProfile, vaLIdx - 1) : 0.0
-            addHigh = vaHIdx < frvpRows - 1 ? array.get(volProfile, vaHIdx + 1) : 0.0
-            if addLow >= addHigh and vaLIdx > 0
+        cnt = 0
+        while vaVol < vaTarget and (vaLIdx > 0 or vaHIdx < frvpRows - 1) and cnt < frvpRows
+            cnt += 1
+            addL = vaLIdx > 0 ? array.get(volProfile, vaLIdx - 1) : 0.0
+            addH = vaHIdx < frvpRows - 1 ? array.get(volProfile, vaHIdx + 1) : 0.0
+            if addL >= addH and vaLIdx > 0
                 vaLIdx -= 1
-                vaVol  += addLow
+                vaVol  += addL
             else if vaHIdx < frvpRows - 1
                 vaHIdx += 1
-                vaVol  += addHigh
+                vaVol  += addH
             else
                 break
 
         vaLow  := rangeLo + vaLIdx * rowHeight
         vaHigh := rangeLo + (vaHIdx + 1) * rowHeight
 
+// --- Draw FRVP ---
 var line  pocLine = na
 var box   vaBox   = na
 var label pocLbl  = na
 
+line.delete(pocLine)
+box.delete(vaBox)
+label.delete(pocLbl)
+
 if frvpEnabled and not na(pocLevel)
-    line.delete(pocLine)
-    box.delete(vaBox)
-    label.delete(pocLbl)
     pocLine := line.new(bar_index - frvpLen, pocLevel, bar_index, pocLevel, color=pocColor, width=frvpPocWidth, style=line.style_solid)
     pocLbl  := label.new(bar_index, pocLevel, "POC " + str.tostring(pocLevel, format.mintick), style=label.style_label_left, color=color.new(pocColor, 60), textcolor=pocColor, size=size.small)
     if frvpShowVA and not na(vaHigh) and not na(vaLow)
         vaBox := box.new(bar_index - frvpLen, vaHigh, bar_index, vaLow, border_color=color.new(vaColor, 40), bgcolor=vaColor, border_width=1)
 
-// ─────────────────────────────────────────────
-// ██  CONFLUENCE SCORING
-// ─────────────────────────────────────────────
+// =============================================
+// CONFLUENCE SCORING
+// =============================================
 
 priceInBullOB = false
 priceInBearOB = false
-if array.size(activeOBs) > 0
-    for i = 0 to array.size(activeOBs) - 1
-        ob = array.get(activeOBs, i)
-        if not ob.mitigated
-            if ob.isBull and low <= ob.top and low >= ob.bottom
-                priceInBullOB := true
-            if not ob.isBull and high >= ob.bottom and high <= ob.top
-                priceInBearOB := true
 
-priceAtPOC = frvpEnabled and not na(pocLevel) and math.abs(close - pocLevel) < atrVal * 0.5
-priceAtVAL = frvpEnabled and not na(vaLow)    and math.abs(low - vaLow) < atrVal * 0.3
-priceAtVAH = frvpEnabled and not na(vaHigh)   and math.abs(high - vaHigh) < atrVal * 0.3
-trendBull  = trend == 1
-trendBear  = trend == -1
+if array.size(obTops) > 0
+    for i = 0 to array.size(obTops) - 1
+        t = array.get(obTops, i)
+        b = array.get(obBottoms, i)
+        isBull = array.get(obIsBull, i)
+        if isBull and low <= t and low >= b
+            priceInBullOB := true
+        if not isBull and high >= b and high <= t
+            priceInBearOB := true
+
+priceAtPOC = frvpEnabled and not na(pocLevel) and not na(atrVal) and math.abs(close - pocLevel) < atrVal * 0.5
+priceAtVAL = frvpEnabled and not na(vaLow) and not na(atrVal) and math.abs(low - vaLow) < atrVal * 0.3
+priceAtVAH = frvpEnabled and not na(vaHigh) and not na(atrVal) and math.abs(high - vaHigh) < atrVal * 0.3
 
 bullScore  = 0
 bullScore += priceInBullOB ? 1 : 0
 bullScore += ofBullish ? 1 : 0
 bullScore += (priceAtPOC or priceAtVAL) ? 1 : 0
-bullScore += trendBull ? 1 : 0
+bullScore += msTrend == 1 ? 1 : 0
 
 bearScore  = 0
 bearScore += priceInBearOB ? 1 : 0
 bearScore += ofBearish ? 1 : 0
 bearScore += (priceAtPOC or priceAtVAH) ? 1 : 0
-bearScore += trendBear ? 1 : 0
+bearScore += msTrend == -1 ? 1 : 0
 
-// ─────────────────────────────────────────────
-// ██  ENTRY SIGNALS
-// ─────────────────────────────────────────────
+// =============================================
+// ENTRY SIGNALS
+// =============================================
 
 bullEntry = bullScore >= modeConfReq and sessionOK and showEntries
 bearEntry = bearScore >= modeConfReq and sessionOK and showEntries
 
-var bool lastBull = false
-var bool lastBear = false
-filteredBull = bullEntry and not lastBull
-filteredBear = bearEntry and not lastBear
-lastBull    := bullEntry
-lastBear    := bearEntry
+var bool prevBull = false
+var bool prevBear = false
+filteredBull = bullEntry and not prevBull
+filteredBear = bearEntry and not prevBear
+prevBull := bullEntry
+prevBear := bearEntry
 
-plotshape(filteredBull, "Bull Entry", shape.triangleup,   location.belowbar, entryBullCol, size=size.small)
+plotshape(filteredBull, "Bull Entry", shape.triangleup, location.belowbar, entryBullCol, size=size.small)
 plotshape(filteredBear, "Bear Entry", shape.triangledown, location.abovebar, entryBearCol, size=size.small)
 
-bullSL = filteredBull ? close - atrVal * modeSLMult : na
-bullTP = filteredBull ? close + atrVal * modeSLMult * modeRR : na
-bearSL = filteredBear ? close + atrVal * modeSLMult : na
-bearTP = filteredBear ? close - atrVal * modeSLMult * modeRR : na
+// --- TP / SL Lines ---
+if filteredBull and not na(atrVal)
+    slVal = close - atrVal * modeSLMult
+    tpVal = close + atrVal * modeSLMult * modeRR
+    if showSL
+        line.new(bar_index, close, bar_index + 10, slVal, color=color.red, style=line.style_dotted, width=1)
+        label.new(bar_index + 10, slVal, "SL " + str.tostring(slVal, format.mintick), style=label.style_label_left, color=color.new(color.red, 70), textcolor=color.red, size=size.tiny)
+    if showTP
+        line.new(bar_index, close, bar_index + 10, tpVal, color=color.green, style=line.style_dotted, width=1)
+        label.new(bar_index + 10, tpVal, "TP " + str.tostring(tpVal, format.mintick), style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.green, size=size.tiny)
 
-if filteredBull and showSL
-    line.new(bar_index, close, bar_index + 10, bullSL, color=color.red,   style=line.style_dotted, width=1)
-    label.new(bar_index + 10, bullSL, "SL " + str.tostring(bullSL, format.mintick), style=label.style_label_left, color=color.new(color.red, 70), textcolor=color.red, size=size.tiny)
+if filteredBear and not na(atrVal)
+    slVal = close + atrVal * modeSLMult
+    tpVal = close - atrVal * modeSLMult * modeRR
+    if showSL
+        line.new(bar_index, close, bar_index + 10, slVal, color=color.red, style=line.style_dotted, width=1)
+        label.new(bar_index + 10, slVal, "SL " + str.tostring(slVal, format.mintick), style=label.style_label_left, color=color.new(color.red, 70), textcolor=color.red, size=size.tiny)
+    if showTP
+        line.new(bar_index, close, bar_index + 10, tpVal, color=color.green, style=line.style_dotted, width=1)
+        label.new(bar_index + 10, tpVal, "TP " + str.tostring(tpVal, format.mintick), style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.green, size=size.tiny)
 
-if filteredBull and showTP
-    line.new(bar_index, close, bar_index + 10, bullTP, color=color.green,  style=line.style_dotted, width=1)
-    label.new(bar_index + 10, bullTP, "TP " + str.tostring(bullTP, format.mintick), style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.green, size=size.tiny)
-
-if filteredBear and showSL
-    line.new(bar_index, close, bar_index + 10, bearSL, color=color.red,   style=line.style_dotted, width=1)
-    label.new(bar_index + 10, bearSL, "SL " + str.tostring(bearSL, format.mintick), style=label.style_label_left, color=color.new(color.red, 70), textcolor=color.red, size=size.tiny)
-
-if filteredBear and showTP
-    line.new(bar_index, close, bar_index + 10, bearTP, color=color.green,  style=line.style_dotted, width=1)
-    label.new(bar_index + 10, bearTP, "TP " + str.tostring(bearTP, format.mintick), style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.green, size=size.tiny)
-
-// ─────────────────────────────────────────────
-// ██  ORDER FLOW VISUALS
-// ─────────────────────────────────────────────
+// =============================================
+// ORDER FLOW LABELS
+// =============================================
 
 if ofEnabled and deltaDivBull
-    label.new(bar_index, low, "d+", style=label.style_label_up, color=color.new(entryBullCol, 70), textcolor=entryBullCol, size=size.tiny)
-if ofEnabled and deltaDivBear
-    label.new(bar_index, high, "d-", style=label.style_label_down, color=color.new(entryBearCol, 70), textcolor=entryBearCol, size=size.tiny)
-if ofEnabled and absorption
-    abStyle = close > open ? label.style_label_up : label.style_label_down
-    abY     = close > open ? low : high
-    label.new(bar_index, abY, "ABS", style=abStyle, color=color.new(color.yellow, 60), textcolor=color.yellow, size=size.tiny)
+    label.new(bar_index, low, "D+", style=label.style_label_up, color=color.new(entryBullCol, 70), textcolor=entryBullCol, size=size.tiny)
 
-// ─────────────────────────────────────────────
-// ██  INFO TABLE
-// ─────────────────────────────────────────────
+if ofEnabled and deltaDivBear
+    label.new(bar_index, high, "D-", style=label.style_label_down, color=color.new(entryBearCol, 70), textcolor=entryBearCol, size=size.tiny)
+
+if ofEnabled and absorption
+    if close > open
+        label.new(bar_index, low, "ABS", style=label.style_label_up, color=color.new(color.yellow, 60), textcolor=color.yellow, size=size.tiny)
+    else
+        label.new(bar_index, high, "ABS", style=label.style_label_down, color=color.new(color.yellow, 60), textcolor=color.yellow, size=size.tiny)
+
+// =============================================
+// INFO TABLE
+// =============================================
 
 var table infoTbl = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
-    table.cell(infoTbl, 0, 0, "Mode",      text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 0, tradeMode,    text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 0, 0, "Mode", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 0, tradeMode, text_color=color.white, text_size=size.small)
 
-    trendStr = trend == 1 ? "Bullish" : trend == -1 ? "Bearish" : "Neutral"
-    trendCol = trend == 1 ? entryBullCol : trend == -1 ? entryBearCol : color.gray
-    table.cell(infoTbl, 0, 1, "Trend",      text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 1, trendStr,     text_color=trendCol, text_size=size.small)
+    table.cell(infoTbl, 0, 1, "Trend", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 1, msTrend == 1 ? "Bullish" : msTrend == -1 ? "Bearish" : "Neutral", text_color=msTrend == 1 ? entryBullCol : msTrend == -1 ? entryBearCol : color.gray, text_size=size.small)
 
-    table.cell(infoTbl, 0, 2, "POC",        text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 2, not na(pocLevel) ? str.tostring(pocLevel, format.mintick) : "—", text_color=pocColor, text_size=size.small)
+    table.cell(infoTbl, 0, 2, "POC", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 2, not na(pocLevel) ? str.tostring(pocLevel, format.mintick) : "-", text_color=pocColor, text_size=size.small)
 
-    table.cell(infoTbl, 0, 3, "VA High",    text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 3, not na(vaHigh) ? str.tostring(vaHigh, format.mintick) : "—", text_color=vaColor, text_size=size.small)
+    table.cell(infoTbl, 0, 3, "VA High", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 3, not na(vaHigh) ? str.tostring(vaHigh, format.mintick) : "-", text_color=color.blue, text_size=size.small)
 
-    table.cell(infoTbl, 0, 4, "VA Low",     text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 4, not na(vaLow) ? str.tostring(vaLow, format.mintick) : "—", text_color=vaColor, text_size=size.small)
+    table.cell(infoTbl, 0, 4, "VA Low", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 4, not na(vaLow) ? str.tostring(vaLow, format.mintick) : "-", text_color=color.blue, text_size=size.small)
 
-    table.cell(infoTbl, 0, 5, "ATR",        text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 5, str.tostring(atrVal, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 0, 5, "ATR", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 5, not na(atrVal) ? str.tostring(atrVal, format.mintick) : "-", text_color=color.white, text_size=size.small)
 
-    table.cell(infoTbl, 0, 6, "Delta",      text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 0, 6, "Delta", text_color=color.gray, text_size=size.small)
     table.cell(infoTbl, 1, 6, str.tostring(delta, "#.##"), text_color=delta > 0 ? entryBullCol : entryBearCol, text_size=size.small)
 
     table.cell(infoTbl, 0, 7, "Bull Score", text_color=color.gray, text_size=size.small)
@@ -436,13 +442,13 @@ if barstate.islast
     table.cell(infoTbl, 1, 8, str.tostring(bearScore) + "/4", text_color=entryBearCol, text_size=size.small)
 
     table.cell(infoTbl, 0, 9, "Active OBs", text_color=color.gray, text_size=size.small)
-    table.cell(infoTbl, 1, 9, str.tostring(array.size(activeOBs)), text_color=color.white, text_size=size.small)
+    table.cell(infoTbl, 1, 9, str.tostring(array.size(obTops)), text_color=color.white, text_size=size.small)
 
-// ─────────────────────────────────────────────
-// ██  ALERTS
-// ─────────────────────────────────────────────
+// =============================================
+// ALERTS
+// =============================================
 
-alertcondition(filteredBull, "Bullish Entry", "XAUUSD Bullish Entry Signal — Close: {{close}}")
-alertcondition(filteredBear, "Bearish Entry", "XAUUSD Bearish Entry Signal — Close: {{close}}")
-alertcondition(filteredBull and bullScore >= 3, "High Conf Bull", "XAUUSD HIGH CONFIDENCE Bullish — Close: {{close}}")
-alertcondition(filteredBear and bearScore >= 3, "High Conf Bear", "XAUUSD HIGH CONFIDENCE Bearish — Close: {{close}}")
+alertcondition(filteredBull, "Bullish Entry", "XAUUSD Bullish Entry at {{close}}")
+alertcondition(filteredBear, "Bearish Entry", "XAUUSD Bearish Entry at {{close}}")
+alertcondition(filteredBull and bullScore >= 3, "High Conf Bull", "XAUUSD High Confidence Bull at {{close}}")
+alertcondition(filteredBear and bearScore >= 3, "High Conf Bear", "XAUUSD High Confidence Bear at {{close}}")
