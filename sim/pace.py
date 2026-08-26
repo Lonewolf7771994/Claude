@@ -114,7 +114,7 @@ def evaluate(D, i, is_buy, mode, last, cfg):
         sl = min(inval - A*pad, c[i] - A*cfg["minr"]); risk = c[i] - sl
     else:
         sl = max(inval + A*pad, c[i] + A*cfg["minr"]); risk = sl - c[i]
-    if risk < A*cfg["minr"] or risk > A*3.0:          return False, None, None
+    if risk < A*cfg["minr"] or risk > A*cfg.get("cap", 3.0): return False, None, None
 
     struct = [x for x in (D["VAH"][i] if is_buy else D["VAL"][i], D["POC"][i])
               if x is not None and (x > c[i]) == is_buy]
