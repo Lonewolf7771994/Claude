@@ -783,7 +783,7 @@ var table dash = na
 if i_dash and barstate.islast
     pos = i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left
     if na(dash)
-        dash := table.new(pos, 3, 13, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
+        dash := table.new(pos, 3, 12, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
     grn = color.new(#00E676, 0)
     red = color.new(#FF1744, 0)
     dim = color.new(#888888, 0)
