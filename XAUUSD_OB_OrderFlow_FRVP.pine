@@ -57,6 +57,9 @@ modeRefine    = tradeMode == "Sniper" or tradeMode == "Scalp"
 modeSLBuf     = tradeMode == "Swing" ? slBuffer * 1.5 : tradeMode == "Scalp" ? slBuffer * 0.5 : tradeMode == "Sniper" ? slBuffer * 0.3 : slBuffer
 modeConfReq   = tradeMode == "Sniper" ? 2 : 0
 modeATRLen    = tradeMode == "Swing" ? 20 : tradeMode == "Scalp" ? 7 : 14
+modeMaxTPAtr  = tradeMode == "Swing" ? 12.0 : tradeMode == "Intraday" ? 6.0 : tradeMode == "Scalp" ? 2.5 : 4.0
+modeMaxOBAtr  = tradeMode == "Swing" ? 3.0 : tradeMode == "Scalp" ? 1.2 : tradeMode == "Sniper" ? 1.5 : 2.0
+modePBBars    = tradeMode == "Swing" ? 6 : tradeMode == "Scalp" ? 2 : tradeMode == "Sniper" ? 3 : 4
 
 // =============================================
 // SESSION
@@ -83,6 +86,7 @@ var float swingLo      = na
 var int   trend        = 0
 var bool  bosUpHandled = false
 var bool  bosDnHandled = false
+var int   lastBOSBar   = 0
 
 if not na(pivHi)
     swingHi      := pivHi
@@ -110,6 +114,7 @@ maxOBs = 10
 
 if bosUp
     bosUpHandled := true
+    lastBOSBar   := bar_index
     isCHoCH      = trend == -1
     if isCHoCH and showCHoCH
         label.new(bar_index, high, "CHoCH", style=label.style_label_down, color=color.new(C_BULL, 20), textcolor=color.white, size=size.tiny)
@@ -120,7 +125,8 @@ if bosUp
         if close[i] < open[i]
             obT = modeRefine ? math.max(open[i], close[i]) : high[i]
             obB = low[i]
-            if array.size(obTops) < maxOBs
+            obSize = obT - obB
+            if obSize > 0 and (na(atrVal) or obSize <= atrVal * modeMaxOBAtr) and array.size(obTops) < maxOBs
                 bx = box.new(bar_index - i, obT, bar_index + 20, obB, border_color=color.new(C_BULL, 30), bgcolor=C_DEMANDBG, border_width=2)
                 array.push(obTops, obT)
                 array.push(obBottoms, obB)
@@ -132,6 +138,7 @@ if bosUp
 
 if bosDn
     bosDnHandled := true
+    lastBOSBar   := bar_index
     isCHoCH      = trend == 1
     if isCHoCH and showCHoCH
         label.new(bar_index, low, "CHoCH", style=label.style_label_up, color=color.new(C_BEAR, 20), textcolor=color.white, size=size.tiny)
@@ -142,7 +149,8 @@ if bosDn
         if close[i] > open[i]
             obT = high[i]
             obB = modeRefine ? math.min(open[i], close[i]) : low[i]
-            if array.size(obTops) < maxOBs
+            obSize = obT - obB
+            if obSize > 0 and (na(atrVal) or obSize <= atrVal * modeMaxOBAtr) and array.size(obTops) < maxOBs
                 bx = box.new(bar_index - i, obT, bar_index + 20, obB, border_color=color.new(C_BEAR, 30), bgcolor=C_SUPPLYBG, border_width=2)
                 array.push(obTops, obT)
                 array.push(obBottoms, obB)
@@ -295,8 +303,11 @@ confBear += ofBearish ? 1 : 0
 confBear += (frvpEnabled and not na(pocLevel) and not na(atrVal) and math.abs(close - pocLevel) < atrVal * 0.6) ? 1 : 0
 confBear += (frvpEnabled and not na(vaHigh) and not na(atrVal) and math.abs(high - vaHigh) < atrVal * 0.5) ? 1 : 0
 
-bullSignal = priceInBullOB and confBull >= modeConfReq and sessionOK
-bearSignal = priceInBearOB and confBear >= modeConfReq and sessionOK
+barsFromBOS = bar_index - lastBOSBar
+pullbackReady = barsFromBOS >= modePBBars
+
+bullSignal = priceInBullOB and confBull >= modeConfReq and sessionOK and pullbackReady and trend == 1
+bearSignal = priceInBearOB and confBear >= modeConfReq and sessionOK and pullbackReady and trend == -1
 
 // Cooldown
 var int lastBullBar = -999
@@ -323,9 +334,14 @@ if filteredBull and not na(atrVal) and entrySLLevel > 0
     ep = close
     sl = entrySLLevel - atrVal * modeSLBuf
     tp = entryTPLevel
+    maxTP = atrVal * modeMaxTPAtr
     if tp <= ep
         risk = ep - sl
         tp := ep + risk * riskReward
+    if tp - ep > maxTP
+        tp := ep + maxTP
+    if ep - sl < syminfo.mintick * 2
+        sl := ep - atrVal * 0.5
     bL = bar_index
     bR = bar_index + tpslWidth
     box.new(bL, tp, bR, ep, border_color=C_BULL, bgcolor=C_TP, border_width=1)
@@ -340,9 +356,14 @@ if filteredBear and not na(atrVal) and entrySLLevel > 0
     ep = close
     sl = entrySLLevel + atrVal * modeSLBuf
     tp = entryTPLevel
+    maxTP = atrVal * modeMaxTPAtr
     if tp >= ep
         risk = sl - ep
         tp := ep - risk * riskReward
+    if ep - tp > maxTP
+        tp := ep - maxTP
+    if sl - ep < syminfo.mintick * 2
+        sl := ep + atrVal * 0.5
     bL = bar_index
     bR = bar_index + tpslWidth
     box.new(bL, sl, bR, ep, border_color=C_BEAR, bgcolor=C_SL, border_width=1)
