@@ -91,6 +91,7 @@ input double          InpRiskPct     = 0.50;           // Risk per trade (% of b
 input double          InpFixedLot    = 0.0;            // Fixed lot (0 = use risk %)
 input double          InpMaxLot      = 5.0;            // Hard lot cap
 input int             InpMaxSpreadPt = 60;             // Max spread to enter (points, 0 = off)
+input double          InpMaxSpreadPctRisk = 12.0;      // Refuse trade if spread exceeds this % of the stop (0 = off)
 input int             InpSlippagePt  = 30;             // Max deviation (points)
 input long            InpMagic       = 22022022;       // Magic number
 input int             InpCooldownBar = 3;              // Cooldown between signals (bars)
@@ -128,6 +129,7 @@ double   gVwap = 0.0, gU1 = 0.0, gL1 = 0.0, gU2 = 0.0, gL2 = 0.0;
 double   gEr = 0.0;
 bool     gLegUp = false, gInTrend = false;
 string   gLastBlock = "-";
+double   gSpreadShare = 0.0;
 
 #define  VA_LEN   100
 #define  VA_BINS   24
@@ -170,6 +172,11 @@ int OnInit()
                fill,
                (AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
                   ? "hedging" : "netting");
+
+   if(TF() == PERIOD_M1)
+      Print("ME Scalp WARNING: M1. Measured spread cost on XAUUSD is ~25.8% of a "
+            "1.5 ATR stop at this timeframe against 11.5% on M5 and 6.7% on M15. "
+            "The cost guard will decline most trades here, which is correct.");
 
    AdoptExistingPosition();
    return(INIT_SUCCEEDED);
@@ -488,8 +495,35 @@ void EvaluateBar()
    bool regimeBuy  = gInTrend && (!InpAlign ||  gLegUp);
    bool regimeSell = gInTrend && (!InpAlign || !gLegUp);
 
-   bool buySig  = (nBull>0) && allowLong  && barBull && riskOkBull && scoreBull >= 1 && regimeBuy;
-   bool sellSig = (nBear>0) && allowShort && barBear && riskOkBear && scoreBear >= 1 && regimeSell;
+   // ---------------- COST GUARD ----------------
+   // A fixed spread cap in points cannot tell you whether a trade is viable,
+   // because viability is the spread RELATIVE TO THE STOP, and the stop changes
+   // with volatility, session and timeframe. This measures the thing that
+   // actually decides it.
+   //
+   // Measured on XAUUSD, spread as a share of a ~1.5 ATR stop:
+   //     1m 25.8%   3m 14.9%   5m 11.5%   15m 6.7%   30m 4.7%
+   //
+   // Live result that motivated this guard: the same engine cleared its costs
+   // on 5m and 15m and did not on 1m. That is not a defect in the signal — it
+   // is a quarter of every stop being paid to the spread before the trade
+   // starts. No filter setting recovers it, so the trade is declined instead.
+   double spreadPx = sym.Ask() - sym.Bid();
+   double shareBull = (riskBull > 0.0) ? (spreadPx / riskBull) * 100.0 : 999.0;
+   double shareBear = (riskBear > 0.0) ? (spreadPx / riskBear) * 100.0 : 999.0;
+   gSpreadShare = MathMin(shareBull, shareBear);
+   bool costOkBull = (InpMaxSpreadPctRisk <= 0.0) || (shareBull <= InpMaxSpreadPctRisk);
+   bool costOkBear = (InpMaxSpreadPctRisk <= 0.0) || (shareBear <= InpMaxSpreadPctRisk);
+
+   bool buySig  = (nBull>0) && allowLong  && barBull && riskOkBull && costOkBull && scoreBull >= 1 && regimeBuy;
+   bool sellSig = (nBear>0) && allowShort && barBear && riskOkBear && costOkBear && scoreBear >= 1 && regimeSell;
+
+   if((nBull > 0 || nBear > 0) && !costOkBull && !costOkBear)
+     {
+      gLastBlock = StringFormat("cost %.0f%% of stop (cap %.0f%%)",
+                                gSpreadShare, InpMaxSpreadPctRisk);
+      return;
+     }
 
    if(!buySig && !sellSig)
      {
@@ -704,7 +738,7 @@ void DrawPanel()
       "regime   %s  ER %.2f (need %.2f)\n"
       "VWAP     %.*f   band +-1s %.*f / %.*f\n"
       "profile  %s\n"
-      "spread   %d pt\n"
+      "spread   %d pt  =  %.0f%% of stop (cap %.0f%%)\n"
       "trade    %s\n"
       "last     %s",
       _Symbol, EnumToString(TF()),
@@ -714,7 +748,7 @@ void DrawPanel()
       gProfileOk ? StringFormat("POC %.*f  VAH %.*f  VAL %.*f",
                                 _Digits, gPoc, _Digits, gVah, _Digits, gVal)
                  : "building",
-      (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), gSpreadShare, InpMaxSpreadPctRisk,
       st, gLastBlock));
   }
 
