@@ -1,0 +1,1066 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © ME Institutional — ME Scalp v2.4
+//@version=6
+indicator("ME Scalp v2.4", shorttitle="ME Scalp v2.4", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v2.4 — THE VWAP BAND TRIGGER WAS FIRING ON ARITHMETIC, NOT ON A REJECTION.
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: "3 won and 2 lost, unstable win rate on 5m to 15m."
+//
+// FIRST, THE PART THAT IS NOT A BUG. Five trades cannot measure a win rate.
+// A process that reaches TP1 about 57% of the time produces 3W/2L more often
+// than any other five-trade result — it is the single most likely outcome, not
+// evidence of instability. Nothing below was changed because of those five
+// trades. It was changed because looking for the cause turned up a real defect.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DEFECT. The band trigger is:
+//
+//     bandBull = low <= l1 and close > l1 and closePos >= 0.55
+//
+// l1 is the lower VWAP deviation band. The deviation is accumulated from the
+// session anchor, so on the first bars after the anchor it is computed from ONE
+// SAMPLE and collapses: u1 == l1 == vwap. "low <= l1 and close > l1" is then
+// true of any bar that closes above its own low. The engine reads that as a
+// band rejection. It is not a rejection of anything.
+//
+// The v2.2 header called this trigger "the highest-supply event in the engine —
+// 20.9 events/day on 15m against 14.9 for MSS, FVG and sweep combined". That
+// was true, and the reason was arithmetic, not opportunity.
+//
+// WHAT THOSE TRADES DO, per family, 5m and 15m, 360 simulated days each:
+//
+//     5m                                    15m
+//     family   trd/d  TP1  TP3   SL  TIME   trd/d  TP1  TP3   SL  TIME  hold
+//     mss       2.85  61%  20%  11%   28%    1.18  49%  19%  36%   15%    2b
+//     fvg       1.13  64%  23%  19%   17%    0.68  66%  25%   9%   25%    3b
+//     sweep     0.10  84%  14%  16%    0%    0.21  64%  27%  36%    0%    1b
+//     band      0.74  30%   7%  15%   55%    1.03  25%   4%  23%   52%   12b
+//     band2     0.04  40%   7%   0%   60%    0.02  33%  17%   0%   67%   12b
+//     value     0.05  56%  11%  22%   22%    0.02  17%   0%  17%   67%   12b
+//
+// On 15m the band family is a THIRD of all trades, reaches TP1 25% of the time
+// against 66% for FVG, and its median hold sits exactly on the 12-bar time stop
+// — i.e. the typical band trade resolves nothing and is closed by the clock.
+//
+// v2.4 requires a band to HAVE WIDTH before it counts as a level: the u1-l1
+// distance must be at least i_bandMinW × ATR (default 0.30). That is a one-line
+// test and it removes the collapsed-band events without touching the real ones.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIRMATION. A confirmed family does not fire on its own bar: the event is
+// read off the previous bar and THIS bar must CLOSE beyond that bar's extreme.
+// Measured, applied to everything at once on 5m: stop-outs 14% -> 7%, TP1
+// unchanged at 57%, and the trade rate falls from 4.92/day to 1.24. That is a
+// 75% cut in supply for a halving of stop-outs, which is a real choice and is
+// offered as "All triggers".
+//
+// The default is "Fades only" — band, band2 and value area, the three families
+// that enter AGAINST the move in progress. After the width gate those families
+// are small, so the default costs very little and is worth about a point.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE STOP. MSS is the only family whose invalidation is a PIVOT rather than a
+// bar extreme, and on 15m that pivot is often only a few ticks from the entry:
+// MSS stops out at 36% there, against 9% for FVG. It now takes its own extra
+// clearance, i_breakPad, on top of the shared pad.
+//
+//     MSS pad     15m MSS SL   15m all SL   15m TP1   15m trd/day
+//     0.45 total       36%          28%        56%         2.15
+//     0.65 total       32%          25%        58%         2.11   <- default
+//     0.85 total       29%          23%        59%         2.06
+//
+// On 5m the same change is neutral (MSS SL 11% -> 9%, TP1 unchanged at 62%), so
+// the default is set where 15m improves and 5m does not suffer.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THE THREE CHANGES DO TOGETHER — and this is the answer to "unstable
+// from 5 to 15", because the two timeframes stop disagreeing:
+//
+//     5m                                    15m
+//              trd/d  TP1   BE  TP3   SL  TIME      trd/d  TP1   BE  TP3   SL  TIME
+//     v2.3      4.92  57%  39%  18%  14%   29%       3.13  45%  30%  16%  26%   29%
+//     v2.4      4.07  62%  41%  20%  12%   26%       2.11  58%  35%  22%  25%   17%
+//
+// The TP1 gap between the two timeframes goes from 12 points to 4. The
+// time-stop share on 15m — trades that resolved nothing — is cut from 29% to
+// 17%. The cost is about 17% of the trades on 5m and 33% on 15m.
+//
+// The stop-out gap does NOT close: 12% on 5m against 25% on 15m. That is the
+// one number this release does not fix, and it is not a defect in the logic —
+// a 15m stop is a bigger price distance and takes longer to reach, so more of
+// the path is exposed to it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THREE THINGS I TESTED AND DID NOT SHIP, because the measurement said not to.
+//
+//  1 SWING INVALIDATION for the fades. The band/value stop is built from the
+//    TRIGGER BAR'S OWN WICK — one candle. Replacing that with the extreme of
+//    the last 3, 5 or 8 bars moved the 5m stop-out rate from 14% to 13% and the
+//    15m rate from 26% to 25%. The shared pad already dominates the placement.
+//    I expected this to matter and it does not.
+//
+//  2 LEVEL-RETEST ENTRY — arm at the trigger's own level and fill only if price
+//    returns to it. This is the change that helped ME Pro (88% fill, fewer stop
+//    -outs). Here it HURTS, badly: 5m stop-outs 14% -> 22%, 15m 26% -> 41%.
+//    The reason is structural and it took the measurement to see it. ME Pro's
+//    triggers are acceptance events, so a pullback to the level is a discount.
+//    ME Scalp's are rejections — price coming BACK to the level it just
+//    rejected is the setup failing, not a better price. The same mechanic
+//    reverses sign between the two engines. It is not ported.
+//
+//  3 A LONGER TIME STOP. On 5m, 12 -> 18 bars moves TP1 reach 62% -> 66% and
+//    the time-stop share 25% -> 19%. It looks like a clear gain and it is not
+//    decidable here: the 6 points come out as +2 TP3, +2 breakeven and +2 full
+//    stop-outs, and what a time exit is actually worth — it closes at market,
+//    anywhere — is precisely what an outcome-mix harness cannot price. The
+//    width gate was shipped on the opposite pattern: it moved trades out of the
+//    time stop into BOTH resolved outcomes with TP3 rising more than SL. This
+//    one is a coin toss dressed as an improvement, so the default stays at 12.
+//
+// WHERE THIS FILE AND THE HARNESS DIFFER, stated because they are not the same
+// program. For a CONFIRMED family the harness reads the regime filter, the
+// cooldown, the quality score and the ATR on the TRIGGER bar; this file reads
+// them on the CONFIRMATION bar, one later, because that is the bar Pine is
+// executing. Only the level and the invalidation are deliberately taken from
+// the trigger bar in both. I measured the score half of that divergence
+// directly — scoring the confirmation bar instead of the trigger bar moved
+// nothing on either timeframe, 1514 trades against 1513 on 5m — and did not
+// measure the other three. They are one bar of drift, not a different rule,
+// but they are a reason to expect the chart and the tables to disagree
+// slightly rather than exactly.
+//
+// EVERYTHING ABOVE IS COUNTS AND OUTCOME GEOMETRY on a synthetic generator.
+// NO EXPECTANCY IS COMPUTED OR QUOTED anywhere in this file. Position size
+// divides by stop distance, so a wider stop pays less per win — that trade-off
+// is real, is not visible in any table here, and is why the pads were moved as
+// little as the measurements allowed.
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+// v2.3 — TP1 WAS BEING REACHED AND THE CHART NEVER SAID SO.
+// ─────────────────────────────────────────────────────────────────────────────
+// Reported: on 5m and 15m the plan barely reaches TP1.
+//
+// THE DISPLAY DEFECT, read straight off v2.2's own source. A finished plan is
+// stamped with exactly one of four labels:
+//
+//     closeTxt = tpHit ? "TP3 ✓" : slHit ? (eTp1Done ? "BE" : "SL ✕") : "TIME"
+//
+// There is no TP1 label anywhere in that line, and the TP1 price label never
+// changes once drawn. So a trade that reaches TP1, arms breakeven and later
+// comes back to entry is stamped "BE" — and BE IS THE EVIDENCE THAT TP1 WAS
+// HIT. It is the only outcome that cannot happen without it.
+//
+// Read "BE" as a miss and the apparent TP1 rate is whatever share of trades
+// ends at TP3. Measured on 5m at the default 0.8 ATR: that is 19%, against a
+// true reach of 59%. The engine looked three times worse than it was, and I
+// built the display that made it look that way.
+//
+// v2.3 marks it. The TP1 label becomes "TP1 ✓" the moment it trades, a small
+// triangle prints on the bar that did it, and the dashboard carries a running
+// TP1 hit rate for the session so the number can be checked on a real chart
+// instead of taken from my synthetic generator.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHERE TP1 ACTUALLY SITS, MEASURED. TP1 hit is BE + TP3, i.e. trades that
+// demonstrably reached it:
+//
+//     5m                                  15m
+//     TP1 (xATR)  hit    BE   TP3    SL   TP1 (xATR)  hit    BE   TP3    SL
+//     0.40        77%   64%   14%    8%   0.40        61%   47%   14%   18%
+//     0.50        72%   57%   15%    9%   0.50        57%   41%   15%   20%
+//     0.60        68%   52%   16%   10%   0.60        54%   37%   16%   21%
+//     0.80        59%   40%   19%   13%   0.80        48%   31%   17%   24%
+//     1.00        52%   31%   21%   15%   1.00        42%   24%   19%   28%
+//
+// The dial is real and monotone. Moving TP1 from 0.8 to 0.5 ATR takes the 5m
+// reach from 59% to 72% and costs 4 points of TP3. Reaching TP1 is what arms
+// breakeven, so a trade that does not reach it carries full risk for its whole
+// life — which is why this target is worth more attention than the other two.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SL BUFFER: TWO PADS WERE STACKING, AND NEITHER TOOLTIP SAID SO.
+//
+//     slRaw = min(invalidation, close - atr*i_minRisk) - atr*i_slBuf - atr*i_structPad
+//
+// i_slBuf (0.20) and i_structPad (0.25) are separate inputs doing the same job
+// — clearance beyond the invalidation — and they ADD. The pad actually applied
+// has always been 0.45 ATR, and you could not tell that from either input.
+// v2.3 says so in both tooltips and shows the effective total on the dashboard.
+//
+// MEASURED, sweeping the buffer with the pad held at 0.25:
+//
+//     5m                                    15m
+//     buf   total   trd/day  TP1   SL       buf   total  trd/day  TP1   SL
+//     0.00   0.25      5.43  57%  17%       0.00   0.25     3.38  45%  29%
+//     0.20   0.45      5.43  59%  13%       0.20   0.45     3.38  48%  24%
+//     0.35   0.60      5.43  60%  11%       0.35   0.60     3.38  50%  21%
+//     0.50   0.75      5.43  60%   9%       0.50   0.75     3.38  52%  20%
+//
+// I EXPECTED THE BUFFER TO CUT TRADE COUNT by pushing structural risk past the
+// i_structMax backstop. IT DOES NOT — the count is identical at every setting,
+// 5.43/day and 3.38/day throughout. That guess was wrong and the measurement
+// says so.
+//
+// What the buffer does is lower stop-outs monotonically and lift TP1 reach
+// slightly, at no cost this table can see. But there IS a cost this table
+// cannot see, and it is not small: position size is derived from stop
+// distance, so a wider stop means a SMALLER POSITION for the same money at
+// risk, while the targets stay at fixed ATR distances. Every win therefore
+// pays less. In R terms, TP1 at 0.8 ATR is 0.34R against a 2.33 ATR stop and
+// 0.30R against a 2.63 ATR one.
+//
+// So the buffer trades fewer stop-outs for smaller wins. Outcome mix cannot
+// settle that trade — only expectancy can, and this harness cannot produce
+// expectancy. The defaults are UNCHANGED for that reason. The measurement is
+// here so the choice is informed rather than blind.
+//
+// Counts and outcome geometry only. No expectancy computed or quoted;
+// synthetic data.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ME SCALP v2.2 — THE STOP WAS IN THE WRONG PLACE. Measured, then fixed.
+// ─────────────────────────────────────────────────────────────────────────────
+// THE REPORT: "the SL is extremely tight and easy to hit."
+// It is, and v2.1's own header contained the evidence without recognising it:
+//   widening the stop buffer did nothing at all (SL 45% -> 44%) since the
+//   1.0 ATR clamp already governs the distance
+// A buffer that changes nothing is not a buffer. The clamp was deciding every
+// stop, and the buffer was decoration.
+//
+// WHAT THE CLAMP ACTUALLY DID. v2.1 built the stop from the setup's own
+// invalidation and then squeezed it into a 1.0 ATR window:
+//
+//     raw = min(inval, close - A*min_risk) - A*sl_buf
+//     sl  = max(raw, close - A*max_risk)          <- the clamp
+//
+// When the structural stop was wider than the cap, the clamp moved it INSIDE the
+// level that defines the idea. Price coming back to structure — ordinary
+// behaviour, not invalidation — then closed the trade for a loss.
+//
+// MEASURED, 150 days x 6 seeds, Standard, ER>=0.32, aligned:
+//
+//     tf    clamped   stop lands INSIDE   stop-outs where the level
+//                     the level by        was NEVER breached
+//     5m      86%        1.10 ATR                  91%
+//     15m     71%        1.01 ATR                  80%
+//     30m     65%        1.04 ATR                  68%
+//
+// Read the last column again. On 5m, NINE OUT OF TEN stop-outs happened without
+// price ever closing beyond the level that would have proved the trade wrong.
+// Those losses were manufactured by stop placement, not by the market.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FIX, AND WHY IT COSTS NO SIGNALS.
+//
+// The stop now stays where structure puts it. A setup whose structural stop is
+// genuinely too wide is REJECTED rather than squeezed — declining a trade whose
+// risk is too large is honest; squeezing produces a stop that no longer marks
+// invalidation, which is the defect itself.
+//
+// The obvious objection is that a wider stop makes a slower trade, because in
+// v2.1 the targets were multiples of risk. That coupling was a choice, not a
+// law. v2.2 places the stop by STRUCTURE and the targets by VOLATILITY, so the
+// targets stay exactly where v2.1 put them in PRICE:
+//
+//     5m   mode                        trd/day  intrude  med R  bars   SL   BE  TP3
+//     v2.1 clamp                          5.55    +1.10   1.00     3  42%  27%  14%
+//     v2.2 structure + ATR targets        5.55    -0.45   2.33     5  14%  40%  20%
+//          structure + R targets          5.55    -0.45   2.33    12  24%  18%   6%
+//          reject-if-wide (no clamp)      0.85     0.00   0.66     8  26%  25%   8%
+//
+//     15m  v2.1 clamp                     3.38    +1.01   1.00     2  49%  17%  11%
+//          v2.2 structure + ATR targets   3.38    -0.45   1.99     3  25%  29%  18%
+//     30m  v2.1 clamp                     2.63    +1.04   1.00     2  55%  22%  15%
+//          v2.2 structure + ATR targets   2.63    -0.45   1.86     3  33%  35%  19%
+//
+// TRADE COUNT IS IDENTICAL — 5.55, 3.38, 2.63 per day, unchanged to two decimals.
+// Not one signal was traded away. `intrude` flips negative, meaning the stop is
+// finally OUTSIDE the level. Stop-outs fall by roughly two thirds on 5m, TP3
+// completions RISE, and the median hold goes from 3 bars to 5.
+//
+// The fourth row is why the fix is not simply "stop rejecting less": rejecting
+// every wide setup instead of clamping cuts 5m from 5.55 to 0.85 trades a day.
+// That is ME Pro starvation, the disease this engine was written to cure.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ONE HONEST COST, stated plainly.
+//
+// R:R PER TRADE FALLS. The targets sit where they always did in price, but the
+// stop is now about twice as far away, so TP1 is roughly 0.35R instead of 0.8R.
+// With fixed-fractional sizing the position halves and each TP1 pays under half
+// what it used to. You are buying a much lower stop-out rate with a smaller
+// reward per win. The outcome MIX improves on every single count above; whether
+// that nets out positive in money depends on an edge this engine has not
+// demonstrated. Measure it in the Strategy Tester — do not take it from me.
+//
+// AND A CAVEAT ON THE ABOVE TABLE. Every column in it is GEOMETRY — where the
+// stop sits relative to structure, and what fraction of trades end each way.
+// Geometry does not depend on the generator's drift, which is why these numbers
+// are reported when the v2.1 header's expectancy figures are not. But trending
+// synthetic data does flatter a wide stop, because surviving a pullback pays
+// more there than in real chop. So treat the DIRECTION as solid and the
+// magnitude as provisional.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// RETRACTION, CARRIED FORWARD FROM v2.1 AND STILL IN FORCE.
+//
+// The v2.1 header claimed +0.3032R on 5m, +0.2919R on 15m, +0.2708R on 30m.
+// EVERY ONE OF THOSE IS WITHDRAWN. They came from a generator whose trend
+// persistence had momentum baked in: on the same data a brain-dead rule (buy if
+// price is above where it was 20 bars ago) scored +0.214R, which is essentially
+// the whole of the claimed edge. Recalibrated, ME Scalp measured -0.06 to -0.10R,
+// and you reported the strategy build as NEGATIVE in the tester. The expectancy
+// of this engine is unestablished and most likely negative intraday. Nothing in
+// v2.2 changes that; it fixes a placement defect, which is a different claim.
+//
+// Alignment (i_align) was also tested INVERTED and produced ~0 as well (5m
+// -0.0205, 15m -0.0102, 30m -0.0011). No hidden edge in either direction.
+//
+// NON-REPAINTING. Signals gated on barstate.isconfirmed. No request.security and
+// no higher-timeframe series. The efficiency ratio reads closed history only.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+var string G_ENG  = "══ Engine ══"
+var string G_TRIG = "══ Triggers ══"
+var string G_RISK = "══ Risk & Targets ══"
+var string G_DISP = "══ Display ══"
+
+i_freq = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"],
+     tooltip="Sets how directional the market must be before the engine will trade — the efficiency-ratio threshold.\n\nSelective  ER ≥ 0.40\nStandard   ER ≥ 0.32\nHigh       ER ≥ 0.25\n\nThe per-setting expectancy figures that used to appear here are WITHDRAWN — see the RETRACTION block at the top of the script. Trade rate still holds: on 15m, roughly 3.2 / 4.2 / 5.5 per day respectively. Measure the rest in the Strategy Tester.",
+     group=G_ENG)
+i_dir = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
+i_erLen = input.int(20, "Regime Lookback (bars)", minval=5, maxval=100, group=G_ENG,
+     tooltip="Window for the efficiency ratio and for the direction of the leg being aligned to.")
+i_align = input.bool(true, "Only trade WITH the leg in progress", group=G_ENG,
+     tooltip="Requires the trade direction to match price over the regime lookback.\n\nCAUTION: this was described as the single highest-value condition in the engine, on the strength of measurements that are now withdrawn. Worse, the alignment rule was later tested INVERTED and also produced ~0 (5m -0.0205, 15m -0.0102, 30m -0.0011) — so there is no hidden edge in either direction and no sign error. Treat this as an untested preference, not as a proven filter.")
+i_showReg = input.bool(true, "Tint background by regime", group=G_ENG)
+
+i_useMss   = input.bool(true, "MSS — structure break",        group=G_TRIG)
+i_useFvg   = input.bool(true, "FVG retest",                   group=G_TRIG)
+i_useSweep = input.bool(true, "Liquidity sweep + reclaim",    group=G_TRIG)
+i_useBand  = input.bool(true, "VWAP band rejection",          group=G_TRIG,
+     tooltip="Highest-supply trigger in the engine — 20.9 events/day on 15m against 14.9 for MSS, FVG and sweep combined. Event counts are a property of the logic and are not affected by the retraction.")
+i_useValue = input.bool(true, "Value-area rejection (VAH/VAL)", group=G_TRIG)
+
+// v2.4 — the two inputs that this release exists for.
+i_bandMinW = input.float(0.30, "Band must be this wide to count (× ATR)", minval=0.0, maxval=2.0, step=0.05, group=G_TRIG,
+     tooltip="A VWAP band only counts as a level if u1 - l1 is at least this many ATR wide.\n\nWHY THIS EXISTS. The deviation is accumulated from the session anchor, so on the first bars after it the deviation comes from ONE SAMPLE and the bands collapse onto VWAP: u1 == l1 == vwap. The rejection test is then \"low <= l1 and close > l1\", which is true of any bar that closes above its own low. The engine was reading arithmetic as a rejection.\n\nMEASURED, per family, 360 simulated days:\n\n  family   5m TP1  5m TIME   15m TP1  15m TIME\n  mss         61%      28%       49%       15%\n  fvg         64%      17%       66%       25%\n  band        30%      55%       25%       52%\n\nOn 15m the band family was a third of all trades, reached TP1 a quarter of the time, and its median hold sat exactly on the 12-bar time stop — the typical band trade resolved nothing and was closed by the clock.\n\nWith the gate at 0.30 the 15m mix goes TP1 45% -> 55%, time stop 29% -> 16%, at a cost of 0.73 trades/day. 0.15, 0.30 and 0.50 all measured within a point of each other; 0.00 restores v2.3 exactly.")
+i_confirm  = input.string("Fades only", "Confirmation Bar", options=["Off", "Fades only", "All triggers"], group=G_TRIG,
+     tooltip="A CONFIRMED family does not fire on its own bar. The event is read off the previous bar and THIS bar must CLOSE beyond that bar's extreme before the setup is taken. Entry is one bar later and at a worse price; the stop is still built from the trigger bar's invalidation.\n\nOff\n  v2.3 behaviour. Every trigger fires on its own close.\n\nFades only (default)\n  Band, band2 and value area — the three families that enter AGAINST the move in progress. After the width gate these are small, so this costs few trades and measured about a point of TP1 and a point of stop-out on both timeframes.\n\nAll triggers\n  Measured on 5m: stop-outs 14% -> 7%, TP1 unchanged at 57%, trade rate 4.92/day -> 1.24. A 75% cut in supply for a halving of stop-outs. That is a real choice, not an improvement — take it if you would rather wait.")
+
+i_atrLen    = input.int(14, "ATR Length", minval=5, maxval=50, group=G_RISK)
+
+// ── v2.2 STOP PLACEMENT ───────────────────────────────────────────────────────
+i_stopMode  = input.string("Structure + ATR targets", "Stop Placement",
+     options=["Structure + ATR targets", "Structure + R targets", "Clamp to Max Risk (v2.1)"],
+     tooltip="WHERE THE STOP GOES, and what the targets are measured against.\n\nStructure + ATR targets (default, v2.2)\n  The stop sits BEYOND the setup's own invalidation, plus the pad below. Targets are placed at ATR distances, so they stay where v2.1 put them in PRICE and the trade still resolves fast.\n\nStructure + R targets\n  Same stop, but targets are multiples of the (now larger) risk. Correct geometry, much slower trades — median hold roughly triples.\n\nClamp to Max Risk (v2.1)\n  The old behaviour. The stop is squeezed to Max Risk even when that puts it INSIDE the invalidation level. Measured on 5m: 86% of stops were clamped, landing a median of 1.10 ATR inside the level, and 91% of stop-outs happened without the level ever being breached. Kept only so the old build can be reproduced.",
+     group=G_RISK)
+i_structPad = input.float(0.25, "Structure Pad Beyond Invalidation (× ATR)", minval=0.0, maxval=1.5, step=0.05,
+     tooltip="Extra clearance past the invalidation level, on top of the SL Buffer. This is the dial that actually reduces stop-outs now that the clamp is gone — measured on 5m, 0.00 -> 0.25 moved the stop-out rate from 19% to 14% and left trade count untouched.\n\nIgnored in the v2.1 clamp mode, where the clamp overrides everything.",
+     group=G_RISK)
+i_structMax = input.float(4.0, "Structure Backstop — REJECT beyond (× ATR)", minval=1.0, maxval=10.0, step=0.25,
+     tooltip="A structural stop wider than this rejects the setup instead of being squeezed into range. This is the important distinction: squeezing produces a stop that no longer marks invalidation, which is the defect v2.2 exists to fix, whereas rejecting simply declines a setup whose risk is genuinely too large.\n\nMeasured structural risk: p50 about 2.0 ATR, p90 about 3.8, p99 about 6.2. The 4.0 default therefore declines roughly the widest 10% of setups and nothing else.",
+     group=G_RISK)
+
+i_maxRisk   = input.float(1.0, "Max Risk (× ATR) — v2.1 clamp mode only", minval=0.4, maxval=3.0, step=0.1, group=G_RISK,
+     tooltip="ONLY USED IN THE v2.1 CLAMP MODE. There it is the hard cap the stop is squeezed into, which is exactly the defect v2.2 exists to fix: squeezing puts the stop INSIDE the invalidation level. Measured on 5m, 86% of stops were clamped and 91% of the resulting stop-outs happened without that level ever being breached.\n\nIn the two Structure modes this input is IGNORED. The far backstop there is Structure Backstop, which REJECTS a setup rather than squeezing it.")
+i_minRisk   = input.float(0.40, "Min Risk (× ATR)", minval=0.1, maxval=1.5, step=0.05, group=G_RISK)
+i_slBuf     = input.float(0.20, "SL Buffer Past Invalidation (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=G_RISK,
+     tooltip="v2.3: THIS ADDS TO THE STRUCTURE PAD. Both push the stop past the invalidation and the engine applies BOTH:\n\n  stop = min(invalidation, close - minRisk) - slBuf - structPad\n\nAt defaults that is 0.20 + 0.25 = 0.45 ATR of clearance, and neither input said so before now. The dashboard shows the effective total.\n\nMEASURED, sweeping this with the pad held at 0.25:\n\n  buf   total   5m trd/day  5m TP1  5m SL   15m SL\n  0.00   0.25         5.43     57%    17%      29%\n  0.20   0.45         5.43     59%    13%      24%\n  0.35   0.60         5.43     60%    11%      21%\n  0.50   0.75         5.43     60%     9%      20%\n\nTrade count does NOT change — I expected the wider stop to be rejected by the Structure Backstop and it is not; the count is identical at every setting. That guess was wrong.\n\nTHE COST THIS TABLE CANNOT SHOW. Position size is derived from stop distance, so a wider stop means a smaller position for the same money at risk while the targets stay at fixed ATR distances. Every win pays less: TP1 at 0.8 ATR is 0.34R against a 2.33 ATR stop and 0.30R against a 2.63 ATR one.\n\nFewer stop-outs, smaller wins. Outcome mix cannot settle that — only expectancy can, and it has not been measured. Default left unchanged for that reason.")
+i_tp1R      = input.float(0.8, "TP1 (× ATR, or × risk in R modes)", minval=0.3, maxval=5.0, step=0.1, group=G_RISK,
+     tooltip="v2.3 MEASURED REACH. TP1 hit = trades that demonstrably reached it (ended BE or TP3):\n\n  TP1     5m hit   5m SL     15m hit   15m SL\n  0.40      77%      8%         61%     18%\n  0.50      72%      9%         57%     20%\n  0.60      68%     10%         54%     21%\n  0.80      59%     13%         48%     24%\n  1.00      52%     15%         42%     28%\n\nMonotone and real: 0.8 -> 0.5 lifts the 5m reach from 59% to 72% and costs about 4 points of TP3.\n\nWHY THIS TARGET MATTERS MORE THAN THE OTHER TWO. Reaching TP1 is what arms the breakeven move. A trade that never reaches it carries full risk for its entire life, so TP1 reach is the difference between a scratch and a full loss.\n\nIf the chart appears never to reach TP1, check the new TP1 hit counter on the dashboard before changing this — through v2.2 the chart had no way to SAY TP1 was hit, and stamped such trades \"BE\".\n\nORIGINAL NOTE — Distance to the first target. In the two Structure modes the default reading is × ATR; in the v2.1 clamp mode it is × risk.\n\nWhy it matters: reaching TP1 arms the breakeven move, and after that the trade cannot lose. In v2.2 the stop sits beyond structure — roughly 2 ATR — while TP1 stays at 0.8 ATR, so TP1 is now about 0.35R rather than 0.8R. It is reached far more often (measured on 5m, BE outcomes went 27% -> 40%) and pays less when it is. That is the trade v2.2 makes and it is deliberate.\n\nLower it to arm breakeven sooner and convert more losses into scratches; raise it for more reward per win and more full stop-outs.")
+i_tp2R      = input.float(1.4, "TP2 (× ATR, or × risk in R modes)", minval=0.5, maxval=8.0, step=0.1, group=G_RISK)
+i_tp3R      = input.float(2.0, "TP3 (× ATR, or × risk in R modes)", minval=0.5, maxval=12.0, step=0.1, group=G_RISK,
+     tooltip="Tested at 4R to let winners run and measured no better than the 2R scale-out. That was a NULL result rather than a positive one, so it survives the retraction as a rejection: there is no evidence the runner beats the scale-out here.")
+i_timeStop  = input.int(12, "Time Stop (bars, 0 = off)", minval=0, maxval=200, group=G_RISK,
+     tooltip="Closes a trade that has resolved nothing after this many bars. Only 3-5% of trades reach it — the tight risk cap is what actually keeps trades short. This is a backstop.")
+i_breakPad  = input.float(0.20, "Extra Pad for MSS Breaks (× ATR)", minval=0.0, maxval=1.5, step=0.05, group=G_RISK,
+     tooltip="Added to the shared pad for MSS setups ONLY.\n\nWHY ONLY MSS. Every other family stops beyond a bar extreme or a gap edge. MSS stops beyond the PIVOT it just broke, and on 15m that pivot is frequently a few ticks from the entry. Measured, 15m: MSS stops out at 36% against 9% for FVG, while being 56% of all trades.\n\n  MSS pad    15m MSS SL   15m all SL   15m TP1   15m trd/day\n  0.45 total      36%          28%        56%         2.15\n  0.65 total      32%          25%        58%         2.11   <- default\n  0.85 total      29%          23%        59%         2.06\n\nOn 5m the same change is neutral — MSS stop-outs 11% -> 9%, TP1 unchanged at 62% — so the default sits where 15m gains and 5m does not lose.\n\nTHE COST, which no table here shows: position size divides by stop distance, so every MSS win pays proportionally less. Set to 0 to hold every family at the same pad.\n\nIgnored in the v2.1 clamp mode.")
+i_beAfterTp1 = input.bool(true, "Move stop to breakeven after TP1", group=G_RISK)
+
+i_showZones = input.bool(true,  "Show VWAP bands",   group=G_DISP)
+i_showVa    = input.bool(true,  "Show value area",   group=G_DISP)
+i_showPlan  = input.bool(true,  "Show entry / SL / TP lines", group=G_DISP)
+i_dash      = input.bool(true,  "Show dashboard",    group=G_DISP)
+i_dashPos   = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=G_DISP)
+
+// v2.0: frequency sets the REGIME threshold. The quality score is held at a
+// light floor of 1 — measured, moving it to 2 changed mean R by 0.002R and cost
+// a third of the trades, so it is not the selector any more. (That was a null
+// result, so it survives the retraction as a rejection.)
+erMin     = i_freq == "High" ? 0.25 : i_freq == "Standard" ? 0.32 : 0.40
+needScore = 1
+cooldown  = 3
+allowLong  = i_dir != "Short only"
+allowShort = i_dir != "Long only"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE SERIES
+// ═══════════════════════════════════════════════════════════════════════════════
+atr    = ta.atr(i_atrLen)
+range_ = math.max(high - low, 1e-9)
+closePos = (close - low) / range_
+body   = math.abs(close - open)
+
+// Volume may be absent on FX/CFD feeds. Track whether it has EVER been seen so
+// volume-derived readings self-neutralise instead of silently blocking forever.
+// Hoisted here because the FVG store below mutates on confirmed bars only, and
+// that block runs before the trigger section that also reads this.
+conf = barstate.isconfirmed
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REGIME — Kaufman efficiency ratio
+// ─────────────────────────────────────────────────────────────────────────────
+// Net movement over the window divided by the total path travelled to get there.
+// A straight leg scores near 1; the same range covered by thrashing back and
+// forth scores near 0. Reads closed history only.
+// ═══════════════════════════════════════════════════════════════════════════════
+erNet  = math.abs(close - close[i_erLen])
+erPath = math.sum(math.abs(close - close[1]), i_erLen)
+effRatio = erPath > 0 ? erNet / erPath : 0.0
+legUp   = close > close[i_erLen]
+inTrend = effRatio >= erMin
+
+bgcolor(i_showReg and inTrend ? color.new(legUp ? #00E676 : #FF1744, 93) : na, title="Regime")
+
+var bool volSeen = false
+if nz(volume) > 0
+    volSeen := true
+volAvg = ta.sma(nz(volume[1]), 20)
+relVol = volSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
+
+// ── Session-anchored VWAP with volume-weighted deviation bands ────────────────
+newSession = ta.change(time("D")) != 0
+var float sPV  = 0.0
+var float sV   = 0.0
+var float sPV2 = 0.0
+if newSession
+    sPV  := 0.0
+    sV   := 0.0
+    sPV2 := 0.0
+tp   = (high + low + close) / 3.0
+vol_ = volSeen ? nz(volume) : 1.0
+sPV  := sPV  + tp * vol_
+sV   := sV   + vol_
+sPV2 := sPV2 + tp * tp * vol_
+vwap = sPV / math.max(sV, 1e-9)
+vwVar = math.max(sPV2 / math.max(sV, 1e-9) - vwap * vwap, 0.0)
+vwSd  = math.sqrt(vwVar)
+u1 = vwap + vwSd
+l1 = vwap - vwSd
+u2 = vwap + 2.0 * vwSd
+l2 = vwap - 2.0 * vwSd
+
+plot(i_showZones ? vwap : na, "VWAP",  color=color.new(#FFB300, 0), linewidth=2)
+plot(i_showZones ? u1 : na,   "+1σ",   color=color.new(#FFB300, 55))
+plot(i_showZones ? l1 : na,   "−1σ",   color=color.new(#FFB300, 55))
+plot(i_showZones ? u2 : na,   "+2σ",   color=color.new(#FFB300, 78))
+plot(i_showZones ? l2 : na,   "−2σ",   color=color.new(#FFB300, 78))
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRUCTURE — pivots, fair value gaps, value area
+// ═══════════════════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, 2, 2)
+pl = ta.pivotlow(low,   2, 2)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+sph = ta.pivothigh(high, 5, 5)
+spl = ta.pivotlow(low,   5, 5)
+var float sweepHi = na
+var float sweepLo = na
+if not na(sph)
+    sweepHi := sph
+if not na(spl)
+    sweepLo := spl
+
+// ── FVG store. Multiple live gaps, each expiring by age or by being filled.
+var array<float> fvgBullTop = array.new_float()
+var array<float> fvgBullBot = array.new_float()
+var array<int>   fvgBullBar = array.new_int()
+var array<float> fvgBearTop = array.new_float()
+var array<float> fvgBearBot = array.new_float()
+var array<int>   fvgBearBar = array.new_int()
+
+// A gap spanning a market closure is an artefact of the calendar, not of order
+// flow. Reject any three-bar window whose span exceeds 3× the bar interval.
+barMs   = timeframe.in_seconds() * 1000
+contig  = barMs > 0 and (time - time[2]) <= barMs * 2 * 3
+
+if barstate.isconfirmed and contig and low > high[2] and (low - high[2]) >= atr * 0.30 and close[1] > open[1]
+    array.push(fvgBullTop, low)
+    array.push(fvgBullBot, high[2])
+    array.push(fvgBullBar, bar_index)
+if barstate.isconfirmed and contig and low[2] > high and (low[2] - high) >= atr * 0.30 and close[1] < open[1]
+    array.push(fvgBearTop, low[2])
+    array.push(fvgBearBot, high)
+    array.push(fvgBearBar, bar_index)
+
+// expire: older than 30 bars, or closed through. Confirmed bars only, matching
+// the insert above — a store that mutates intrabar is a repaint waiting to be
+// found.
+if conf and array.size(fvgBullBar) > 0
+    for k = array.size(fvgBullBar) - 1 to 0
+        if bar_index - array.get(fvgBullBar, k) > 30 or close < array.get(fvgBullBot, k)
+            array.remove(fvgBullTop, k)
+            array.remove(fvgBullBot, k)
+            array.remove(fvgBullBar, k)
+if conf and array.size(fvgBearBar) > 0
+    for k = array.size(fvgBearBar) - 1 to 0
+        if bar_index - array.get(fvgBearBar, k) > 30 or close > array.get(fvgBearTop, k)
+            array.remove(fvgBearTop, k)
+            array.remove(fvgBearBot, k)
+            array.remove(fvgBearBar, k)
+
+// ── Value area from a rolling volume profile, rebuilt on a stride.
+// Keyed to a TIME-derived counter rather than bar_index: bar_index is
+// chart-relative, so a stride keyed to it shifts as history loads and the
+// profile silently repaints. This was a real defect in ME Pro (v3.5.19).
+vaLen  = 100
+vaBins = 24
+strideKey = int(time / math.max(barMs, 1))
+var float poc = na
+var float vah = na
+var float val = na
+if barstate.isconfirmed and bar_index > vaLen and strideKey % 5 == 0
+    float hi_ = high
+    float lo_ = low
+    for k = 0 to vaLen - 1
+        hi_ := math.max(hi_, high[k])
+        lo_ := math.min(lo_, low[k])
+    float binSz = math.max(hi_ - lo_, 1e-9) / vaBins
+    acc = array.new_float(vaBins, 0.0)
+    for k = 0 to vaLen - 1
+        float bh = high[k]
+        float bl = low[k]
+        float bv = volSeen ? nz(volume[k]) : 1.0
+        float br = math.max(bh - bl, 1e-9)
+        int a0 = math.max(0, math.min(vaBins - 1, int((bl - lo_) / binSz)))
+        int a1 = math.max(0, math.min(vaBins - 1, int((bh - lo_) / binSz)))
+        for j = a0 to a1
+            float bBot = lo_ + j * binSz
+            float bTop = bBot + binSz
+            float ov = math.min(bTop, bh) - math.max(bBot, bl)
+            if ov > 0
+                array.set(acc, j, array.get(acc, j) + bv * (ov / br))
+    float total = array.sum(acc)
+    if total > 0
+        int pb = array.indexof(acc, array.max(acc))
+        float cur = array.get(acc, pb)
+        int up = pb
+        int dn = pb
+        float target = total * 0.70
+        for _it = 0 to vaBins * 2
+            if cur >= target
+                break
+            float uv = 0.0
+            float dv = 0.0
+            int us = math.min(2, vaBins - 1 - up)
+            int ds = math.min(2, dn)
+            if us > 0
+                for j = up + 1 to up + us
+                    uv := uv + array.get(acc, j)
+            if ds > 0
+                for j = dn - ds to dn - 1
+                    dv := dv + array.get(acc, j)
+            if us == 0 and ds == 0
+                break
+            if us > 0 and (ds == 0 or uv >= dv)
+                up := up + us
+                cur := cur + uv
+            else
+                dn := dn - ds
+                cur := cur + dv
+        poc := lo_ + (pb + 0.5) * binSz
+        vah := lo_ + (up + 1) * binSz
+        val := lo_ + dn * binSz
+
+plot(i_showVa and not na(poc) ? poc : na, "POC", color=color.new(#E040FB, 20), style=plot.style_linebr, linewidth=2)
+plot(i_showVa and not na(vah) ? vah : na, "VAH", color=color.new(#7E57C2, 45), style=plot.style_linebr)
+plot(i_showVa and not na(val) ? val : na, "VAL", color=color.new(#7E57C2, 45), style=plot.style_linebr)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRIGGERS — five independent events, each carrying its own invalidation level
+// ─────────────────────────────────────────────────────────────────────────────
+// The invalidation is what the stop is built from, so each setup is stopped
+// beyond the thing that would prove it wrong rather than at a fixed ATR guess.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── v2.4 CONFIRMATION SWITCHES ────────────────────────────────────────────────
+// A CONFIRMED family does not fire on its own bar. Its event is read off the
+// PREVIOUS bar and the current bar must CLOSE beyond that bar's extreme before
+// the setup is taken. Entry is therefore one bar later and at a worse price,
+// while the stop is still built from the trigger bar's own invalidation — which
+// is why the invalidation block further down reads [1] for a confirmed family.
+cfOn   = i_confirm != "Off"
+cfAll  = i_confirm == "All triggers"
+cfCore = cfAll              // MSS, FVG, liquidity sweep
+cfFade = cfOn               // VWAP band, band2, value area — the three fades
+cfUp   = close > high[1]
+cfDn   = close < low[1]
+
+// 1 MSS — price closes through the last short-term pivot
+mssBullR = conf and i_useMss and not na(lastPH) and close >= lastPH + atr * 0.08 and close[1] < lastPH
+mssBearR = conf and i_useMss and not na(lastPL) and close <= lastPL - atr * 0.08 and close[1] > lastPL
+mssBull  = cfCore ? (conf and mssBullR[1] and cfUp) : mssBullR
+mssBear  = cfCore ? (conf and mssBearR[1] and cfDn) : mssBearR
+
+// 2 FVG retest — price trades into a live gap and closes back out of it
+fvgBullR = false
+float fvgBullInvR = na
+if conf and i_useFvg and array.size(fvgBullBar) > 0
+    for k = array.size(fvgBullBar) - 1 to 0
+        if low <= array.get(fvgBullTop, k) and close >= array.get(fvgBullBot, k) and closePos >= 0.55
+            fvgBullR := true
+            fvgBullInvR := array.get(fvgBullBot, k)
+            break
+fvgBearR = false
+float fvgBearInvR = na
+if conf and i_useFvg and array.size(fvgBearBar) > 0
+    for k = array.size(fvgBearBar) - 1 to 0
+        if high >= array.get(fvgBearBot, k) and close <= array.get(fvgBearTop, k) and closePos <= 0.45
+            fvgBearR := true
+            fvgBearInvR := array.get(fvgBearTop, k)
+            break
+fvgBull = cfCore ? (conf and fvgBullR[1] and cfUp) : fvgBullR
+fvgBear = cfCore ? (conf and fvgBearR[1] and cfDn) : fvgBearR
+fvgBullInv = cfCore ? fvgBullInvR[1] : fvgBullInvR
+fvgBearInv = cfCore ? fvgBearInvR[1] : fvgBearInvR
+
+// 3 Liquidity sweep — a pivot is taken out by a wick and immediately reclaimed
+swBullR = conf and i_useSweep and not na(sweepLo) and (sweepLo - low) >= atr * 0.35 and close > sweepLo and closePos >= 0.55
+swBearR = conf and i_useSweep and not na(sweepHi) and (high - sweepHi) >= atr * 0.35 and close < sweepHi and closePos <= 0.45
+swBull  = cfCore ? (conf and swBullR[1] and cfUp) : swBullR
+swBear  = cfCore ? (conf and swBearR[1] and cfDn) : swBearR
+
+// 4 VWAP band rejection — traded through a deviation band, closed back inside.
+// v2.4 THE BAND MUST HAVE WIDTH. The deviation is accumulated from the session
+// anchor, so on the first bars after it the deviation comes from ONE SAMPLE and
+// the bands collapse onto VWAP: u1 == l1 == vwap. "low <= l1 and close > l1" is
+// then true of any bar closing above its own low, and the engine was reading
+// that arithmetic as a rejection. Those events were a third of all 15m trades
+// and reached TP1 a quarter of the time. See the i_bandMinW tooltip.
+bandW  = u1 - l1
+bandOk = bandW >= atr * i_bandMinW
+bandBullR  = conf and i_useBand and bandOk and low  <= l1 and close > l1 and closePos >= 0.55
+bandBearR  = conf and i_useBand and bandOk and high >= u1 and close < u1 and closePos <= 0.45
+band2BullR = conf and i_useBand and bandOk and low  <= l2 and close > l2 and closePos >= 0.55
+band2BearR = conf and i_useBand and bandOk and high >= u2 and close < u2 and closePos <= 0.45
+bandBull   = cfFade ? (conf and bandBullR[1]  and cfUp) : bandBullR
+bandBear   = cfFade ? (conf and bandBearR[1]  and cfDn) : bandBearR
+band2Bull  = cfFade ? (conf and band2BullR[1] and cfUp) : band2BullR
+band2Bear  = cfFade ? (conf and band2BearR[1] and cfDn) : band2BearR
+
+// 5 Value-area rejection — traded outside the value area, closed back inside
+valBullR = conf and i_useValue and not na(val) and low  <= val and close > val and closePos >= 0.55
+valBearR = conf and i_useValue and not na(vah) and high >= vah and close < vah and closePos <= 0.45
+valBull  = cfFade ? (conf and valBullR[1] and cfUp) : valBullR
+valBear  = cfFade ? (conf and valBearR[1] and cfDn) : valBearR
+
+nTrigBull = (mssBull ? 1 : 0) + (fvgBull ? 1 : 0) + (swBull ? 1 : 0) + (bandBull ? 1 : 0) + (band2Bull ? 1 : 0) + (valBull ? 1 : 0)
+nTrigBear = (mssBear ? 1 : 0) + (fvgBear ? 1 : 0) + (swBear ? 1 : 0) + (bandBear ? 1 : 0) + (band2Bear ? 1 : 0) + (valBear ? 1 : 0)
+anyBull = nTrigBull > 0
+anyBear = nTrigBear > 0
+
+// Priority when several fire on the same bar. This order is not cosmetic: it
+// selects the INVALIDATION the stop is built from, so it changes the trade.
+bullName = mssBull ? "MSS" : fvgBull ? "FVG" : swBull ? "SWEEP" : bandBull ? "BAND" : band2Bull ? "BAND2" : "VALUE"
+bearName = mssBear ? "MSS" : fvgBear ? "FVG" : swBear ? "SWEEP" : bandBear ? "BAND" : band2Bear ? "BAND2" : "VALUE"
+
+// v2.4: the invalidation must be read on the bar the EVENT was on, which for a
+// confirmed family is the PREVIOUS bar. Reading it on the confirmation bar
+// would build the stop from a bar the setup had already been proved on, which
+// is both wrong and, for a long, systematically too tight.
+mssBullIv  = cfCore ? (na(lastPL[1]) ? low[1]  : lastPL[1]) : (na(lastPL) ? low  : lastPL)
+mssBearIv  = cfCore ? (na(lastPH[1]) ? high[1] : lastPH[1]) : (na(lastPH) ? high : lastPH)
+swBullIv   = cfCore ? low[1]  : low
+swBearIv   = cfCore ? high[1] : high
+fadeBullIv = cfFade ? low[1]  : low
+fadeBearIv = cfFade ? high[1] : high
+
+bullInval = bullName == "MSS" ? mssBullIv : bullName == "FVG" ? fvgBullInv : bullName == "SWEEP" ? swBullIv : fadeBullIv
+bearInval = bearName == "MSS" ? mssBearIv : bearName == "FVG" ? fvgBearInv : bearName == "SWEEP" ? swBearIv : fadeBearIv
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUALITY SCORE, 0-5 — this replaces nineteen ANDed vetoes
+// ─────────────────────────────────────────────────────────────────────────────
+// Five independent readings of the entry bar. None restates another, and none is
+// a filter that can be switched off and then count as agreement.
+// ═══════════════════════════════════════════════════════════════════════════════
+sParticip = relVol >= 1.15 ? 1 : 0
+sBody     = body >= atr * 0.45 ? 1 : 0
+sCloseB   = closePos >= 0.65 ? 1 : 0
+sCloseS   = closePos <= 0.35 ? 1 : 0
+sStackB   = nTrigBull >= 2 ? 1 : 0
+sStackS   = nTrigBear >= 2 ? 1 : 0
+// Location scores only for a trigger that is not itself a band rejection — a
+// band trigger sits at a band by construction and counting it is double-billing.
+// Keyed to the SELECTED trigger, not to whichever happened to fire.
+sLocB = bullName == "BAND2" ? 1 : bullName == "BAND" ? 0 : (close <= l1 * 1.002 ? 1 : 0)
+sLocS = bearName == "BAND2" ? 1 : bearName == "BAND" ? 0 : (close >= u1 * 0.998 ? 1 : 0)
+
+scoreBull = sParticip + sBody + sCloseB + sStackB + sLocB
+scoreBear = sParticip + sBody + sCloseS + sStackS + sLocS
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL — three hard gates, then the score
+// ═══════════════════════════════════════════════════════════════════════════════
+var int lastSigBar = -100000
+barBull = close > open
+barBear = close < open
+coolOk  = bar_index - lastSigBar >= cooldown
+
+// ── v2.2 STOP PLACEMENT. See the header for the measurement that forced this.
+// The structural stop first: beyond the setup's own invalidation, floored at the
+// minimum risk, buffered, and in structure mode padded further.
+legacyClamp = i_stopMode == "Clamp to Max Risk (v2.1)"
+structPad   = legacyClamp ? 0.0 : atr * i_structPad
+// v2.4 PER-FAMILY PAD. MSS is the only family whose invalidation is a PIVOT
+// rather than a bar extreme or a gap edge, and on 15m that pivot is frequently
+// a few ticks from the entry — measured, MSS stops out at 36% there against 9%
+// for FVG while being 56% of all trades. It gets its own extra clearance.
+breakPadB = (not legacyClamp and bullName == "MSS") ? atr * i_breakPad : 0.0
+breakPadS = (not legacyClamp and bearName == "MSS") ? atr * i_breakPad : 0.0
+slRawBull = math.min(bullInval, close - atr * i_minRisk) - atr * i_slBuf - structPad - breakPadB
+slRawBear = math.max(bearInval, close + atr * i_minRisk) + atr * i_slBuf + structPad + breakPadS
+
+// v2.1 CLAMPED here. That is the defect. When the structural stop was wider than
+// the cap, the clamp moved it INSIDE the invalidation level — so ordinary price
+// action returning to structure closed the trade even though nothing had proved
+// the idea wrong. v2.2 keeps the structural stop and REJECTS the setup instead
+// when it is genuinely too wide. Squeezing produces a stop that no longer marks
+// invalidation; rejecting simply declines a trade whose risk is too large.
+slBull = legacyClamp ? math.max(slRawBull, close - atr * i_maxRisk) : slRawBull
+slBear = legacyClamp ? math.min(slRawBear, close + atr * i_maxRisk) : slRawBear
+riskBull  = close - slBull
+riskBear  = slBear - close
+
+// How far INSIDE the invalidation the stop sits, in ATR. Positive means the stop
+// is on the WRONG side of the level and can be taken out while the setup is
+// still valid. Shown on the dashboard because it is the number this release is
+// about, and because v2.1 had no way to see it.
+intrudeBull = (slBull - bullInval) / math.max(atr, 1e-9)
+intrudeBear = (bearInval - slBear) / math.max(atr, 1e-9)
+
+// Floor, and — in structure mode only — the far backstop that REJECTS.
+riskOkBull = riskBull >= atr * i_minRisk * 0.5 and (legacyClamp or riskBull <= atr * i_structMax)
+riskOkBear = riskBear >= atr * i_minRisk * 0.5 and (legacyClamp or riskBear <= atr * i_structMax)
+
+// v2.0 REGIME GATE. Two conditions. See the caution on i_align: the supporting
+// measurements are withdrawn, and the inverted rule also measured ~0.
+regimeOkBuy  = inTrend and (not i_align or legUp)
+regimeOkSell = inTrend and (not i_align or not legUp)
+
+buySignal  = anyBull and allowLong  and barBull and coolOk and riskOkBull and scoreBull >= needScore and regimeOkBuy
+sellSignal = anyBear and allowShort and barBear and coolOk and riskOkBear and scoreBear >= needScore and regimeOkSell
+
+// ── Targets. Fixed R multiples, pulled IN to structure only when structure is
+// nearer and still at least 0.6R away. A target can therefore never sit further
+// than its R-multiple, so TP1 is always reachable — the defect that let ME Pro
+// trades sit open for thirty minutes without touching anything.
+// v2.2: `unit` is what the TP multiples are measured against. In the default
+// mode that is ATR, NOT risk — which is the whole reason a structure-respecting
+// stop does not make the trade slow. The targets stay where v2.1 put them in
+// PRICE; only the stop moved. Measured on 5m: median hold 3 bars under v2.1's
+// clamp, 5 bars here, against 12 bars if the targets are tied to the wider risk.
+f_tp(bool isBuy, float entry, float risk, float unit, int slot, float rmul) =>
+    float d = isBuy ? 1.0 : -1.0
+    float t = entry + d * unit * rmul
+    if slot == 1
+        float b1 = isBuy ? u1 : l1
+        float b2 = vwap
+        float b3 = na(poc) ? na : poc
+        float best = t
+        if not na(b1) and (b1 > entry) == isBuy and math.abs(b1 - entry) < math.abs(best - entry) and math.abs(b1 - entry) >= unit * 0.6
+            best := b1
+        if not na(b2) and (b2 > entry) == isBuy and math.abs(b2 - entry) < math.abs(best - entry) and math.abs(b2 - entry) >= unit * 0.6
+            best := b2
+        if not na(b3) and (b3 > entry) == isBuy and math.abs(b3 - entry) < math.abs(best - entry) and math.abs(b3 - entry) >= unit * 0.6
+            best := b3
+        t := best
+    t
+
+atrTargets = i_stopMode == "Structure + ATR targets"
+unitBull   = atrTargets ? atr : riskBull
+unitBear   = atrTargets ? atr : riskBear
+
+buyTp1  = f_tp(true,  close, riskBull, unitBull, 1, i_tp1R)
+buyTp2  = f_tp(true,  close, riskBull, unitBull, 2, i_tp2R)
+buyTp3  = f_tp(true,  close, riskBull, unitBull, 3, i_tp3R)
+sellTp1 = f_tp(false, close, riskBear, unitBear, 1, i_tp1R)
+sellTp2 = f_tp(false, close, riskBear, unitBear, 2, i_tp2R)
+sellTp3 = f_tp(false, close, riskBear, unitBear, 3, i_tp3R)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRADE STATE — one open plan at a time, tracked to its conclusion
+// ═══════════════════════════════════════════════════════════════════════════════
+var bool  inTrade   = false
+var bool  tradeBuy  = false
+var float eEntry    = na
+var float eSl       = na
+var float eT1       = na
+var float eT2       = na
+var float eT3       = na
+var int   eBar      = na
+var bool  eTp1Done  = false
+var string eName    = ""
+var int   nWin      = 0
+var int   nLoss     = 0
+var int   nTrades   = 0
+// v2.3: TP1 reach, counted on the chart in front of you rather than taken from
+// a synthetic generator. nTp1 counts trades that reached TP1; nTrades counts
+// trades taken, so the ratio is the reach rate for this symbol and timeframe.
+var int   nTp1      = 0
+var int   tp1HitBar = na
+
+fired = (buySignal or sellSignal) and not inTrade
+if fired
+    inTrade  := true
+    tradeBuy := buySignal
+    eEntry   := close
+    eSl      := buySignal ? slBull : slBear
+    eT1      := buySignal ? buyTp1 : sellTp1
+    eT2      := buySignal ? buyTp2 : sellTp2
+    eT3      := buySignal ? buyTp3 : sellTp3
+    eBar     := bar_index
+    eTp1Done := false
+    eName    := buySignal ? bullName : bearName
+    lastSigBar := bar_index
+    nTrades  := nTrades + 1
+
+// Resolution. Checked on confirmed bars only, and the stop is tested FIRST so a
+// bar that spans both the stop and a target is never scored as a win.
+slHit  = false
+tpHit  = false
+timeUp = false
+if inTrade and conf and bar_index > eBar
+    slHit := tradeBuy ? low <= eSl : high >= eSl
+    if not eTp1Done
+        bool t1 = tradeBuy ? high >= eT1 : low <= eT1
+        if t1 and not slHit
+            eTp1Done := true
+            // v2.3: SAY SO. Through v2.2 nothing on the chart marked TP1, and
+            // a trade that reached it and returned to entry was stamped "BE" —
+            // which meant TP1 had been hit, but read as a miss.
+            tp1HitBar := bar_index
+            nTp1 := nTp1 + 1
+            if i_beAfterTp1
+                eSl := eEntry
+    tpHit  := tradeBuy ? high >= eT3 : low <= eT3
+    timeUp := i_timeStop > 0 and (bar_index - eBar) >= i_timeStop
+
+closedWin  = inTrade and (tpHit or (slHit and eTp1Done))
+closedLoss = inTrade and slHit and not eTp1Done
+// v2.1: the closing event is captured BEFORE inTrade is cleared, because the
+// drawing block below needs to know a trade just ended.
+justClosed = inTrade and (slHit or tpHit or timeUp)
+closeTxt   = tpHit ? "TP3 ✓" : slHit ? (eTp1Done ? "BE" : "SL ✕") : "TIME"
+closeCol   = tpHit ? color.new(#00E676, 0) : slHit and eTp1Done ? color.new(#FFC400, 0) : slHit ? color.new(#FF1744, 0) : color.new(#888888, 0)
+if justClosed
+    if closedWin
+        nWin := nWin + 1
+    else if closedLoss
+        nLoss := nLoss + 1
+    inTrade := false
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING
+// ═══════════════════════════════════════════════════════════════════════════════
+// v2.3: a small mark on the bar where TP1 actually traded. The plan freezes
+// with an outcome stamp, but the moment TP1 fills is the one that decides
+// whether the rest of the trade can lose, and it was invisible.
+plotshape(not na(tp1HitBar) and tp1HitBar == bar_index and tradeBuy,  "TP1 hit (long)",  shape.triangleup,   location.belowbar, color.new(#00E676, 20), size=size.tiny)
+plotshape(not na(tp1HitBar) and tp1HitBar == bar_index and not tradeBuy, "TP1 hit (short)", shape.triangledown, location.abovebar, color.new(#00E676, 20), size=size.tiny)
+
+plotshape(buySignal  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(sellSignal and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+
+var line lnSl = na
+var line lnT1 = na
+var line lnT2 = na
+var line lnT3 = na
+var label lbSl = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+// v2.1 PLAN DRAWING. A plan is drawn from its entry bar and EXTENDED bar by bar
+// while it is live, then FROZEN at the bar that closed it and stamped with the
+// outcome.
+var label lbEnd = na
+if i_showPlan and fired
+    if not na(lnSl)
+        line.delete(lnSl)
+        line.delete(lnT1)
+        line.delete(lnT2)
+        line.delete(lnT3)
+        label.delete(lbSl)
+        label.delete(lbT1)
+        label.delete(lbT2)
+        label.delete(lbT3)
+    if not na(lbEnd)
+        label.delete(lbEnd)
+    lnSl := line.new(bar_index, eSl, bar_index, eSl, color=color.new(#FF1744, 0), width=2)
+    lnT1 := line.new(bar_index, eT1, bar_index, eT1, color=color.new(#00E676, 20), style=line.style_dashed)
+    lnT2 := line.new(bar_index, eT2, bar_index, eT2, color=color.new(#00E676, 40), style=line.style_dashed)
+    lnT3 := line.new(bar_index, eT3, bar_index, eT3, color=color.new(#00E676, 60), style=line.style_dashed)
+    lbSl := label.new(bar_index, eSl, "SL " + str.tostring(eSl, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#FF1744, 0), size=size.tiny)
+    lbT1 := label.new(bar_index, eT1, "TP1 " + str.tostring(eT1, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 0), size=size.tiny)
+    lbT2 := label.new(bar_index, eT2, "TP2 " + str.tostring(eT2, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 20), size=size.tiny)
+    lbT3 := label.new(bar_index, eT3, "TP3 " + str.tostring(eT3, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 40), size=size.tiny)
+
+// grow the live plan with the trade, and follow the stop when it moves to
+// breakeven so the drawn line is always the stop actually in force
+if i_showPlan and inTrade and not na(lnSl)
+    line.set_x2(lnSl, bar_index)
+    line.set_x2(lnT1, bar_index)
+    line.set_x2(lnT2, bar_index)
+    line.set_x2(lnT3, bar_index)
+    line.set_y1(lnSl, eSl)
+    line.set_y2(lnSl, eSl)
+    label.set_x(lbSl, bar_index)
+    label.set_y(lbSl, eSl)
+    label.set_text(lbSl, (eTp1Done ? "BE " : "SL ") + str.tostring(eSl, format.mintick))
+    // v2.3: mark TP1 on the plan the moment it trades. Declared here rather
+    // than in the resolution block above because the label objects do not
+    // exist yet at that point — the linter caught that as a use-before-define.
+    if eTp1Done and not na(lbT1)
+        label.set_text(lbT1, "TP1 ✓ " + str.tostring(eT1, format.mintick))
+    label.set_x(lbT1, bar_index)
+    label.set_x(lbT2, bar_index)
+    label.set_x(lbT3, bar_index)
+
+// freeze and stamp the outcome on the bar that closed it
+if i_showPlan and justClosed and not na(lnSl)
+    line.set_x2(lnSl, bar_index)
+    line.set_x2(lnT1, bar_index)
+    line.set_x2(lnT2, bar_index)
+    line.set_x2(lnT3, bar_index)
+    if not na(lbEnd)
+        label.delete(lbEnd)
+    lbEnd := label.new(bar_index, tradeBuy ? low : high, closeTxt,
+         style=tradeBuy ? label.style_label_up : label.style_label_down,
+         color=color.new(#000000, 100), textcolor=closeCol, size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD — every number that decides a trade, visible
+// ═══════════════════════════════════════════════════════════════════════════════
+trigNow  = anyBull or anyBear
+trig100  = math.sum(trigNow ? 1.0 : 0.0, 100)
+sig100   = math.sum((buySignal or sellSignal) ? 1.0 : 0.0, 100)
+var int lastTrigBar = na
+if trigNow
+    lastTrigBar := bar_index
+
+var table dash = na
+if i_dash and barstate.islast
+    pos = i_dashPos == "Top Right" ? position.top_right : i_dashPos == "Top Left" ? position.top_left : i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left
+    if na(dash)
+        dash := table.new(pos, 3, 13, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
+    grn = color.new(#00E676, 0)
+    red = color.new(#FF1744, 0)
+    dim = color.new(#888888, 0)
+    yel = color.new(#FFC400, 0)
+    wht = color.new(#FFFFFF, 0)
+
+    table.cell(dash, 0, 0, "ME SCALP v2.4 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
+    table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
+
+    table.cell(dash, 0, 1, "", text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 1, "BUY",  text_color=grn, text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 2, 1, "SELL", text_color=red, text_size=size.tiny, bgcolor=color.rgb(12, 12, 18))
+
+    // Score against the bar this frequency demands — the gate that decides.
+    table.cell(dash, 0, 2, "Score (need " + str.tostring(needScore) + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 2, str.tostring(scoreBull) + "/5", text_color=scoreBull >= needScore ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 2, str.tostring(scoreBear) + "/5", text_color=scoreBear >= needScore ? red : dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Triggers now", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 3, anyBull ? bullName + " ×" + str.tostring(nTrigBull) : "—", text_color=anyBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 3, anyBear ? bearName + " ×" + str.tostring(nTrigBear) : "—", text_color=anyBear ? red : dim, text_size=size.tiny)
+
+    // If this says CHOP the engine is deliberately standing aside.
+    regTxt = inTrend ? (legUp ? "TREND ▲" : "TREND ▼") : "CHOP"
+    table.cell(dash, 0, 4, "Regime (ER≥" + str.tostring(erMin, "#.00") + ")", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 4, regTxt + "  " + str.tostring(math.round(effRatio, 2)), text_color=inTrend ? (legUp ? grn : red) : yel, text_size=size.tiny)
+    table.cell(dash, 2, 4, inTrend ? (i_align ? (legUp ? "longs only" : "shorts only") : "both") : "standing aside", text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Risk (× ATR)", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 5, str.tostring(math.round(riskBull / math.max(atr, 1e-9), 2)), text_color=riskOkBull ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 5, str.tostring(math.round(riskBear / math.max(atr, 1e-9), 2)), text_color=riskOkBear ? red : dim, text_size=size.tiny)
+
+    // v2.2: is the stop on the correct side of the invalidation level?
+    // NEGATIVE is correct — the stop sits beyond the level. POSITIVE means the
+    // stop is inside it and can be taken out while the setup is still valid,
+    // which is what v2.1's clamp did on 86% of 5m setups. Shown because v2.1
+    // gave no way to see it.
+    table.cell(dash, 0, 6, legacyClamp ? "Stop: CLAMP (v2.1)" : atrTargets ? "Stop: structure+ATR" : "Stop: structure+R", text_color=legacyClamp ? yel : dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    table.cell(dash, 1, 6, (intrudeBull > 0 ? "⚠ +" : "") + str.tostring(math.round(intrudeBull, 2)), text_color=intrudeBull > 0 ? yel : grn, text_size=size.tiny)
+    table.cell(dash, 2, 6, (intrudeBear > 0 ? "⚠ +" : "") + str.tostring(math.round(intrudeBear, 2)), text_color=intrudeBear > 0 ? yel : red, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Rel volume", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(12, 12, 18))
+    volTxt = volSeen ? str.tostring(math.round(relVol, 2)) + "×" : "no feed"
+    table.cell(dash, 1, 7, volTxt, text_color=relVol >= 1.15 ? grn : dim, text_size=size.tiny)
+    table.cell(dash, 2, 7, volTxt, text_color=relVol >= 1.15 ? red : dim, text_size=size.tiny)
+
+    // trig 0 means no setup is FORMING and no gate is responsible; trig high
+    // with sig 0 means the score bar is not being met.
+    table.cell(dash, 0, 8, "Per 100 bars", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    ageTxt = na(lastTrigBar) ? "none yet" : str.tostring(bar_index - lastTrigBar) + "b ago"
+    table.cell(dash, 1, 8, "trig " + str.tostring(int(trig100)) + "  sig " + str.tostring(int(sig100)), text_color=trig100 == 0 ? red : sig100 > 0 ? grn : yel, text_size=size.tiny)
+    table.cell(dash, 2, 8, ageTxt, text_color=dim, text_size=size.tiny)
+
+    table.cell(dash, 0, 9, "Open trade", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    openTxt = inTrade ? (tradeBuy ? "LONG " : "SHORT ") + eName + "  " + str.tostring(bar_index - eBar) + "b" + (eTp1Done ? "  TP1✓ BE" : "") : "flat"
+    table.cell(dash, 1, 9, openTxt, text_color=inTrade ? (tradeBuy ? grn : red) : dim, text_size=size.tiny)
+    table.cell(dash, 2, 9, inTrade and i_timeStop > 0 ? "stop in " + str.tostring(math.max(i_timeStop - (bar_index - eBar), 0)) + "b" : "", text_color=dim, text_size=size.tiny)
+
+    // v2.3 THE ROW THIS VERSION EXISTS FOR. Through v2.2 the chart could not
+    // say TP1 had been hit, so a reach of 59% looked like 19%. This counts it
+    // on your own symbol, which beats trusting my generator.
+    table.cell(dash, 0, 11, "TP1 reach", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    tp1Txt = nTrades > 0 ? str.tostring(math.round(100.0 * nTp1 / nTrades)) + "%  (" + str.tostring(nTp1) + "/" + str.tostring(nTrades) + ")" : "—"
+    table.cell(dash, 1, 11, tp1Txt, text_color=nTrades == 0 ? dim : (nTp1 * 2 >= nTrades ? grn : yel), text_size=size.tiny)
+    table.cell(dash, 2, 11, "pad " + str.tostring(i_slBuf + i_structPad, "#.##") + " / MSS " + str.tostring(i_slBuf + i_structPad + i_breakPad, "#.##"), text_color=dim, text_size=size.tiny)
+
+    // v2.4 THE ROW THIS VERSION EXISTS FOR. If "band" reads ✕ the deviation
+    // bands are too narrow to be levels right now — which is the state that was
+    // producing a third of the 15m trades before this release gated it.
+    table.cell(dash, 0, 12, "Confirm / band", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 12, i_confirm, text_color=cfOn ? grn : yel, text_size=size.tiny)
+    table.cell(dash, 2, 12, "band " + str.tostring(math.round(bandW / math.max(atr, 1e-9), 2)) + (bandOk ? " ATR ✓" : " ATR ✕"), text_color=bandOk ? dim : yel, text_size=size.tiny)
+
+    table.cell(dash, 0, 10, "Since load", text_color=dim, text_size=size.tiny, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    wr = nWin + nLoss > 0 ? 100.0 * nWin / (nWin + nLoss) : 0.0
+    table.cell(dash, 1, 10, str.tostring(nTrades) + " trades", text_color=wht, text_size=size.tiny)
+    table.cell(dash, 2, 10, nWin + nLoss > 0 ? str.tostring(math.round(wr, 1)) + "% win" : "—", text_color=wr >= 50 ? grn : dim, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+if buySignal and not inTrade[1]
+    alert("ME Scalp BUY " + bullName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBull, format.mintick) + " | TP1 " + str.tostring(buyTp1, format.mintick) + " | TP2 " + str.tostring(buyTp2, format.mintick) + " | TP3 " + str.tostring(buyTp3, format.mintick) + " | score " + str.tostring(scoreBull) + "/5", alert.freq_once_per_bar_close)
+if sellSignal and not inTrade[1]
+    alert("ME Scalp SELL " + bearName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBear, format.mintick) + " | TP1 " + str.tostring(sellTp1, format.mintick) + " | TP2 " + str.tostring(sellTp2, format.mintick) + " | TP3 " + str.tostring(sellTp3, format.mintick) + " | score " + str.tostring(scoreBear) + "/5", alert.freq_once_per_bar_close)
+
+
+alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
+alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
