@@ -113,7 +113,7 @@ def run(tf_min, inval_mode="bar", entry_mode="close", look=5, pend=4,
         sl_buf=0.20, struct_pad=0.25, fade_pad=None, min_risk=0.40,
         struct_max=4.0, tp_r=(0.8, 1.4, 2.0), tstop=12, cooldown=3,
         er_min=0.32, er_len=20, need=1, only=None, drop=(), band_w=0.0,
-        confirm_only=None, pad_by=None, score_bar="trigger"):
+        confirm_only=None, pad_by=None, score_bar="trigger", align=True, snap=True, loc=True):
     """One pass over every seed at one timeframe.
 
     fade_pad     when set, replaces struct_pad for the fade family only
@@ -149,7 +149,7 @@ def run(tf_min, inval_mode="bar", entry_mode="close", look=5, pend=4,
                     cand = [x for x in cand if x[0] not in drop]
                 if not cand:
                     continue
-                if (c[i] > c[i - er_len]) != is_buy:      # i_align
+                if align and (c[i] > c[i - er_len]) != is_buy:
                     continue
                 if (c[i] > o[i]) != is_buy:               # bar agrees
                     continue
@@ -170,10 +170,11 @@ def run(tf_min, inval_mode="bar", entry_mode="close", look=5, pend=4,
                 if sbody >= A * 0.45: score += 1
                 if (scp >= 0.65) if is_buy else (scp <= 0.35): score += 1
                 if len(cand) >= 2: score += 1
-                if name == "band2": score += 1
-                elif name != "band":
-                    if (c[si] <= D["l1"][si] * 1.002) if is_buy else (c[si] >= D["u1"][si] * 0.998):
-                        score += 1
+                if loc:
+                    if name == "band2": score += 1
+                    elif name != "band":
+                        if (c[si] <= D["l1"][si] * 1.002) if is_buy else (c[si] >= D["u1"][si] * 0.998):
+                            score += 1
                 if score < need:
                     continue
 
@@ -249,7 +250,7 @@ def run(tf_min, inval_mode="bar", entry_mode="close", look=5, pend=4,
                 tps = []
                 for s_, rmul in enumerate(tp_r):
                     t = ent + d * A * rmul
-                    if s_ == 0:
+                    if s_ == 0 and snap:
                         near = [x for x in ((D["u1"][i] if is_buy else D["l1"][i]),
                                             D["vw"][i], D["POC"][i])
                                 if x is not None and (x > ent) == is_buy
