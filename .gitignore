@@ -1,0 +1,17 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Ruflo runtime state (generated locally, not source)
+.claude-flow/
+.ruflo/
+.swarm/
+.hive-mind/
+memory/
+*.db
+*.db-journal
+
+# Local overrides / secrets
+.env
+.env.*
+.claude/settings.local.json
