@@ -1,161 +1,211 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0
 // © ME Institutional — ME Scalp v3.1
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// WHAT THIS FILE IS
-// ═══════════════════════════════════════════════════════════════════════════════
-// v3.1 is v3.0 with three confirmed defects repaired and four additions. The
-// signal logic — efficiency-ratio regime gate, three triggers (MSS / FVG / sweep),
-// a structural stop beyond each setup's own invalidation, fixed-ATR targets — is
-// v3.0's and is unchanged except where a fix or a filter is named below.
+// ══ WHAT THIS FILE IS ═════════════════════════════════════════════════════════
+// v3.1 is v3.0 with the three assigned defects fixed, ten further findings from
+// an independent audit addressed, and four additions. The engine — an
+// efficiency-ratio regime gate, three triggers (MSS / FVG / sweep), a structural
+// stop beyond each setup's own invalidation, fixed-ATR targets — is v3.0's.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// PROVENANCE OF THE NUMBERS: THERE ARE NONE
-// ═══════════════════════════════════════════════════════════════════════════════
+// ══ PROVENANCE OF THE NUMBERS: THERE ARE NONE ═════════════════════════════════
 // v3.0's documentation header — the measurement tables and the v2.5 → v3.0
-// deletion rationale — is not present in this repository copy. It was trimmed at
-// commit time for repository size, not because it was superseded. v3.1 therefore
-// inherits no measured figures and states none of its own.
-//
-// Nothing in this file has been backtested. It was written in an environment with
-// no market data and no backtest harness, so every hit-rate, expectancy or
-// win-rate table you might expect to find here is absent because the only way to
-// supply one would have been to invent it.
+// deletion rationale — is not in this repository copy. It was trimmed at commit
+// time for size, not superseded. v3.1 inherits no measured figures and states
+// none of its own. Nothing here has been backtested: this file was written in an
+// environment with no market data and no backtest harness, so every hit-rate or
+// expectancy table you might look for is absent because the only way to supply
+// one would have been to invent it.
 //
 // NOT MEASURED, and not guessed at anywhere below:
 //   · signal frequency, on any symbol or timeframe
 //   · hit rate, expectancy, drawdown, or any risk-adjusted figure
-//   · the effect of each of the three fixes on the recorded outcome mix
-//   · how many signals either new filter removes, and whether the ones it
-//     removes were the losing ones
+//   · the effect of any fix below on the recorded outcome mix
+//   · how many signals either new filter removes, or whether the removed ones
+//     were the losing ones
 //   · whether this makes money on XAUUSD at your broker
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// UNCOMPILED
-// ═══════════════════════════════════════════════════════════════════════════════
+// ══ UNCOMPILED ════════════════════════════════════════════════════════════════
 // This file has never been through the Pine compiler. It was verified by reading
-// only. Paste it into TradingView's Pine editor and compile it before trusting a
-// single line. Treat any statement here about behaviour as a claim about intent,
-// not a verified observation.
+// only. Paste it into TradingView's editor and compile it before trusting a line
+// of it. Every statement below is a claim about intent, not an observation.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// FIX 1 — TP3 is now tested after the stop, like TP1 and TP2
-// ═══════════════════════════════════════════════════════════════════════════════
-// v3.0 line: `tpHit := tradeBuy ? high >= eT3 : low <= eT3` — no `and not slHit`,
-// unlike the TP1 and TP2 branches immediately above it. A bar whose range spanned
-// both the stop and TP3 was therefore recorded as a TP3 win, contradicting the
-// file's own rule that the stop is tested first. Now guarded identically.
-// CONSEQUENCE, unmeasured: some plans that v3.0 recorded as TP3 will now record
-// as SL or BE. The recorded outcome mix will be worse, and more nearly true. Bars
-// that span stop and target are exactly where bar-resolution accounting is blind,
-// and this fix resolves that ambiguity pessimistically on purpose. A trade already
-// at breakeven (TP1 taken) that spans BE and TP3 on one bar now records BE.
+// ══ v3.0's SIGNAL SET IS NOT PRESERVED ════════════════════════════════════════
+// Read this before comparing charts. Fix F1 changes which bars the FVG rule
+// enters on — it was entering on the gap's formation bar, not on a retest — so
+// the FVG signal population is materially different from v3.0's, at default
+// settings, with no input changed. Any figure ever attached to v3.0's FVG rule
+// describes the formation-bar entry and does not carry over. It is withdrawn
+// here rather than reused. The MSS and sweep rules are untouched.
+// The two new filters are OFF by default and change nothing until switched on.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// FIX 2 — the dashboard reports the whole outcome mix, not one ambiguous %
-// ═══════════════════════════════════════════════════════════════════════════════
-// v3.0 printed `nWin / (nWin + nLoss)`. That denominator excluded every TIME exit,
-// so the figure was a percentage of a subset of trades while being labelled "win".
-// It also counted a breakeven stop-out as a win. Both are gone. The dashboard now
-// prints four counters — TP3 / BE / SL / TIME — that sum to the number of closed
-// plans, plus each as a percentage of that same stated denominator. No single
-// number is offered in their place, because no single number was honest.
-// WHAT THESE COUNTERS ARE NOT: they are not a backtest. They are counted at
-// bar-close resolution over whatever history your chart has loaded, they reset
-// when the chart reloads, and they include no spread, commission, slippage or
-// partial fill. They also do not model scaling out in thirds: a plan is recorded
-// by the furthest level it reached, so the mix is a reach profile, not an equity
-// curve. Do not sum it into a P&L.
+// ══ DEFECTS FIXED ═════════════════════════════════════════════════════════════
+// D1  TP3 was evaluated without `and not slHit`, unlike TP1 and TP2, so a bar
+//     spanning both stop and TP3 scored as a win — against the file's own rule
+//     that the stop is tested first. Now guarded identically. CONSEQUENCE: plans
+//     v3.0 recorded as TP3 may now record as SL or BE. The mix gets worse and
+//     more nearly true. Bar-resolution accounting is blind inside the bar; this
+//     resolves the ambiguity pessimistically on purpose. A plan already at
+//     breakeven that spans BE and TP3 in one bar now records BE.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// FIX 3 — the dead lower risk bound is gone; a real check replaces it
-// ═══════════════════════════════════════════════════════════════════════════════
-// v3.0 tested `riskBull >= atr * MIN_RISK * 0.5`. The stop construction on the
-// line above already floors risk at `atr * MIN_RISK + pad`, so the test could
-// never be false — it was decoration. Removed; the remaining test is the maximum
-// risk cap, which can and does bind. The floor is now stated as a comment where it
-// is actually created.
-// Reading that dead code surfaced the thing it should have been checking. The stop
-// is structural and the targets are ATR-fixed, so the R multiple of each target is
-// not a constant — it falls as the structural stop widens. At the risk cap
-// (4.00 × ATR) TP3 at the default 2.0 × ATR is 0.50R: a target worth half what the
-// stop risks. v3.1 adds an optional minimum TP3:risk filter for that case. It is
-// OFF by default (0 = off) so that v3.1 with default inputs takes the same signals
-// v3.0 would have taken, minus nothing. NOT MEASURED: how many signals any given
-// setting removes, or whether removing them helps.
+// D2  The dashboard printed nWin/(nWin+nLoss). That denominator dropped every
+//     TIME exit, so it was a percentage over a subset while labelled "win"; it
+//     also counted a breakeven stop-out as a win. Replaced by four mutually
+//     exclusive counters — TP3 / BE / SL / TIME — that sum to the number of
+//     closed plans, printed with that denominator stated on the row. No single
+//     number replaces it, because no single number was honest.
+//     WHAT THE COUNTERS ARE NOT: not a backtest. Counted at bar-close resolution
+//     over whatever history the chart loaded, reset on reload, with no spread,
+//     commission, slippage or partial fill. They do not model scaling out in
+//     thirds: a plan is recorded by the furthest level it reached, so this is a
+//     reach profile, not an equity curve. Do not sum it into a P&L.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// ADDITION 1 — R multiples are visible (dashboard and chart labels)
-// ═══════════════════════════════════════════════════════════════════════════════
-// Justified because it is the fix for the invisible problem Fix 3 found: with a
-// structural stop and ATR targets, the user could read "TP3 = 2.0 × ATR" off the
-// input panel and had no way to see that on this particular bar it is 0.7R. The
-// dashboard shows the live R of TP1/TP2/TP3 for a hypothetical entry at the
-// current close, and the frozen R of the open plan. The chart labels keep every
-// price they showed in v3.0 and append the R beside it — nothing shown in v3.0 was
-// removed or replaced. R is computed as (target − entry) / (entry − stop): a
-// definition, not an estimate.
+// D3  `riskOk`'s lower bound could never be false — the stop construction floors
+//     risk at atr*MIN_RISK + pad, above the threshold it tested. Deleted; the
+//     remaining test is the maximum-risk cap, which does bind.
+//     Reading that dead code surfaced what it should have been checking. The
+//     stop is structural and the targets are ATR-fixed, so a target's R is not a
+//     constant: it falls as the stop widens. At the cap (4.00 × ATR) a TP3 of
+//     2.0 × ATR is 0.50R — a target worth half what the stop risks. v3.1 adds an
+//     optional minimum TP3:risk filter, OFF by default, and makes R visible
+//     (ADDITION 1) so the case is legible without the filter.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// ADDITION 2 — session filter (input, OFF by default)
-// ═══════════════════════════════════════════════════════════════════════════════
-// Gold's intraday behaviour differs between the Asian session and London/NY, so a
-// user may want the engine to stand aside outside chosen hours. Off by default:
-// with default inputs the session gate is a no-op and v3.0's signal set is intact.
-// Scope: it gates ENTRIES only. A plan opened inside the session is managed to its
-// stop, target or time stop wherever that falls — closing a live plan because the
-// clock rolled over would be worse than the problem.
-// NOT MEASURED: which sessions are better for this engine on gold. The filter is
-// a control, not a recommendation, and the default window in the input is a
-// placeholder, not a finding.
+// The following were found by an independent read of v3.0 and are numbered as
+// that audit numbered them.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// ADDITION 3 — higher-timeframe agreement (input, OFF by default)
-// ═══════════════════════════════════════════════════════════════════════════════
-// Non-repainting by construction, which is the only reason it is here at all:
-//   · request.security(..., lookahead=barmerge.lookahead_off)
-//   · the expression returns b[1] — the value of the PREVIOUS, closed HTF bar
-// Both together. lookahead_off alone still lets the in-progress HTF bar leak into
-// history on a realtime chart; the [1] offset is what makes the value the same on
-// a replayed bar as it was live. The cost of that guarantee is stated plainly: the
-// HTF bias you see is one full higher-timeframe bar stale, always, by design. If
-// that staleness is unacceptable, leave this off rather than removing the offset.
-// If the HTF series is unavailable (insufficient history, bad timeframe), the
-// filter returns na and is treated as "no opinion" — it passes rather than
-// silently blocking every signal.
-// NOT MEASURED: whether HTF agreement improves anything here.
+// F1  HIGH. "FVG retest" fired on the gap's own formation bar. The push and the
+//     trigger loop run in the same `if conf` pass, and the push sets
+//     gapBullTop := low, so the loop's first test is `low <= low` — always true.
+//     `close >= gapBullBot` was true by the formation condition. The loop runs
+//     newest-first with `break`, so the just-born gap always won over a genuine
+//     older retest. The rule was a breakout-chase entering at the impulse bar's
+//     extreme, and it took its invalidation from high[2] — the far side of that
+//     impulse — producing an abnormally wide stop. One breakout bar could also
+//     satisfy MSS and FVG at once, so the "two independent confirmations" score
+//     component was satisfied by one bar counted twice.
+//     FIX: a gap must be at least FVG_MIN_AGE bars old to be retested. This is
+//     the change that makes the v3.0 FVG numbers non-transferable.
+//     NOT MEASURED: how many signals this removes, or how the survivors behave.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// ADDITION 4 — alert payloads carry the trigger name and the computed R
-// ═══════════════════════════════════════════════════════════════════════════════
-// The v3.0 alert already named the trigger; v3.1 adds the trigger count, the risk
-// in price, and each target's R, so an alert can be acted on or filtered without
-// re-deriving anything from the chart. LIMITATION: the two `alertcondition` legs
-// carry static text — Pine does not permit a dynamic message there — so only the
-// `alert()` calls carry the detail. Use those.
+// F2  MEDIUM-HIGH. The drawn stop line repainted its whole history at breakeven.
+//     `lnSl` is one segment; moving to BE set both endpoints, so the red stop
+//     jumped to entry across every bar back to the entry bar and the chart then
+//     showed price trading through the drawn stop with the plan still open.
+//     FIX: the original stop segment is frozen at the TP1 bar and a second,
+//     amber segment starts there at entry. The stop is now stepped, and where it
+//     actually sat is preserved. The BE label keeps the original stop price in
+//     parentheses so that number is not lost from the chart.
+//     The evaluation order is unchanged and is correct: slHit is computed
+//     against the old stop, then BE is applied, so BE takes effect from the next
+//     bar. Only the drawing lied.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// DELIBERATELY NOT DONE
-// ═══════════════════════════════════════════════════════════════════════════════
-// · No new trigger, no new score component, no new confluence layer. v3.0's point
-//   was deleting two thirds of v2.5; adding logic back without a way to measure it
+// F3  MEDIUM. The two `alertcondition` legs were gated on bare buySignal /
+//     sellSignal while plotshape and alert() were gated on `not inTrade[1]`, so
+//     an alert could tell the user to enter a trade the indicator itself did not
+//     take and drew nothing for. FIX: one pair of gates, `firedBuy`/`firedSell`,
+//     used by all three paths.
+//
+// F4  MEDIUM. "TP1 / TP2 reach" divided by trades OPENED, so an open plan sat in
+//     the denominator with no chance of having reached anything — the metric
+//     moved on entry, the one event carrying no information about reach. FIX:
+//     reaches are tallied when a plan closes, over the closed-plan denominator,
+//     which is stated on the row.
+//
+// F5  MEDIUM. A plan cannot close and another open on the same bar (`fired`
+//     reads inTrade before the close is applied). That is kept — changing it
+//     alters the signal population in a way that cannot be measured here — but
+//     the discarded signal used to leave no trace at all. It still does not
+//     enter, and it still does not start the cooldown; it is now counted, and
+//     the dashboard shows how many signals the one-plan-at-a-time rule has
+//     swallowed. Making the policy visible is not the same as endorsing it.
+//
+// F6  LOW-MED. On a feed with no volume — several XAUUSD spot feeds — relVol is
+//     pinned to 1.0, the participation component is permanently 0 and the score
+//     is out of 3, while the panel read "of 4" and a required score of 4 could
+//     never be met with no indication why. FIX: the dashboard prints the
+//     attainable maximum, says "no volume feed", and turns the row amber when
+//     the required score exceeds what this feed can produce. The scoring logic
+//     is untouched — awarding the point for absent data would be worse.
+//
+// F7  LOW. The FVG trigger's `close >= gapBullBot` clause was tautological: the
+//     mitigation sweep earlier in the same `if conf` pass had already removed
+//     every gap failing it, against the same close. Deleted, both sides. The
+//     proof is in the comment at the sweep, so a reader can check it. This
+//     leaves the FVG rule visibly resting on fewer conditions than it read as
+//     having, which is the honest picture.
+//
+// F8  LOW. bullName/bullInval fall through to "SWEEP"/low when no trigger fired,
+//     so the Risk row printed a concrete, green number for a hypothetical sweep
+//     entry on every bar. FIX: the Risk and R rows print "—" with no trigger,
+//     like the Trigger row above them always did.
+//
+// F9  LOW. "Keep completed plans on the chart" deleted the old plan when the
+//     NEXT one opened, not at completion, so with it off a finished plan stayed
+//     on screen indefinitely at the right edge. The behaviour is the useful one
+//     — deleting at completion would erase the outcome label with it — so the
+//     input is reworded to say what it does rather than the code changed to
+//     match a wrong label.
+//
+// F10 LOW. `BE_AFTER_1 = true` was a compile-time constant guarding an
+//     unconditional branch. Constant and branch removed; breakeven after TP1 is
+//     stated as unconditional, which is what it was. tp1Bar/tp2Bar are now reset
+//     on entry instead of carrying across plans.
+//
+// ══ ADDITIONS ═════════════════════════════════════════════════════════════════
+// A1  R multiples visible, on the dashboard and in the chart labels. This is the
+//     fix for the invisible problem D3 found: the user could read "TP3 = 2.0 ×
+//     ATR" off the input panel with no way to see that on this bar it is 0.7R.
+//     The dashboard shows the live R of TP1/2/3 for a hypothetical entry at the
+//     current close, and the frozen R of the open plan. Labels keep every price
+//     v3.0 showed and append R beside it — nothing legible was removed to make
+//     room. R = (target − entry) / (entry − stop): a definition, not an estimate.
+//
+// A2  Session filter, input, OFF by default. Gold behaves differently in the
+//     Asian session than in London/NY, so a user may want to stand aside outside
+//     chosen hours. It gates ENTRIES only — a plan opened in session is managed
+//     to its stop, target or time stop wherever that falls, because closing a
+//     live plan because the clock rolled over would be worse than the problem.
+//     NOT MEASURED: which sessions suit this engine. The default window in the
+//     input is a placeholder, not a finding.
+//
+// A3  Higher-timeframe agreement, input, OFF by default. Non-repainting by
+//     construction, which is the only reason it is here:
+//       · request.security(..., lookahead=barmerge.lookahead_off)
+//       · the expression returns b[1] — the PREVIOUS, closed HTF bar
+//     Both, together. lookahead_off alone still lets the in-progress HTF bar
+//     leak into history on a realtime chart; the [1] is what makes a replayed
+//     bar agree with what was live. The price of that guarantee, stated plainly:
+//     the HTF bias is one full higher-timeframe bar stale, always, by design. If
+//     that is unacceptable, leave this off rather than remove the offset. If the
+//     HTF series is unavailable the filter reads na and passes rather than
+//     silently blocking every signal; the dashboard says so when it happens.
+//     NOT MEASURED: whether HTF agreement improves anything here.
+//
+// A4  Alert payloads carry the trigger name, the trigger count, the risk in
+//     price and each target's R, so an alert can be acted on or filtered without
+//     re-deriving anything. LIMITATION: `alertcondition` messages must be static
+//     text in Pine, so only the `alert()` calls carry the detail. Use those.
+//
+// ══ DELIBERATELY NOT DONE ═════════════════════════════════════════════════════
+// · No new trigger, score component or confluence layer. v3.0's point was
+//   deleting two thirds of v2.5; adding logic back with no way to measure it
 //   would undo that for nothing.
 // · No intrabar resolution (request.security_lower_tf) for the stop-vs-target
-//   ambiguity Fix 1 papers over pessimistically. It is the correct fix, it is not
-//   free at runtime, and it cannot be validated here.
-// · No default was changed. v3.1 with default inputs takes v3.0's signals.
+//   ambiguity D1 resolves pessimistically. That is the real fix, it is not free
+//   at runtime, and it cannot be validated here.
+// · Re-arming on a plan's exit bar (F5). It would change the signal population;
+//   it is counted and displayed instead of silently changed.
+// · No default was changed. Every behavioural difference from v3.0 is a defect
+//   fix, and F1 is the one that moves signals.
 //
-// ═══════════════════════════════════════════════════════════════════════════════
-// KNOWN LIMITS CARRIED OVER FROM v3.0, unchanged
-// ═══════════════════════════════════════════════════════════════════════════════
-// · One plan at a time; a signal on a bar where a plan is already open is ignored,
-//   including the bar on which the previous plan closes.
-// · Nothing is evaluated on the entry bar itself (`bar_index > eBar`), so a plan
-//   that would have hit its stop or a target on its own bar records neither.
-// · Within one bar the order stop → TP1 → TP2 → TP3 → time is an assumption, not
-//   an observation. The real sequence inside the bar is unknown to this script.
-// · `volume` is absent on many spot-gold feeds; the participation score component
-//   falls back to neutral (1.0) rather than failing.
+// ══ KNOWN LIMITS CARRIED OVER FROM v3.0 ═══════════════════════════════════════
+// · One plan at a time; a signal on a bar where a plan is open is discarded,
+//   including the bar the previous plan closes on (F5).
+// · Nothing is evaluated on the entry bar (`bar_index > eBar`). Entry is at that
+//   bar's close, so there is no exposure left on it to test.
+// · Within one bar the order stop → TP1 → TP2 → TP3 → time is an assumption.
+//   The real sequence inside the bar is unknown to this script.
+// · Signals require barstate.isconfirmed, so nothing appears and then vanishes
+//   intrabar — but a signal is only known at the bar's close.
 //
 //@version=6
 indicator("ME Scalp v3.1", shorttitle="ME Scalp v3.1", overlay=true, max_lines_count=500, max_labels_count=500, max_bars_back=500)
@@ -164,30 +214,28 @@ indicator("ME Scalp v3.1", shorttitle="ME Scalp v3.1", overlay=true, max_lines_c
 // INPUTS
 // ═══════════════════════════════════════════════════════════════════════════════
 var string G_ENG  = "══ Engine ══"
-var string G_FILT = "══ Filters (all off by default) ══"
+var string G_FILT = "══ Filters (both off by default) ══"
 var string G_TRIG = "══ Triggers ══"
 var string G_RISK = "══ Risk & Targets ══"
 var string G_DISP = "══ Display ══"
 
-i_freq = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"], group=G_ENG)
-i_dir  = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
+i_freq  = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"], group=G_ENG)
+i_dir   = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
 i_erLen = input.int(30, "Regime Lookback (bars)", minval=5, maxval=100, group=G_ENG)
-i_score = input.int(1, "Quality Score Required (of 4)", minval=0, maxval=4, group=G_ENG)
+i_score = input.int(1, "Quality Score Required (of 4 — max 3 on feeds with no volume)", minval=0, maxval=4, group=G_ENG)
 
-// Session gate — entries only. Default off; the window below is a placeholder,
-// not a measured recommendation.
+// A2 — entries only. The default window is a placeholder, not a recommendation.
 i_useSess = input.bool(false, "Restrict entries to a session", group=G_FILT)
 i_sess    = input.session("0800-1700", "Session window", group=G_FILT)
 i_tz      = input.string("Exchange", "Session timezone", options=["Exchange", "UTC", "America/New_York", "Europe/London", "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney"], group=G_FILT)
 
-// Higher-timeframe agreement — non-repainting (lookahead_off + previous closed
-// HTF bar). The value is one HTF bar stale by design; see header ADDITION 3.
+// A3 — non-repainting HTF bias; one HTF bar stale by design.
 i_useHtf = input.bool(false, "Require higher-timeframe agreement", group=G_FILT)
 i_htfTf  = input.timeframe("60", "Higher timeframe", group=G_FILT)
 i_htfLen = input.int(50, "HTF EMA length", minval=2, maxval=400, group=G_FILT)
 
 i_useMss   = input.bool(true, "MSS — break of the last pivot", group=G_TRIG)
-i_useFvg   = input.bool(true, "FVG retest", group=G_TRIG)
+i_useFvg   = input.bool(true, "FVG retest (gap must be ≥1 bar old — see F1)", group=G_TRIG)
 i_useSweep = input.bool(true, "Liquidity sweep + reclaim", group=G_TRIG)
 
 i_pad      = input.float(0.45, "Stop Clearance Beyond Invalidation (× ATR)", minval=0.0, maxval=2.0, step=0.05, group=G_RISK)
@@ -200,7 +248,9 @@ i_timeStop = input.int(12, "Time Stop (bars, 0 = off)", minval=0, maxval=200, gr
 
 i_dash = input.bool(true, "Show dashboard", group=G_DISP)
 i_font = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal", "Large"], group=G_DISP)
-i_keep = input.bool(true, "Keep completed plans on the chart", group=G_DISP)
+// F9 — reworded to match what the code does: the old plan is cleared when the
+// next one opens, not at completion, so the outcome label survives to be read.
+i_keep = input.bool(true, "Keep older plans on the chart (off = show only the latest)", group=G_DISP)
 
 fBody = i_font == "Large" ? size.large : i_font == "Normal" ? size.normal : i_font == "Small" ? size.small : size.tiny
 fHead = i_font == "Large" ? size.huge : i_font == "Normal" ? size.large : i_font == "Small" ? size.normal : size.small
@@ -209,10 +259,10 @@ erMin      = i_freq == "High" ? 0.25 : i_freq == "Standard" ? 0.32 : 0.40
 allowLong  = i_dir != "Short only"
 allowShort = i_dir != "Long only"
 
-MIN_RISK   = 0.40
-MAX_RISK   = 4.00
-COOLDOWN   = 3
-BE_AFTER_1 = true
+MIN_RISK    = 0.40
+MAX_RISK    = 4.00
+COOLDOWN    = 3
+FVG_MIN_AGE = 1     // F1: a gap can only be RETESTED on a bar after it formed.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE SERIES
@@ -223,6 +273,9 @@ closePos = (close - low) / range_
 body     = math.abs(close - open)
 conf     = barstate.isconfirmed
 
+// F6: on a feed that never reports volume this latch stays false, relVol is
+// pinned to 1.0, and the participation point can never be earned. The logic is
+// left alone; the dashboard reports the reduced maximum instead.
 var bool volSeen = false
 if nz(volume) > 0
     volSeen := true
@@ -241,9 +294,8 @@ inTrend  = effRatio >= erMin
 sessTz = i_tz == "Exchange" ? syminfo.timezone : i_tz
 inSess = not i_useSess or not na(time(timeframe.period, i_sess, sessTz))
 
-// Returns the PREVIOUS closed HTF bar's bias. The [1] here, together with
-// lookahead_off at the call site, is what makes this non-repainting. Do not
-// remove either one.
+// Returns the PREVIOUS closed HTF bar's bias. The [1] here, with lookahead_off
+// at the call site, is what makes this non-repainting. Do not remove either.
 htfBias() =>
     e = ta.ema(close, i_htfLen)
     b = close > e ? 1.0 : close < e ? -1.0 : 0.0
@@ -251,6 +303,8 @@ htfBias() =>
 
 htfDir    = request.security(syminfo.tickerid, i_htfTf, htfBias(), lookahead=barmerge.lookahead_off)
 htfKnown  = not na(htfDir)
+// A close exactly on the HTF EMA reads 0.0 and passes BOTH sides — deliberately
+// permissive, so a flat higher timeframe abstains rather than blocking.
 htfOkBull = not i_useHtf or not htfKnown or htfDir >= 0.0
 htfOkBear = not i_useHtf or not htfKnown or htfDir <= 0.0
 
@@ -294,6 +348,11 @@ if conf
         array.push(gapBearTop, low[2])
         array.push(gapBearBot, high)
         array.push(gapBearBar, bar_index)
+    // Mitigation + expiry sweep. F7: this runs before the trigger loop below, on
+    // the same bar and the same `close`, and removes every bull gap with
+    // close < gapBullBot and every bear gap with close > gapBearTop. So every gap
+    // the trigger loop sees already satisfies those two conditions, which is why
+    // the trigger no longer re-tests them.
     if array.size(gapBullBar) > 0
         for k = array.size(gapBullBar) - 1 to 0
             if close < array.get(gapBullBot, k) or bar_index - array.get(gapBullBar, k) > 60
@@ -313,11 +372,15 @@ if conf
 mssBull = conf and i_useMss and not na(lastPH) and close >= lastPH + atr * 0.08 and close[1] < lastPH
 mssBear = conf and i_useMss and not na(lastPL) and close <= lastPL - atr * 0.08 and close[1] > lastPL
 
+// F1: `bar_index - gapBar >= FVG_MIN_AGE` is the whole fix. Without it the gap
+// pushed on THIS bar sets gapBullTop := low and the test below reads low <= low,
+// which is always true — the rule entered on the impulse bar, not on a retest.
+// F7: the `close >= gapBullBot` clause that stood here is gone; see the sweep.
 fvgBull = false
 float fvgBullInv = na
 if conf and i_useFvg and array.size(gapBullBar) > 0
     for k = array.size(gapBullBar) - 1 to 0
-        if low <= array.get(gapBullTop, k) and close >= array.get(gapBullBot, k) and closePos >= 0.55
+        if bar_index - array.get(gapBullBar, k) >= FVG_MIN_AGE and low <= array.get(gapBullTop, k) and closePos >= 0.55
             fvgBull := true
             fvgBullInv := array.get(gapBullBot, k)
             break
@@ -325,7 +388,7 @@ fvgBear = false
 float fvgBearInv = na
 if conf and i_useFvg and array.size(gapBearBar) > 0
     for k = array.size(gapBearBar) - 1 to 0
-        if high >= array.get(gapBearBot, k) and close <= array.get(gapBearTop, k) and closePos <= 0.45
+        if bar_index - array.get(gapBearBar, k) >= FVG_MIN_AGE and high >= array.get(gapBearBot, k) and closePos <= 0.45
             fvgBear := true
             fvgBearInv := array.get(gapBearTop, k)
             break
@@ -348,19 +411,20 @@ sPart  = relVol >= 1.15 ? 1 : 0
 sBody  = body >= atr * 0.45 ? 1 : 0
 scoreBull = sPart + sBody + (closePos >= 0.65 ? 1 : 0) + (nBull >= 2 ? 1 : 0)
 scoreBear = sPart + sBody + (closePos <= 0.35 ? 1 : 0) + (nBear >= 2 ? 1 : 0)
+scoreMax  = volSeen ? 4 : 3     // F6
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // THE STOP, THE TARGETS, AND THE R THAT FALLS OUT OF THEM
 // ═══════════════════════════════════════════════════════════════════════════════
 padBull = atr * (i_pad + (bullName == "MSS" ? i_breakPad : 0.0))
 padBear = atr * (i_pad + (bearName == "MSS" ? i_breakPad : 0.0))
-// math.min/max against close ∓ atr*MIN_RISK is the risk FLOOR. Risk can never be
-// below atr*MIN_RISK + pad, which is why v3.0's lower riskOk bound was dead code.
+// The math.min/max against close ∓ atr*MIN_RISK is the risk FLOOR. Risk can never
+// be below atr*MIN_RISK + pad, which is why D3's lower bound was dead code.
 slBull  = math.min(bullInval, close - atr * MIN_RISK) - padBull
 slBear  = math.max(bearInval, close + atr * MIN_RISK) + padBear
 riskBull = close - slBull
 riskBear = slBear - close
-// Only the cap can bind. The floor is enforced above by construction.
+// D3 — only the cap can bind; the floor is enforced above by construction.
 riskCapBull = riskBull <= atr * MAX_RISK
 riskCapBear = riskBear <= atr * MAX_RISK
 
@@ -371,8 +435,8 @@ sellTp1 = close - atr * i_tp1
 sellTp2 = close - atr * i_tp2
 sellTp3 = close - atr * i_tp3
 
-// R = (target − entry) / (entry − stop). The stop is structural and the targets
-// are ATR-fixed, so this is not a constant: it falls as the stop widens.
+// A1 — R = (target − entry) / (entry − stop). Not a constant: the stop is
+// structural and the targets are ATR-fixed, so R falls as the stop widens.
 r1Bull = riskBull > 0 ? (buyTp1 - close) / riskBull : 0.0
 r2Bull = riskBull > 0 ? (buyTp2 - close) / riskBull : 0.0
 r3Bull = riskBull > 0 ? (buyTp3 - close) / riskBull : 0.0
@@ -380,7 +444,7 @@ r1Bear = riskBear > 0 ? (close - sellTp1) / riskBear : 0.0
 r2Bear = riskBear > 0 ? (close - sellTp2) / riskBear : 0.0
 r3Bear = riskBear > 0 ? (close - sellTp3) / riskBear : 0.0
 
-// The check that replaces the dead one. Off by default (i_minR = 0).
+// D3 — the meaningful check that replaces the dead one. Off by default.
 minROkBull = i_minR <= 0.0 or r3Bull >= i_minR
 minROkBear = i_minR <= 0.0 or r3Bear >= i_minR
 
@@ -399,6 +463,7 @@ var bool   inTrade  = false
 var bool   tradeBuy = false
 var float  eEntry   = na
 var float  eSl      = na
+var float  eSl0     = na    // F2: the stop as first placed, kept after BE.
 var float  eT1      = na
 var float  eT2      = na
 var float  eT3      = na
@@ -411,34 +476,48 @@ var bool   eTp1     = false
 var bool   eTp2     = false
 var string eName    = ""
 var int    nTrades  = 0
+// F4 — reach counters are tallied at CLOSE, over the closed-plan denominator.
 var int    nTp1     = 0
 var int    nTp2     = 0
-// Outcome counters. These four are mutually exclusive, they sum to the number of
-// CLOSED plans, and that sum is the denominator the dashboard prints. Fix 2.
+// D2 — mutually exclusive; these four sum to the number of closed plans.
 var int    nTp3     = 0
 var int    nBE      = 0
 var int    nSL      = 0
 var int    nTime    = 0
+// F5 — signals discarded because a plan was already open. Counted, not taken.
+var int    nSupp    = 0
 var int    tp1Bar   = na
 var int    tp2Bar   = na
 
-fired = (buySignal or sellSignal) and not inTrade
+// F3 — one pair of gates for plotshape, alert() and alertcondition alike.
+// `inTrade` is read here before the block below can change it, so these equal
+// v3.0's `not inTrade[1]`.
+firedBuy      = buySignal  and not inTrade
+firedSell     = sellSignal and not inTrade
+fired         = firedBuy or firedSell
+suppressedNow = (buySignal or sellSignal) and inTrade
+if suppressedNow
+    nSupp := nSupp + 1
+
 if fired
     inTrade  := true
-    tradeBuy := buySignal
+    tradeBuy := firedBuy
     eEntry   := close
-    eSl      := buySignal ? slBull : slBear
-    eT1      := buySignal ? buyTp1 : sellTp1
-    eT2      := buySignal ? buyTp2 : sellTp2
-    eT3      := buySignal ? buyTp3 : sellTp3
-    eRisk    := buySignal ? riskBull : riskBear
-    eR1      := buySignal ? r1Bull : r1Bear
-    eR2      := buySignal ? r2Bull : r2Bear
-    eR3      := buySignal ? r3Bull : r3Bear
+    eSl      := firedBuy ? slBull : slBear
+    eSl0     := eSl
+    eT1      := firedBuy ? buyTp1 : sellTp1
+    eT2      := firedBuy ? buyTp2 : sellTp2
+    eT3      := firedBuy ? buyTp3 : sellTp3
+    eRisk    := firedBuy ? riskBull : riskBear
+    eR1      := firedBuy ? r1Bull : r1Bear
+    eR2      := firedBuy ? r2Bull : r2Bear
+    eR3      := firedBuy ? r3Bull : r3Bear
     eBar     := bar_index
     eTp1     := false
     eTp2     := false
-    eName    := buySignal ? bullName : bearName
+    tp1Bar   := na          // F10 — no longer carried across plans.
+    tp2Bar   := na
+    eName    := firedBuy ? bullName : bearName
     lastSigBar := bar_index
     nTrades  := nTrades + 1
 
@@ -453,16 +532,16 @@ if inTrade and conf and bar_index > eBar
         if t1 and not slHit
             eTp1   := true
             tp1Bar := bar_index
-            nTp1   := nTp1 + 1
-            if BE_AFTER_1
-                eSl := eEntry
+            // F10 — breakeven after TP1 is unconditional; the constant that
+            // guarded this was always true. It takes effect from the NEXT bar,
+            // because slHit above was already computed against the old stop.
+            eSl := eEntry
     if not eTp2
         bool t2 = tradeBuy ? high >= eT2 : low <= eT2
         if t2 and not slHit
             eTp2   := true
             tp2Bar := bar_index
-            nTp2   := nTp2 + 1
-    // FIX 1: `and not slHit`, matching TP1 and TP2. A bar spanning both the stop
+    // D1 — `and not slHit`, matching TP1 and TP2. A bar spanning both the stop
     // and TP3 now resolves to the stop, not to a win.
     tpHit  := (tradeBuy ? high >= eT3 : low <= eT3) and not slHit
     timeUp := i_timeStop > 0 and (bar_index - eBar) >= i_timeStop
@@ -473,7 +552,11 @@ legTxt   = eTp2 ? "TP2 ✓ " : eTp1 ? "TP1 ✓ " : ""
 closeTxt = slHit ? (eTp1 ? legTxt + "→ BE" : "SL ✕") : tpHit ? "TP3 ✓" : legTxt + "TIME"
 closeCol = slHit and eTp1 ? color.new(#FFC400, 0) : slHit ? color.new(#FF1744, 0) : tpHit ? color.new(#00E676, 0) : color.new(#888888, 0)
 if justClosed
-    if slHit
+    if eTp1                     // F4 — tallied here, not while the plan is open.
+        nTp1 := nTp1 + 1
+    if eTp2
+        nTp2 := nTp2 + 1
+    if slHit                    // D2 — four exclusive outcomes.
         if eTp1
             nBE := nBE + 1
         else
@@ -491,12 +574,13 @@ plotshape(not na(tp1Bar) and tp1Bar == bar_index and tradeBuy,      "TP1 hit (lo
 plotshape(not na(tp1Bar) and tp1Bar == bar_index and not tradeBuy,  "TP1 hit (short)", shape.triangledown, location.abovebar, color.new(#00E676, 30), size=size.tiny)
 plotshape(not na(tp2Bar) and tp2Bar == bar_index and tradeBuy,      "TP2 hit (long)",  shape.triangleup,   location.belowbar, color.new(#00E676, 0),  size=size.tiny)
 plotshape(not na(tp2Bar) and tp2Bar == bar_index and not tradeBuy,  "TP2 hit (short)", shape.triangledown, location.abovebar, color.new(#00E676, 0),  size=size.tiny)
-plotshape(buySignal  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
-plotshape(sellSignal and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+plotshape(firedBuy,  "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(firedSell, "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
 bgcolor(inTrend ? color.new(legUp ? #00E676 : #FF1744, 94) : na, title="Regime")
 
 var line  lnEn = na
 var line  lnSl = na
+var line  lnBe = na          // F2 — the stepped breakeven segment.
 var line  lnT1 = na
 var line  lnT2 = na
 var line  lnT3 = na
@@ -506,9 +590,9 @@ var label lbT1 = na
 var label lbT2 = na
 var label lbT3 = na
 var label lbEnd = na
+var bool  beDrawn = false
 
-// Labels keep every price v3.0 showed and append the R beside it. Nothing that
-// was legible before was removed to make room.
+// A1 — labels keep every price v3.0 showed and append R beside it.
 rTxt(float r) =>
     str.tostring(r, "0.00") + "R"
 
@@ -516,6 +600,7 @@ if fired
     if not na(lnSl) and not i_keep
         line.delete(lnEn)
         line.delete(lnSl)
+        line.delete(lnBe)
         line.delete(lnT1)
         line.delete(lnT2)
         line.delete(lnT3)
@@ -525,6 +610,8 @@ if fired
         label.delete(lbT2)
         label.delete(lbT3)
         label.delete(lbEnd)
+    lnBe    := na            // drop the handle so the new plan cannot extend it
+    beDrawn := false
     lnEn := line.new(bar_index, eEntry, bar_index, eEntry, color=color.new(#FFFFFF, 25), style=line.style_dotted)
     lnSl := line.new(bar_index, eSl, bar_index, eSl, color=color.new(#FF1744, 0), width=2)
     lnT1 := line.new(bar_index, eT1, bar_index, eT1, color=color.new(#00E676, 20), style=line.style_dashed)
@@ -538,18 +625,29 @@ if fired
 
 if inTrade and not na(lnSl)
     line.set_x2(lnEn, bar_index)
-    line.set_x2(lnSl, bar_index)
     line.set_x2(lnT1, bar_index)
     line.set_x2(lnT2, bar_index)
     line.set_x2(lnT3, bar_index)
-    line.set_y1(lnSl, eSl)
-    line.set_y2(lnSl, eSl)
+    // F2 — the stop is STEPPED, never rewritten. The red segment stops at the
+    // TP1 bar showing where the stop actually was; an amber segment carries the
+    // breakeven level forward from there. Neither endpoint of lnSl is ever moved
+    // in price, which is the whole point of the fix.
+    if eTp1
+        if not beDrawn
+            line.set_x2(lnSl, bar_index)
+            lnBe := line.new(bar_index, eEntry, bar_index, eEntry, color=color.new(#FFC400, 0), width=2)
+            beDrawn := true
+        else
+            line.set_x2(lnBe, bar_index)
+    else
+        line.set_x2(lnSl, bar_index)
     label.set_x(lbEn, bar_index)
     label.set_x(lbSl, bar_index)
     label.set_y(lbSl, eSl)
-    // After TP1 the stop is at entry, so the remaining risk is 0R — say so rather
-    // than reprinting the original 1R distance next to a breakeven stop.
-    label.set_text(lbSl, eTp1 ? "BE " + str.tostring(eSl, format.mintick) + "  (0.00R at risk)" : "SL " + str.tostring(eSl, format.mintick) + "  (1R = " + str.tostring(eRisk, format.mintick) + ")")
+    // The original stop price stays on the chart in parentheses — the BE move
+    // must not delete the provenance of the number the plan was sized on.
+    label.set_text(lbSl, eTp1 ? "BE " + str.tostring(eSl, format.mintick) + "  (0.00R at risk · orig SL " + str.tostring(eSl0, format.mintick) + ")" : "SL " + str.tostring(eSl, format.mintick) + "  (1R = " + str.tostring(eRisk, format.mintick) + ")")
+    label.set_textcolor(lbSl, eTp1 ? color.new(#FFC400, 0) : color.new(#FF1744, 0))
     if eTp1
         label.set_text(lbT1, "TP1 ✓ " + str.tostring(eT1, format.mintick) + "  " + rTxt(eR1))
     if eTp2
@@ -560,10 +658,13 @@ if inTrade and not na(lnSl)
 
 if justClosed and not na(lnSl)
     line.set_x2(lnEn, bar_index)
-    line.set_x2(lnSl, bar_index)
     line.set_x2(lnT1, bar_index)
     line.set_x2(lnT2, bar_index)
     line.set_x2(lnT3, bar_index)
+    if beDrawn
+        line.set_x2(lnBe, bar_index)
+    else
+        line.set_x2(lnSl, bar_index)
     lbEnd := label.new(bar_index, tradeBuy ? low : high, closeTxt,
          style=tradeBuy ? label.style_label_up : label.style_label_down,
          color=color.new(#000000, 100), textcolor=closeCol, size=fBody)
@@ -585,11 +686,12 @@ if i_dash and barstate.islast
     wht = color.new(#FFFFFF, 0)
     hdr = color.rgb(14, 14, 20)
 
-    nClosed = nTp3 + nBE + nSL + nTime
+    nClosed  = nTp3 + nBE + nSL + nTime
+    scoreBad = i_score > scoreMax    // F6 — a requirement this feed cannot meet
 
     table.cell(dash, 0, 0, "ME SCALP v3.1 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=fHead, text_halign=text.align_left)
     table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
-    table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
+    table.cell(dash, 2, 0, str.tostring(nTrades) + " opened", text_color=dim, text_size=fBody, bgcolor=color.rgb(15, 15, 20))
 
     table.cell(dash, 0, 1, "", text_size=fBody, bgcolor=hdr)
     table.cell(dash, 1, 1, "BUY",  text_color=grn, text_size=fBody, bgcolor=hdr)
@@ -603,19 +705,22 @@ if i_dash and barstate.islast
     table.cell(dash, 1, 3, nBull > 0 ? bullName + " ×" + str.tostring(nBull) : "—", text_color=nBull > 0 ? grn : dim, text_size=fBody)
     table.cell(dash, 2, 3, nBear > 0 ? bearName + " ×" + str.tostring(nBear) : "—", text_color=nBear > 0 ? red : dim, text_size=fBody)
 
-    table.cell(dash, 0, 4, "Score (need " + str.tostring(i_score) + "/4)", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
-    table.cell(dash, 1, 4, str.tostring(scoreBull) + "/4", text_color=scoreBull >= i_score ? grn : dim, text_size=fBody)
-    table.cell(dash, 2, 4, str.tostring(scoreBear) + "/4", text_color=scoreBear >= i_score ? red : dim, text_size=fBody)
+    // F6 — the attainable maximum, not a hardcoded 4.
+    table.cell(dash, 0, 4, "Score — need " + str.tostring(i_score) + "/" + str.tostring(scoreMax) + (volSeen ? "" : "\nno volume feed: max 3"), text_color=scoreBad ? yel : dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
+    table.cell(dash, 1, 4, str.tostring(scoreBull) + "/" + str.tostring(scoreMax), text_color=scoreBad ? yel : (scoreBull >= i_score ? grn : dim), text_size=fBody)
+    table.cell(dash, 2, 4, str.tostring(scoreBear) + "/" + str.tostring(scoreMax), text_color=scoreBad ? yel : (scoreBear >= i_score ? red : dim), text_size=fBody)
 
+    // F8 — with no trigger, bullName/bullInval fall through to a fabricated
+    // sweep entry off this bar's low. Print "—" rather than a number for a setup
+    // that does not exist.
     table.cell(dash, 0, 5, "Risk (× ATR, cap " + str.tostring(MAX_RISK, "0.00") + ")", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
-    table.cell(dash, 1, 5, str.tostring(riskBull / math.max(atr, 1e-9), "0.00"), text_color=riskCapBull ? grn : dim, text_size=fBody)
-    table.cell(dash, 2, 5, str.tostring(riskBear / math.max(atr, 1e-9), "0.00"), text_color=riskCapBear ? red : dim, text_size=fBody)
+    table.cell(dash, 1, 5, nBull > 0 ? str.tostring(riskBull / math.max(atr, 1e-9), "0.00") : "—", text_color=nBull > 0 and riskCapBull ? grn : dim, text_size=fBody)
+    table.cell(dash, 2, 5, nBear > 0 ? str.tostring(riskBear / math.max(atr, 1e-9), "0.00") : "—", text_color=nBear > 0 and riskCapBear ? red : dim, text_size=fBody)
 
-    // Live R of the three targets for a hypothetical entry at this close. Varies
-    // bar to bar because the stop is structural and the targets are ATR-fixed.
-    table.cell(dash, 0, 6, "TP1/2/3 in R" + (i_minR > 0 ? " (need TP3 ≥ " + str.tostring(i_minR, "0.0") + ")" : ""), text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
-    table.cell(dash, 1, 6, str.tostring(r1Bull, "0.00") + " / " + str.tostring(r2Bull, "0.00") + " / " + str.tostring(r3Bull, "0.00"), text_color=minROkBull ? grn : yel, text_size=fBody)
-    table.cell(dash, 2, 6, str.tostring(r1Bear, "0.00") + " / " + str.tostring(r2Bear, "0.00") + " / " + str.tostring(r3Bear, "0.00"), text_color=minROkBear ? red : yel, text_size=fBody)
+    // A1 — live R of the three targets, for a hypothetical entry at this close.
+    table.cell(dash, 0, 6, "TP1/2/3 in R" + (i_minR > 0 ? "\nneed TP3 ≥ " + str.tostring(i_minR, "0.0") : ""), text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
+    table.cell(dash, 1, 6, nBull > 0 ? str.tostring(r1Bull, "0.00") + " / " + str.tostring(r2Bull, "0.00") + " / " + str.tostring(r3Bull, "0.00") : "—", text_color=nBull == 0 ? dim : (minROkBull ? grn : yel), text_size=fBody)
+    table.cell(dash, 2, 6, nBear > 0 ? str.tostring(r1Bear, "0.00") + " / " + str.tostring(r2Bear, "0.00") + " / " + str.tostring(r3Bear, "0.00") : "—", text_color=nBear == 0 ? dim : (minROkBear ? red : yel), text_size=fBody)
 
     table.cell(dash, 0, 7, "Filters", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
     table.cell(dash, 1, 7, not i_useSess ? "session off" : (inSess ? "in session" : "OUT of session"), text_color=not i_useSess ? dim : (inSess ? grn : yel), text_size=fBody)
@@ -623,39 +728,41 @@ if i_dash and barstate.islast
 
     table.cell(dash, 0, 8, "Open plan", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
     table.cell(dash, 1, 8, inTrade ? (tradeBuy ? "LONG " : "SHORT ") + eName + "  " + str.tostring(bar_index - eBar) + "b" + (eTp1 ? "  BE" : "") : "flat", text_color=inTrade ? (tradeBuy ? grn : red) : dim, text_size=fBody)
-    table.cell(dash, 2, 8, inTrade and i_timeStop > 0 ? "close in " + str.tostring(math.max(i_timeStop - (bar_index - eBar), 0)) + "b" : "", text_color=dim, text_size=fBody)
+    // F5 — signals the one-plan-at-a-time rule swallowed, made visible.
+    table.cell(dash, 2, 8, inTrade and i_timeStop > 0 ? "close in " + str.tostring(math.max(i_timeStop - (bar_index - eBar), 0)) + "b" : (nSupp > 0 ? str.tostring(nSupp) + " signal bars skipped\n(a plan was open)" : ""), text_color=dim, text_size=fBody)
 
-    // R of the OPEN plan, frozen at its entry — not the live row above.
+    // A1 — the OPEN plan's R, frozen at its entry. Not the live row above.
     table.cell(dash, 0, 9, "Open plan R", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
     table.cell(dash, 1, 9, inTrade ? str.tostring(eR1, "0.00") + " / " + str.tostring(eR2, "0.00") + " / " + str.tostring(eR3, "0.00") : "—", text_color=inTrade ? wht : dim, text_size=fBody)
     table.cell(dash, 2, 9, inTrade ? "1R = " + str.tostring(eRisk, format.mintick) : "", text_color=dim, text_size=fBody)
 
-    // Denominator stated on the label. nTrades counts plans OPENED, so a plan that
-    // is still open sits in the denominator before it can reach anything.
+    // F4 — numerator and denominator both over CLOSED plans, denominator stated.
     table.cell(dash, 0, 10, "TP1 / TP2 reached", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
-    table.cell(dash, 1, 10, nTrades > 0 ? pctTxt(nTp1, nTrades) + " / " + pctTxt(nTp2, nTrades) : "—", text_color=nTrades == 0 ? dim : wht, text_size=fBody)
-    table.cell(dash, 2, 10, "of " + str.tostring(nTrades) + " opened", text_color=dim, text_size=fBody)
+    table.cell(dash, 1, 10, nClosed > 0 ? pctTxt(nTp1, nClosed) + " / " + pctTxt(nTp2, nClosed) : "—", text_color=nClosed == 0 ? dim : wht, text_size=fBody)
+    table.cell(dash, 2, 10, "of " + str.tostring(nClosed) + " closed", text_color=dim, text_size=fBody)
 
-    // FIX 2. Four counters, mutually exclusive, summing to nClosed — no single
-    // "% win" over a denominator that quietly dropped the TIME exits.
+    // D2 — four exclusive counters summing to nClosed. No single "% win" over a
+    // denominator that quietly dropped the TIME exits.
     table.cell(dash, 0, 11, "Outcome mix", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
     table.cell(dash, 1, 11, "TP3 " + str.tostring(nTp3) + "  ·  BE " + str.tostring(nBE), text_color=nClosed == 0 ? dim : grn, text_size=fBody)
     table.cell(dash, 2, 11, "SL " + str.tostring(nSL) + "  ·  TIME " + str.tostring(nTime), text_color=nClosed == 0 ? dim : red, text_size=fBody)
 
-    table.cell(dash, 0, 12, "of " + str.tostring(nClosed) + " closed", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 0, 12, "of " + str.tostring(nClosed) + " closed\nnot a backtest", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
     table.cell(dash, 1, 12, pctTxt(nTp3, nClosed) + "  ·  " + pctTxt(nBE, nClosed), text_color=nClosed == 0 ? dim : grn, text_size=fBody)
     table.cell(dash, 2, 12, pctTxt(nSL, nClosed) + "  ·  " + pctTxt(nTime, nClosed), text_color=nClosed == 0 ? dim : red, text_size=fBody)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ALERTS
 // ═══════════════════════════════════════════════════════════════════════════════
-// ADDITION 4: trigger name, trigger count, risk in price, and each target's R.
-if buySignal and not inTrade[1]
+// A4 — trigger name, trigger count, risk in price, and each target's R.
+// F3 — gated identically to the chart, so an alert never announces a trade the
+// indicator did not take.
+if firedBuy
     alert("ME Scalp v3.1 BUY | trigger " + bullName + " ×" + str.tostring(nBull) + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBull, format.mintick) + " (1R = " + str.tostring(riskBull, format.mintick) + ") | TP1 " + str.tostring(buyTp1, format.mintick) + " " + rTxt(r1Bull) + " | TP2 " + str.tostring(buyTp2, format.mintick) + " " + rTxt(r2Bull) + " | TP3 " + str.tostring(buyTp3, format.mintick) + " " + rTxt(r3Bull), alert.freq_once_per_bar_close)
-if sellSignal and not inTrade[1]
+if firedSell
     alert("ME Scalp v3.1 SELL | trigger " + bearName + " ×" + str.tostring(nBear) + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBear, format.mintick) + " (1R = " + str.tostring(riskBear, format.mintick) + ") | TP1 " + str.tostring(sellTp1, format.mintick) + " " + rTxt(r1Bear) + " | TP2 " + str.tostring(sellTp2, format.mintick) + " " + rTxt(r2Bear) + " | TP3 " + str.tostring(sellTp3, format.mintick) + " " + rTxt(r3Bear), alert.freq_once_per_bar_close)
 
 // Static text only — Pine does not allow a dynamic message on alertcondition.
-// The detail is in the alert() calls above.
-alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
-alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
+// The detail is in the alert() calls above. Gating now matches them (F3).
+alertcondition(firedBuy,  "ME Scalp — BUY",  "ME Scalp BUY")
+alertcondition(firedSell, "ME Scalp — SELL", "ME Scalp SELL")
