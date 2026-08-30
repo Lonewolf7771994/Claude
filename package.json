@@ -1,0 +1,15 @@
+{
+  "name": "marketflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Live market-flow tool for XAUUSD, WTI/Brent and BTCUSD: order-flow metrics and a depth-persistence liquidity map, with explicit provenance on every number.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "marketflow": "src/cli.js" },
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test tests/"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
