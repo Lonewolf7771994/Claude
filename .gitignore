@@ -29,3 +29,4 @@ memory/
 .claude-flow/metrics/
 .claude-flow/policy/
 .claude-flow/swarm/
+.claude-flow/agents/
