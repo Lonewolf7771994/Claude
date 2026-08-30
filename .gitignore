@@ -3,7 +3,6 @@ node_modules/
 npm-debug.log*
 
 # Ruflo runtime state (generated locally, not source)
-.claude-flow/
 .ruflo/
 .swarm/
 .hive-mind/
@@ -15,3 +14,10 @@ memory/
 .env
 .env.*
 .claude/settings.local.json
+
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/

@@ -13,10 +13,10 @@ Both are declared in [`.mcp.json`](.mcp.json) and enabled in
 [`.claude/settings.json`](.claude/settings.json), so Claude Code picks them up
 automatically when you open this repo.
 
-| Server  | Type  | How it runs                     |
-| ------- | ----- | ------------------------------- |
-| `ruflo` | stdio | `npx -y ruflo@latest mcp start` |
-| `github`| http  | `https://api.githubcopilot.com/mcp/` |
+| Server        | Type  | How it runs                          |
+| ------------- | ----- | ------------------------------------ |
+| `claude-flow` | stdio | `npx -y ruflo@latest mcp start` (59 tools) |
+| `github`      | http  | `https://api.githubcopilot.com/mcp/` |
 
 ### Setup
 
@@ -24,7 +24,7 @@ automatically when you open this repo.
    token read from the environment (nothing secret is stored in this repo):
 
    ```bash
-   export GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token_here
+   export GITHUB_PERSONAL_ACCESS_TOKEN=<your-token>
    ```
 
    Create one at https://github.com/settings/personal-access-tokens with access
@@ -40,19 +40,37 @@ automatically when you open this repo.
 Ruflo needs no install step of its own — `npx` fetches it on first launch.
 To pin it globally instead: `npm install -g ruflo@latest`.
 
-### Optional: the full Ruflo scaffold
+### What's committed
 
-The config above gives you Ruflo's MCP tools. The CLI install additionally
-generates agents, hooks, skills and a daemon into your workspace:
+`npx ruflo@latest init` has already been run here, so the full scaffold is in
+the repo:
+
+| Path                    | Contents                                  |
+| ----------------------- | ----------------------------------------- |
+| `CLAUDE.md`             | Swarm guidance and coordination rules     |
+| `.claude/skills/`       | 30 skills                                 |
+| `.claude/commands/`     | 16 command groups (sparc, swarm, github…) |
+| `.claude/agents/`       | 17 agent definitions                      |
+| `.claude/helpers/`      | Hook handler scripts                      |
+| `.claude-flow/`         | V3 runtime config (`config.yaml`)         |
+| `.agents/skills/ruflo/` | Core skill, discoverable by other agents  |
+
+`.claude/settings.json` enables 7 hook types (PreToolUse, PostToolUse,
+UserPromptSubmit, SessionStart and others) that shell out to
+`.claude/helpers/hook-handler.cjs` on tool calls — that is how Ruflo routes
+tasks and learns in the background. Delete the `hooks` block if you'd rather
+run without it.
+
+Runtime state (`.claude-flow/data/`, `logs/`, `sessions/`) is gitignored.
+
+To re-run or extend the install:
 
 ```bash
-npx ruflo@latest init wizard   # interactive
-npx ruflo@latest init          # non-interactive
+npx ruflo@latest init --force        # regenerate the scaffold
+npx ruflo@latest daemon start        # background workers
+npx ruflo@latest swarm init          # initialize a swarm
+npx skills add ruvnet/ruflo --all    # all 267 plugin skills
 ```
-
-That writes `.claude/`, `.claude-flow/`, `CLAUDE.md` and helper files. The
-generated runtime state is gitignored here; commit whatever parts of the
-scaffold you want tracked.
 
 ### Optional: Claude Code plugins
 
@@ -66,3 +84,17 @@ A lighter path — slash commands and agent definitions, no workspace files:
 
 Note that plugin tools are namespaced `mcp__plugin_ruflo-core_ruflo__*` rather
 than the bare tool names the CLI track uses.
+
+### If the remote GitHub server is blocked
+
+Some networks block `api.githubcopilot.com`. Swap the `github` entry in
+`.mcp.json` for the local server instead:
+
+```json
+"github": {
+  "command": "docker",
+  "args": ["run", "-i", "--rm",
+           "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+           "ghcr.io/github/github-mcp-server"]
+}
+```
