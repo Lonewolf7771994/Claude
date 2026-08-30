@@ -1,9 +1,45 @@
 {
-  "_source": "Financial Modeling Prep — commodities-quote, captured live 2026-08-30T21:00Z",
-  "_note": "Real quotes. NOTE the shape difference from the crypto fixtures: numeric fields are NUMBERS here, and `timestamp` is a UNIX SECONDS integer, not an ISO string. Providers must normalize both shapes to one internal type.",
+  "_source": "Financial Modeling Prep \u2014 commodities-quote, captured live 2026-08-30T21:00Z",
+  "_note": "CONNECTOR-NORMALIZED, NOT A RAW VENDOR RESPONSE - see README.md. Real quotes. NOTE the shape difference from the crypto fixtures: numeric fields are NUMBERS here, and `timestamp` is a UNIX SECONDS integer, not an ISO string. Providers must normalize both shapes to one internal type.",
   "_gap": "WTI (CLUSD) could not be captured: the FMP plan on this connector denies that symbol, and Alpha Vantage's WTI endpoint was out of its 25-request daily quota. Only Brent is present. Do not fabricate a WTI fixture.",
   "quotes": [
-    {"symbol":"GCUSD","name":"Gold Futures","price":4529.9,"changePercentage":-2.87521,"change":-134.1,"volume":268917,"dayLow":4495,"dayHigh":4688,"yearHigh":5626.8,"yearLow":3506,"marketCap":null,"priceAvg50":4238.13,"priceAvg200":4595.86,"exchange":"COMMODITY","open":4656,"previousClose":4664,"timestamp":1787950800},
-    {"symbol":"BZUSD","name":"Brent Crude Oil","price":88.1,"changePercentage":-0.47447,"change":-0.42,"volume":25962,"dayLow":87.27,"dayHigh":88.72,"yearHigh":119.4,"yearLow":58.72,"marketCap":null,"priceAvg50":84.02,"priceAvg200":87.01,"exchange":"COMMODITY","open":88.6,"previousClose":88.52,"timestamp":1787950801}
+    {
+      "symbol": "GCUSD",
+      "name": "Gold Futures",
+      "price": 4529.9,
+      "changePercentage": -2.87521,
+      "change": -134.1,
+      "volume": 268917,
+      "dayLow": 4495,
+      "dayHigh": 4688,
+      "yearHigh": 5626.8,
+      "yearLow": 3506,
+      "marketCap": null,
+      "priceAvg50": 4238.13,
+      "priceAvg200": 4595.86,
+      "exchange": "COMMODITY",
+      "open": 4656,
+      "previousClose": 4664,
+      "timestamp": 1787950800
+    },
+    {
+      "symbol": "BZUSD",
+      "name": "Brent Crude Oil",
+      "price": 88.1,
+      "changePercentage": -0.47447,
+      "change": -0.42,
+      "volume": 25962,
+      "dayLow": 87.27,
+      "dayHigh": 88.72,
+      "yearHigh": 119.4,
+      "yearLow": 58.72,
+      "marketCap": null,
+      "priceAvg50": 84.02,
+      "priceAvg200": 87.01,
+      "exchange": "COMMODITY",
+      "open": 88.6,
+      "previousClose": 88.52,
+      "timestamp": 1787950801
+    }
   ]
 }
