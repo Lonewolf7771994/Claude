@@ -9,6 +9,11 @@ This repo is wired up for [Ruflo](https://github.com/ruvnet/ruflo) (`ruflo` on n
 an agent meta-harness for Claude Code, with the GitHub MCP server registered
 alongside it as a connector.
 
+The GitHub entry is named `github-remote` rather than `github` on purpose: some
+Claude Code environments (Claude Code on the web, for one) already provide their
+own `github` MCP server, and a project entry with the same name shadows it —
+knocking out working GitHub tools. The distinct name lets both coexist.
+
 Both are declared in [`.mcp.json`](.mcp.json) and enabled in
 [`.claude/settings.json`](.claude/settings.json), so Claude Code picks them up
 automatically when you open this repo.
@@ -16,7 +21,7 @@ automatically when you open this repo.
 | Server        | Type  | How it runs                          |
 | ------------- | ----- | ------------------------------------ |
 | `claude-flow` | stdio | `npx -y ruflo@latest mcp start` (59 tools) |
-| `github`      | http  | `https://api.githubcopilot.com/mcp/` |
+| `github-remote` | http | `https://api.githubcopilot.com/mcp/` |
 
 ### Setup
 
@@ -87,11 +92,11 @@ than the bare tool names the CLI track uses.
 
 ### If the remote GitHub server is blocked
 
-Some networks block `api.githubcopilot.com`. Swap the `github` entry in
+Some networks block `api.githubcopilot.com`. Swap the `github-remote` entry in
 `.mcp.json` for the local server instead:
 
 ```json
-"github": {
+"github-remote": {
   "command": "docker",
   "args": ["run", "-i", "--rm",
            "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",

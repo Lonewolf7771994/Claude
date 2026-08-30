@@ -285,6 +285,6 @@
   },
   "enabledMcpjsonServers": [
     "claude-flow",
-    "github"
+    "github-remote"
   ]
 }
