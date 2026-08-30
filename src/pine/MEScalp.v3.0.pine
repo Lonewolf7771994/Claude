@@ -1,0 +1,392 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © ME Institutional — ME Scalp v3.0
+//@version=6
+indicator("ME Scalp v3.0", shorttitle="ME Scalp v3.0", overlay=true, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+var string G_ENG  = "══ Engine ══"
+var string G_TRIG = "══ Triggers ══"
+var string G_RISK = "══ Risk & Targets ══"
+var string G_DISP = "══ Display ══"
+
+i_freq = input.string("Standard", "Frequency", options=["Selective", "Standard", "High"], group=G_ENG)
+i_dir  = input.string("Both", "Direction", options=["Both", "Long only", "Short only"], group=G_ENG)
+i_erLen = input.int(30, "Regime Lookback (bars)", minval=5, maxval=100, group=G_ENG)
+i_score = input.int(1, "Quality Score Required (of 4)", minval=0, maxval=4, group=G_ENG)
+
+i_useMss   = input.bool(true, "MSS — break of the last pivot", group=G_TRIG)
+i_useFvg   = input.bool(true, "FVG retest", group=G_TRIG)
+i_useSweep = input.bool(true, "Liquidity sweep + reclaim", group=G_TRIG)
+
+i_pad      = input.float(0.45, "Stop Clearance Beyond Invalidation (× ATR)", minval=0.0, maxval=2.0, step=0.05, group=G_RISK)
+i_breakPad = input.float(0.20, "Extra Clearance for MSS Breaks (× ATR)", minval=0.0, maxval=1.5, step=0.05, group=G_RISK)
+i_tp1      = input.float(0.8, "TP1 (× ATR)", minval=0.2, maxval=5.0, step=0.1, group=G_RISK)
+i_tp2      = input.float(1.4, "TP2 (× ATR)", minval=0.3, maxval=8.0, step=0.1, group=G_RISK)
+i_tp3      = input.float(2.0, "TP3 (× ATR)", minval=0.4, maxval=12.0, step=0.1, group=G_RISK)
+i_timeStop = input.int(12, "Time Stop (bars, 0 = off)", minval=0, maxval=200, group=G_RISK)
+
+i_dash = input.bool(true, "Show dashboard", group=G_DISP)
+i_font = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal", "Large"], group=G_DISP)
+i_keep = input.bool(true, "Keep completed plans on the chart", group=G_DISP)
+
+fBody = i_font == "Large" ? size.large : i_font == "Normal" ? size.normal : i_font == "Small" ? size.small : size.tiny
+fHead = i_font == "Large" ? size.huge : i_font == "Normal" ? size.large : i_font == "Small" ? size.normal : size.small
+
+erMin      = i_freq == "High" ? 0.25 : i_freq == "Standard" ? 0.32 : 0.40
+allowLong  = i_dir != "Short only"
+allowShort = i_dir != "Long only"
+
+MIN_RISK   = 0.40
+MAX_RISK   = 4.00
+COOLDOWN   = 3
+BE_AFTER_1 = true
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE SERIES
+// ═══════════════════════════════════════════════════════════════════════════════
+atr      = ta.atr(14)
+range_   = math.max(high - low, 1e-9)
+closePos = (close - low) / range_
+body     = math.abs(close - open)
+conf     = barstate.isconfirmed
+
+var bool volSeen = false
+if nz(volume) > 0
+    volSeen := true
+volAvg = ta.sma(nz(volume[1]), 20)
+relVol = volSeen ? nz(volume) / math.max(volAvg, 1e-9) : 1.0
+
+erNet    = math.abs(close - close[i_erLen])
+erPath   = math.sum(math.abs(close - close[1]), i_erLen)
+effRatio = erPath > 0 ? erNet / erPath : 0.0
+legUp    = close > close[i_erLen]
+inTrend  = effRatio >= erMin
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, 2, 2)
+pl = ta.pivotlow(low, 2, 2)
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+sph = ta.pivothigh(high, 5, 5)
+spl = ta.pivotlow(low, 5, 5)
+var float sweepHi = na
+var float sweepLo = na
+if not na(sph)
+    sweepHi := sph
+if not na(spl)
+    sweepLo := spl
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAIR VALUE GAPS
+// ═══════════════════════════════════════════════════════════════════════════════
+var array<float> gapBullTop = array.new_float()
+var array<float> gapBullBot = array.new_float()
+var array<int>   gapBullBar = array.new_int()
+var array<float> gapBearTop = array.new_float()
+var array<float> gapBearBot = array.new_float()
+var array<int>   gapBearBar = array.new_int()
+
+if conf
+    if low > high[2] and (low - high[2]) >= atr * 0.10
+        array.push(gapBullTop, low)
+        array.push(gapBullBot, high[2])
+        array.push(gapBullBar, bar_index)
+    if high < low[2] and (low[2] - high) >= atr * 0.10
+        array.push(gapBearTop, low[2])
+        array.push(gapBearBot, high)
+        array.push(gapBearBar, bar_index)
+    if array.size(gapBullBar) > 0
+        for k = array.size(gapBullBar) - 1 to 0
+            if close < array.get(gapBullBot, k) or bar_index - array.get(gapBullBar, k) > 60
+                array.remove(gapBullTop, k)
+                array.remove(gapBullBot, k)
+                array.remove(gapBullBar, k)
+    if array.size(gapBearBar) > 0
+        for k = array.size(gapBearBar) - 1 to 0
+            if close > array.get(gapBearTop, k) or bar_index - array.get(gapBearBar, k) > 60
+                array.remove(gapBearTop, k)
+                array.remove(gapBearBot, k)
+                array.remove(gapBearBar, k)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRIGGERS
+// ═══════════════════════════════════════════════════════════════════════════════
+mssBull = conf and i_useMss and not na(lastPH) and close >= lastPH + atr * 0.08 and close[1] < lastPH
+mssBear = conf and i_useMss and not na(lastPL) and close <= lastPL - atr * 0.08 and close[1] > lastPL
+
+fvgBull = false
+float fvgBullInv = na
+if conf and i_useFvg and array.size(gapBullBar) > 0
+    for k = array.size(gapBullBar) - 1 to 0
+        if low <= array.get(gapBullTop, k) and close >= array.get(gapBullBot, k) and closePos >= 0.55
+            fvgBull := true
+            fvgBullInv := array.get(gapBullBot, k)
+            break
+fvgBear = false
+float fvgBearInv = na
+if conf and i_useFvg and array.size(gapBearBar) > 0
+    for k = array.size(gapBearBar) - 1 to 0
+        if high >= array.get(gapBearBot, k) and close <= array.get(gapBearTop, k) and closePos <= 0.45
+            fvgBear := true
+            fvgBearInv := array.get(gapBearTop, k)
+            break
+
+swBull = conf and i_useSweep and not na(sweepLo) and (sweepLo - low) >= atr * 0.35 and close > sweepLo and closePos >= 0.55
+swBear = conf and i_useSweep and not na(sweepHi) and (high - sweepHi) >= atr * 0.35 and close < sweepHi and closePos <= 0.45
+
+nBull = (mssBull ? 1 : 0) + (fvgBull ? 1 : 0) + (swBull ? 1 : 0)
+nBear = (mssBear ? 1 : 0) + (fvgBear ? 1 : 0) + (swBear ? 1 : 0)
+
+bullName = mssBull ? "MSS" : fvgBull ? "FVG" : "SWEEP"
+bearName = mssBear ? "MSS" : fvgBear ? "FVG" : "SWEEP"
+bullInval = mssBull ? (na(lastPL) ? low : lastPL) : fvgBull ? fvgBullInv : low
+bearInval = mssBear ? (na(lastPH) ? high : lastPH) : fvgBear ? fvgBearInv : high
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUALITY SCORE
+// ═══════════════════════════════════════════════════════════════════════════════
+sPart  = relVol >= 1.15 ? 1 : 0
+sBody  = body >= atr * 0.45 ? 1 : 0
+scoreBull = sPart + sBody + (closePos >= 0.65 ? 1 : 0) + (nBull >= 2 ? 1 : 0)
+scoreBear = sPart + sBody + (closePos <= 0.35 ? 1 : 0) + (nBear >= 2 ? 1 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THE STOP
+// ═══════════════════════════════════════════════════════════════════════════════
+padBull = atr * (i_pad + (bullName == "MSS" ? i_breakPad : 0.0))
+padBear = atr * (i_pad + (bearName == "MSS" ? i_breakPad : 0.0))
+slBull  = math.min(bullInval, close - atr * MIN_RISK) - padBull
+slBear  = math.max(bearInval, close + atr * MIN_RISK) + padBear
+riskBull = close - slBull
+riskBear = slBear - close
+riskOkBull = riskBull >= atr * MIN_RISK * 0.5 and riskBull <= atr * MAX_RISK
+riskOkBear = riskBear >= atr * MIN_RISK * 0.5 and riskBear <= atr * MAX_RISK
+
+buyTp1  = close + atr * i_tp1
+buyTp2  = close + atr * i_tp2
+buyTp3  = close + atr * i_tp3
+sellTp1 = close - atr * i_tp1
+sellTp2 = close - atr * i_tp2
+sellTp3 = close - atr * i_tp3
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL
+// ═══════════════════════════════════════════════════════════════════════════════
+var int lastSigBar = -100000
+coolOk = bar_index - lastSigBar >= COOLDOWN
+buySignal  = nBull > 0 and allowLong  and close > open and coolOk and riskOkBull and scoreBull >= i_score and inTrend and legUp
+sellSignal = nBear > 0 and allowShort and close < open and coolOk and riskOkBear and scoreBear >= i_score and inTrend and not legUp
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRADE STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+var bool   inTrade  = false
+var bool   tradeBuy = false
+var float  eEntry   = na
+var float  eSl      = na
+var float  eT1      = na
+var float  eT2      = na
+var float  eT3      = na
+var int    eBar     = na
+var bool   eTp1     = false
+var bool   eTp2     = false
+var string eName    = ""
+var int    nTrades  = 0
+var int    nTp1     = 0
+var int    nTp2     = 0
+var int    nWin     = 0
+var int    nLoss    = 0
+var int    tp1Bar   = na
+var int    tp2Bar   = na
+
+fired = (buySignal or sellSignal) and not inTrade
+if fired
+    inTrade  := true
+    tradeBuy := buySignal
+    eEntry   := close
+    eSl      := buySignal ? slBull : slBear
+    eT1      := buySignal ? buyTp1 : sellTp1
+    eT2      := buySignal ? buyTp2 : sellTp2
+    eT3      := buySignal ? buyTp3 : sellTp3
+    eBar     := bar_index
+    eTp1     := false
+    eTp2     := false
+    eName    := buySignal ? bullName : bearName
+    lastSigBar := bar_index
+    nTrades  := nTrades + 1
+
+slHit  = false
+tpHit  = false
+timeUp = false
+if inTrade and conf and bar_index > eBar
+    slHit := tradeBuy ? low <= eSl : high >= eSl
+    if not eTp1
+        bool t1 = tradeBuy ? high >= eT1 : low <= eT1
+        if t1 and not slHit
+            eTp1   := true
+            tp1Bar := bar_index
+            nTp1   := nTp1 + 1
+            if BE_AFTER_1
+                eSl := eEntry
+    if not eTp2
+        bool t2 = tradeBuy ? high >= eT2 : low <= eT2
+        if t2 and not slHit
+            eTp2   := true
+            tp2Bar := bar_index
+            nTp2   := nTp2 + 1
+    tpHit  := tradeBuy ? high >= eT3 : low <= eT3
+    timeUp := i_timeStop > 0 and (bar_index - eBar) >= i_timeStop
+
+justClosed = inTrade and (slHit or tpHit or timeUp)
+legTxt   = eTp2 ? "TP2 ✓ " : eTp1 ? "TP1 ✓ " : ""
+closeTxt = tpHit ? "TP3 ✓" : slHit ? (eTp1 ? legTxt + "→ BE" : "SL ✕") : legTxt + "TIME"
+closeCol = tpHit ? color.new(#00E676, 0) : slHit and eTp1 ? color.new(#FFC400, 0) : slHit ? color.new(#FF1744, 0) : color.new(#888888, 0)
+if justClosed
+    if tpHit or (slHit and eTp1)
+        nWin := nWin + 1
+    else if slHit
+        nLoss := nLoss + 1
+    inTrade := false
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING
+// ═══════════════════════════════════════════════════════════════════════════════
+plotshape(not na(tp1Bar) and tp1Bar == bar_index and tradeBuy,      "TP1 hit (long)",  shape.triangleup,   location.belowbar, color.new(#00E676, 30), size=size.tiny)
+plotshape(not na(tp1Bar) and tp1Bar == bar_index and not tradeBuy,  "TP1 hit (short)", shape.triangledown, location.abovebar, color.new(#00E676, 30), size=size.tiny)
+plotshape(not na(tp2Bar) and tp2Bar == bar_index and tradeBuy,      "TP2 hit (long)",  shape.triangleup,   location.belowbar, color.new(#00E676, 0),  size=size.tiny)
+plotshape(not na(tp2Bar) and tp2Bar == bar_index and not tradeBuy,  "TP2 hit (short)", shape.triangledown, location.abovebar, color.new(#00E676, 0),  size=size.tiny)
+plotshape(buySignal  and not inTrade[1], "BUY",  shape.labelup,   location.belowbar, color.new(#00E676, 0), text="BUY",  textcolor=color.white, size=size.small)
+plotshape(sellSignal and not inTrade[1], "SELL", shape.labeldown, location.abovebar, color.new(#FF1744, 0), text="SELL", textcolor=color.white, size=size.small)
+bgcolor(inTrend ? color.new(legUp ? #00E676 : #FF1744, 94) : na, title="Regime")
+
+var line  lnEn = na
+var line  lnSl = na
+var line  lnT1 = na
+var line  lnT2 = na
+var line  lnT3 = na
+var label lbEn = na
+var label lbSl = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+var label lbEnd = na
+
+if fired
+    if not na(lnSl) and not i_keep
+        line.delete(lnEn)
+        line.delete(lnSl)
+        line.delete(lnT1)
+        line.delete(lnT2)
+        line.delete(lnT3)
+        label.delete(lbEn)
+        label.delete(lbSl)
+        label.delete(lbT1)
+        label.delete(lbT2)
+        label.delete(lbT3)
+        label.delete(lbEnd)
+    lnEn := line.new(bar_index, eEntry, bar_index, eEntry, color=color.new(#FFFFFF, 25), style=line.style_dotted)
+    lnSl := line.new(bar_index, eSl, bar_index, eSl, color=color.new(#FF1744, 0), width=2)
+    lnT1 := line.new(bar_index, eT1, bar_index, eT1, color=color.new(#00E676, 20), style=line.style_dashed)
+    lnT2 := line.new(bar_index, eT2, bar_index, eT2, color=color.new(#00E676, 40), style=line.style_dashed)
+    lnT3 := line.new(bar_index, eT3, bar_index, eT3, color=color.new(#00E676, 60), style=line.style_dashed)
+    lbEn := label.new(bar_index, eEntry, "ENTRY " + str.tostring(eEntry, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#FFFFFF, 0), size=fBody)
+    lbSl := label.new(bar_index, eSl, "SL " + str.tostring(eSl, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#FF1744, 0), size=fBody)
+    lbT1 := label.new(bar_index, eT1, "TP1 " + str.tostring(eT1, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 0), size=fBody)
+    lbT2 := label.new(bar_index, eT2, "TP2 " + str.tostring(eT2, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 20), size=fBody)
+    lbT3 := label.new(bar_index, eT3, "TP3 " + str.tostring(eT3, format.mintick), style=label.style_label_left, color=color.new(#000000, 100), textcolor=color.new(#00E676, 40), size=fBody)
+
+if inTrade and not na(lnSl)
+    line.set_x2(lnEn, bar_index)
+    line.set_x2(lnSl, bar_index)
+    line.set_x2(lnT1, bar_index)
+    line.set_x2(lnT2, bar_index)
+    line.set_x2(lnT3, bar_index)
+    line.set_y1(lnSl, eSl)
+    line.set_y2(lnSl, eSl)
+    label.set_x(lbEn, bar_index)
+    label.set_x(lbSl, bar_index)
+    label.set_y(lbSl, eSl)
+    label.set_text(lbSl, (eTp1 ? "BE " : "SL ") + str.tostring(eSl, format.mintick))
+    if eTp1
+        label.set_text(lbT1, "TP1 ✓ " + str.tostring(eT1, format.mintick))
+    if eTp2
+        label.set_text(lbT2, "TP2 ✓ " + str.tostring(eT2, format.mintick))
+    label.set_x(lbT1, bar_index)
+    label.set_x(lbT2, bar_index)
+    label.set_x(lbT3, bar_index)
+
+if justClosed and not na(lnSl)
+    line.set_x2(lnEn, bar_index)
+    line.set_x2(lnSl, bar_index)
+    line.set_x2(lnT1, bar_index)
+    line.set_x2(lnT2, bar_index)
+    line.set_x2(lnT3, bar_index)
+    lbEnd := label.new(bar_index, tradeBuy ? low : high, closeTxt,
+         style=tradeBuy ? label.style_label_up : label.style_label_down,
+         color=color.new(#000000, 100), textcolor=closeCol, size=fBody)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════
+var table dash = na
+if i_dash and barstate.islast
+    if na(dash)
+        dash := table.new(position.top_right, 3, 8, bgcolor=color.rgb(10, 10, 15, 5), border_width=1, border_color=color.rgb(40, 40, 50))
+    grn = color.new(#00E676, 0)
+    red = color.new(#FF1744, 0)
+    dim = color.new(#888888, 0)
+    yel = color.new(#FFC400, 0)
+    wht = color.new(#FFFFFF, 0)
+    hdr = color.rgb(14, 14, 20)
+
+    table.cell(dash, 0, 0, "ME SCALP v3.0 — " + str.upper(i_freq), text_color=wht, bgcolor=color.rgb(15, 15, 20), text_size=fHead, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "", bgcolor=color.rgb(15, 15, 20))
+    table.cell(dash, 2, 0, "", bgcolor=color.rgb(15, 15, 20))
+
+    table.cell(dash, 0, 1, "", text_size=fBody, bgcolor=hdr)
+    table.cell(dash, 1, 1, "BUY",  text_color=grn, text_size=fBody, bgcolor=hdr)
+    table.cell(dash, 2, 1, "SELL", text_color=red, text_size=fBody, bgcolor=hdr)
+
+    table.cell(dash, 0, 2, "Regime (ER≥" + str.tostring(erMin, "#.00") + ")", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
+    table.cell(dash, 1, 2, (inTrend ? (legUp ? "TREND ▲" : "TREND ▼") : "CHOP") + "  " + str.tostring(math.round(effRatio, 2)), text_color=inTrend ? (legUp ? grn : red) : yel, text_size=fBody)
+    table.cell(dash, 2, 2, inTrend ? (legUp ? "longs only" : "shorts only") : "standing aside", text_color=dim, text_size=fBody)
+
+    table.cell(dash, 0, 3, "Trigger", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
+    table.cell(dash, 1, 3, nBull > 0 ? bullName + " ×" + str.tostring(nBull) : "—", text_color=nBull > 0 ? grn : dim, text_size=fBody)
+    table.cell(dash, 2, 3, nBear > 0 ? bearName + " ×" + str.tostring(nBear) : "—", text_color=nBear > 0 ? red : dim, text_size=fBody)
+
+    table.cell(dash, 0, 4, "Score (need " + str.tostring(i_score) + "/4)", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
+    table.cell(dash, 1, 4, str.tostring(scoreBull) + "/4", text_color=scoreBull >= i_score ? grn : dim, text_size=fBody)
+    table.cell(dash, 2, 4, str.tostring(scoreBear) + "/4", text_color=scoreBear >= i_score ? red : dim, text_size=fBody)
+
+    table.cell(dash, 0, 5, "Risk (× ATR)", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=hdr)
+    table.cell(dash, 1, 5, str.tostring(math.round(riskBull / math.max(atr, 1e-9), 2)), text_color=riskOkBull ? grn : dim, text_size=fBody)
+    table.cell(dash, 2, 5, str.tostring(math.round(riskBear / math.max(atr, 1e-9), 2)), text_color=riskOkBear ? red : dim, text_size=fBody)
+
+    table.cell(dash, 0, 6, "Open trade", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 6, inTrade ? (tradeBuy ? "LONG " : "SHORT ") + eName + "  " + str.tostring(bar_index - eBar) + "b" + (eTp1 ? "  BE" : "") : "flat", text_color=inTrade ? (tradeBuy ? grn : red) : dim, text_size=fBody)
+    table.cell(dash, 2, 6, inTrade and i_timeStop > 0 ? "close in " + str.tostring(math.max(i_timeStop - (bar_index - eBar), 0)) + "b" : "", text_color=dim, text_size=fBody)
+
+    table.cell(dash, 0, 7, "TP1 / TP2 reach", text_color=dim, text_size=fBody, text_halign=text.align_left, bgcolor=color.rgb(15, 15, 22))
+    table.cell(dash, 1, 7, nTrades > 0 ? str.tostring(math.round(100.0 * nTp1 / nTrades)) + "% / " + str.tostring(math.round(100.0 * nTp2 / nTrades)) + "%" : "—", text_color=nTrades == 0 ? dim : (nTp1 * 2 >= nTrades ? grn : yel), text_size=fBody)
+    table.cell(dash, 2, 7, str.tostring(nTrades) + " trades" + (nWin + nLoss > 0 ? "  " + str.tostring(math.round(100.0 * nWin / (nWin + nLoss))) + "% win" : ""), text_color=wht, text_size=fBody)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+if buySignal and not inTrade[1]
+    alert("ME Scalp BUY " + bullName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBull, format.mintick) + " | TP " + str.tostring(buyTp1, format.mintick) + " / " + str.tostring(buyTp2, format.mintick) + " / " + str.tostring(buyTp3, format.mintick), alert.freq_once_per_bar_close)
+if sellSignal and not inTrade[1]
+    alert("ME Scalp SELL " + bearName + " | entry " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slBear, format.mintick) + " | TP " + str.tostring(sellTp1, format.mintick) + " / " + str.tostring(sellTp2, format.mintick) + " / " + str.tostring(sellTp3, format.mintick), alert.freq_once_per_bar_close)
+
+alertcondition(buySignal,  "ME Scalp — BUY",  "ME Scalp BUY")
+alertcondition(sellSignal, "ME Scalp — SELL", "ME Scalp SELL")
