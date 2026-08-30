@@ -1,0 +1,11 @@
+{
+  "name": "tradingview-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for TradingView charts plus real market data from Crypto.com and Alpha Vantage",
+  "type": "module",
+  "bin": { "tradingview-mcp": "./server.js" },
+  "main": "./server.js",
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test/*.test.js", "start": "node server.js" },
+  "license": "MIT"
+}
