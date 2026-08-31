@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "tradingview": {
+      "command": "node",
+      "args": ["tradingview-mcp/server.js"],
+      "env": {
+        "ALPHAVANTAGE_API_KEY": "${ALPHAVANTAGE_API_KEY:-}"
+      }
+    },
+    "tradingview-desktop": {
+      "command": "node",
+      "args": ["tradingview-desktop-mcp/src/server.js"],
+      "env": {
+        "TV_CDP_HOST": "${TV_CDP_HOST:-127.0.0.1}",
+        "TV_CDP_PORT": "${TV_CDP_PORT:-9222}"
+      }
+    }
+  }
+}
